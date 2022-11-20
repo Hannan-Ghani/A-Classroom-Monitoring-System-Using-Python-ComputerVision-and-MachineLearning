@@ -49,4 +49,4 @@ For this purpose I used ResMaskingNet + 6 model which was pretrained to detect 6
 
 ## GUI
 
-The gui was made using windows forms and was connected to the python program using C#.
+The gui was made using windows forms and was connected to the python program using C#. PythonOnlyScript.py was connected with the gui keeping all trained models on device.
