@@ -1,0 +1,73 @@
+const express = require('express');
+const fs = require('fs');
+const diff = require('deep-diff').diff;
+const app = express();
+const port = 3000;
+
+// Function to read JSON data from a file
+const readJsonFromFile = (filePath) => {
+  try {
+    const fileContent = fs.readFileSync(filePath, 'utf8');
+    return JSON.parse(fileContent);
+  } catch (error) {
+    console.error(`Error reading JSON file ${filePath}:`, error);
+    process.exit(1);
+  }
+};
+
+// Function to generate HTML content for the comparison
+const generateComparisonHtml = (oldJson, newJson, differences) => {
+  // Convert JSON objects to formatted strings for display
+  const oldJsonString = JSON.stringify(oldJson, null, 2);
+  const newJsonString = JSON.stringify(newJson, null, 2);
+
+  // Generate HTML content
+  const htmlContent = `
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>JSON Comparison</title>
+  <style>
+    body { font-family: Arial, sans-serif; }
+    .json-container { display: flex; }
+    .json-box { border: 1px solid #ccc; margin: 10px; padding: 10px; width: 50%; }
+    .json-box pre { white-space: pre-wrap; word-wrap: break-word; }
+    .difference { background-color: #ffcccc; }
+  </style>
+</head>
+<body>
+  <div class="json-container">
+    <div class="json-box">
+      <h2>Original JSON</h2>
+      <pre>${oldJsonString}</pre>
+    </div>
+    <div class="json-box">
+      <h2>Modified JSON</h2>
+      <pre>${newJsonString}</pre>
+    </div>
+  </div>
+  <div class="differences">
+    <h2>Differences</h2>
+    <pre>${JSON.stringify(differences, null, 2)}</pre>
+  </div>
+</body>
+</html>
+`;
+  return htmlContent;
+};
+
+// Endpoint to serve the comparison page
+app.get('/', (req, res) => {
+  const oldJson = readJsonFromFile('oldData.json'); // Replace with your actual file path
+  const newJson = readJsonFromFile('newData.json'); // Replace with your actual file path
+  const differences = diff(oldJson, newJson);
+
+  const htmlContent = generateComparisonHtml(oldJson, newJson, differences);
+  res.send(htmlContent);
+});
+
+// Start the server
+app.listen(port, () => {
+  console.log(`Server running at http://localhost:${port}`);
+});
