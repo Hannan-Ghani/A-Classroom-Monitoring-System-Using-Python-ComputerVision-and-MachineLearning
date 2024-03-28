@@ -1,79 +1,54 @@
 const fs = require('fs');
-const diff = require('deep-diff').diff;
+const { diffString } = require('json-diff');
 
-// Function to load JSON data from a file
-const loadJsonFile = (filePath) => {
+// Function to read JSON data from a file
+const readJsonFromFile = (filePath) => {
   try {
     const fileContent = fs.readFileSync(filePath, 'utf8');
     return JSON.parse(fileContent);
   } catch (error) {
-    console.error('Error reading JSON file:', error);
+    console.error(`Error reading JSON file ${filePath}:`, error);
     process.exit(1);
   }
 };
 
-// Function to generate an HTML table row
-const generateTableRow = (difference) => {
-  const { kind, path, lhs, rhs } = difference;
-  return `
-    <tr>
-      <td>${kind}</td>
-      <td>${path ? path.join('.') : ''}</td>
-      <td>${lhs !== undefined ? JSON.stringify(lhs, null, 2) : ''}</td>
-      <td>${rhs !== undefined ? JSON.stringify(rhs, null, 2) : ''}</td>
-    </tr>
-  `;
+// Function to write HTML content to a file
+const writeHtmlToFile = (htmlContent, filePath) => {
+  try {
+    fs.writeFileSync(filePath, htmlContent, 'utf8');
+    console.log(`HTML output written to ${filePath}`);
+  } catch (error) {
+    console.error(`Error writing HTML file ${filePath}:`, error);
+    process.exit(1);
+  }
 };
 
-// Function to generate the full HTML table
-const generateTable = (differences) => {
-  const rows = differences.map(generateTableRow).join('');
-  return `
-    <table border="1">
-      <thead>
-        <tr>
-          <th>Change Type</th>
-          <th>Path</th>
-          <th>Old Value</th>
-          <th>New Value</th>
-        </tr>
-      </thead>
-      <tbody>${rows}</tbody>
-    </table>
-  `;
-};
-
-// Main script
-const oldData = loadJsonFile('oldData.json');
-const newData = loadJsonFile('newData.json');
-const differences = diff(oldData, newData);
-
-const htmlContent = `
+// Function to generate an HTML page with colored diff output
+const generateHtmlDiffPage = (oldJson, newJson) => {
+  const diffOutput = diffString(oldJson, newJson);
+  const htmlContent = `
 <!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>JSON Comparison Result</title>
+  <title>JSON Diff Output</title>
   <style>
-    table {
-      width: 100%;
-      border-collapse: collapse;
-    }
-    th, td {
-      padding: 8px;
-      text-align: left;
-      border: 1px solid #ddd;
-    }
-    th {
-      background-color: #f2f2f2;
-    }
+    .diff { white-space: pre; font-family: monospace; }
+    .d2h-ins { background-color: #e6ffe6; }
+    .d2h-del { background-color: #ffeef0; }
   </style>
 </head>
 <body>
-  ${generateTable(differences)}
+  <div class="diff">${diffOutput}</div>
 </body>
 </html>
 `;
+  return htmlContent;
+};
 
-fs.writeFileSync('comparisonResult.html', htmlContent);
-console.log('Comparison complete. Results saved to comparisonResult.html');
+// Main script
+const oldJson = readJsonFromFile('oldData.json');
+const newJson = readJsonFromFile('newData.json');
+const htmlDiffPage = generateHtmlDiffPage(oldJson, newJson);
+
+writeHtmlToFile(htmlDiffPage, 'diffOutput.html');
