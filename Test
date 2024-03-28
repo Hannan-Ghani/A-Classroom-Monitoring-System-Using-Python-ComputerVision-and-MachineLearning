@@ -1,0 +1,79 @@
+const fs = require('fs');
+const diff = require('deep-diff').diff;
+
+// Function to load JSON data from a file
+const loadJsonFile = (filePath) => {
+  try {
+    const fileContent = fs.readFileSync(filePath, 'utf8');
+    return JSON.parse(fileContent);
+  } catch (error) {
+    console.error('Error reading JSON file:', error);
+    process.exit(1);
+  }
+};
+
+// Function to generate an HTML table row
+const generateTableRow = (difference) => {
+  const { kind, path, lhs, rhs } = difference;
+  return `
+    <tr>
+      <td>${kind}</td>
+      <td>${path ? path.join('.') : ''}</td>
+      <td>${lhs !== undefined ? JSON.stringify(lhs, null, 2) : ''}</td>
+      <td>${rhs !== undefined ? JSON.stringify(rhs, null, 2) : ''}</td>
+    </tr>
+  `;
+};
+
+// Function to generate the full HTML table
+const generateTable = (differences) => {
+  const rows = differences.map(generateTableRow).join('');
+  return `
+    <table border="1">
+      <thead>
+        <tr>
+          <th>Change Type</th>
+          <th>Path</th>
+          <th>Old Value</th>
+          <th>New Value</th>
+        </tr>
+      </thead>
+      <tbody>${rows}</tbody>
+    </table>
+  `;
+};
+
+// Main script
+const oldData = loadJsonFile('oldData.json');
+const newData = loadJsonFile('newData.json');
+const differences = diff(oldData, newData);
+
+const htmlContent = `
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>JSON Comparison Result</title>
+  <style>
+    table {
+      width: 100%;
+      border-collapse: collapse;
+    }
+    th, td {
+      padding: 8px;
+      text-align: left;
+      border: 1px solid #ddd;
+    }
+    th {
+      background-color: #f2f2f2;
+    }
+  </style>
+</head>
+<body>
+  ${generateTable(differences)}
+</body>
+</html>
+`;
+
+fs.writeFileSync('comparisonResult.html', htmlContent);
+console.log('Comparison complete. Results saved to comparisonResult.html');
