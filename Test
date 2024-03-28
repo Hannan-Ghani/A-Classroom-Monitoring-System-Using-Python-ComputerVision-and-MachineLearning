@@ -1,65 +1,41 @@
 const fs = require('fs');
-const { deepEqual } = require('fast-deep-equal');
+const diff = require('json-diff').diff; // Import the diff function
 
-// Function to read JSON file
-const readJSONFile = (filePath) => {
-  return new Promise((resolve, reject) => {
-    fs.readFile(filePath, 'utf8', (err, data) => {
-      if (err) {
-        reject(err);
-        return;
-      }
-      try {
-        resolve(JSON.parse(data));
-      } catch (error) {
-        reject(error);
-      }
-    });
-  });
-};
+// Function to read a JSON file
+const readJSONFile = (filePath) => JSON.parse(fs.readFileSync(filePath, 'utf8'));
 
 // Function to generate and save HTML output
-const generateHTML = (json1, json2, differences, outputPath) => {
+const generateHTML = (differences, outputPath) => {
   let htmlContent = `<html><head><style>
-  .difference { background-color: #ffcccc; }
-  </style></head><body>
-  <table><tr><td>${JSON.stringify(json1, null, 2)}</td>
-  <td>${JSON.stringify(json2, null, 2)}</td></tr></table>
-  <div>Differences: <pre>${differences.join('\n')}</pre></div>
-  </body></html>`;
+body { font-family: Arial, sans-serif; }
+.diff { color: #FFA500; } /* Style for differences */
+.added { color: green; } /* Style for additions */
+.deleted { color: red; } /* Style for deletions */
+</style></head><body><pre>${differences}</pre></body></html>`;
 
-  fs.writeFile(outputPath, htmlContent, (err) => {
-    if (err) {
-      console.error('Error writing HTML file:', err);
-    } else {
-      console.log(`Comparison HTML saved to ${outputPath}`);
-    }
-  });
+  fs.writeFileSync(outputPath, htmlContent, 'utf8');
+  console.log(`Comparison HTML saved to ${outputPath}`);
 };
 
-// Function to compare JSON files and generate HTML output
-const compareJSONFiles = async (filePath1, filePath2, outputPath) => {
+// Main comparison and HTML generation logic
+const compareAndGenerateHTML = (filePath1, filePath2, outputPath) => {
   try {
-    const json1 = await readJSONFile(filePath1);
-    const json2 = await readJSONFile(filePath2);
-    const differences = []; // Placeholder for difference logic
+    const json1 = readJSONFile(filePath1);
+    const json2 = readJSONFile(filePath2);
 
-    // Logic to find differences goes here (for demonstration, using deepEqual check)
-    const isEqual = deepEqual(json1, json2);
-    if (!isEqual) {
-      differences.push('JSON objects are not identical.');
-      // Extend this logic to detail specific differences
-    }
+    // Use json-diff to find differences
+    const differences = diff(json1, json2) || 'No differences found.';
+    const formattedDifferences = JSON.stringify(differences, null, 2);
 
-    generateHTML(json1, json2, differences, outputPath);
+    generateHTML(formattedDifferences, outputPath);
   } catch (error) {
-    console.error('Error comparing JSON files:', error);
+    console.error('Error:', error);
   }
 };
 
-// Example usage with command line arguments
-if (process.argv.length < 5) {
+// CLI handling logic
+if (process.argv.length !== 5) {
   console.log('Usage: node compare.js <jsonFile1> <jsonFile2> <outputHtmlFile>');
 } else {
-  compareJSONFiles(process.argv[2], process.argv[3], process.argv[4]);
+  compareAndGenerateHTML(process.argv[2], process.argv[3], process.argv[4]);
 }
