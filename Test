@@ -1,5 +1,5 @@
 const fs = require('fs');
-const diff = require('deep-diff').diff;
+const jsonDiff = require('json-diff'); // Make sure to install json-diff package
 
 // Function to read JSON data from a file
 const readJsonFromFile = (filePath) => {
@@ -12,40 +12,35 @@ const readJsonFromFile = (filePath) => {
   }
 };
 
-// Function to generate an HTML diff view
-const generateDiffView = (oldJson, newJson) => {
-  const differences = diff(oldJson, newJson);
-  // Convert the differences to a string that can be used in the HTML
-  const diffString = differences ? differences.map(d => JSON.stringify(d, null, 2)).join('\n') : 'No differences';
-  // Generate the HTML content
-  const htmlContent = `
+// Function to generate an HTML file with side-by-side JSON comparison
+const generateDiffHtml = (oldJson, newJson) => {
+  const diffResult = jsonDiff.diffString(oldJson, newJson, { color: false });
+  return `
 <!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>JSON Diff Output</title>
+  <title>JSON Diff</title>
   <style>
     body { font-family: sans-serif; }
-    .diff { white-space: pre; background-color: #f8f8f8; }
-    .ins { color: green; }
-    .del { color: red; }
+    .json-diff { white-space: pre-wrap; }
+    .json-diff .added { color: green; }
+    .json-diff .deleted { color: red; }
+    .json-diff .unchanged { color: grey; }
   </style>
 </head>
 <body>
-  <h1>JSON Differences</h1>
-  <div class="diff">${diffString}</div>
+  <div class="json-diff">${diffResult}</div>
 </body>
 </html>
 `;
-  return htmlContent;
 };
 
 // Main script
-const oldJson = readJsonFromFile('oldData.json'); // Replace with the path to your old JSON file
-const newJson = readJsonFromFile('newData.json'); // Replace with the path to your new JSON file
-const diffHtmlView = generateDiffView(oldJson, newJson);
+const oldJson = readJsonFromFile('oldData.json'); // Replace with your actual file path
+const newJson = readJsonFromFile('newData.json'); // Replace with your actual file path
+const diffHtml = generateDiffHtml(oldJson, newJson);
 
 // Write the HTML content to a file
-fs.writeFileSync('diffOutput.html', diffHtmlView);
-console.log('The HTML diff view has been saved as diffOutput.html');
-
+fs.writeFileSync('jsonDiff.html', diffHtml);
+console.log('The JSON diff HTML file has been generated as jsonDiff.html');
