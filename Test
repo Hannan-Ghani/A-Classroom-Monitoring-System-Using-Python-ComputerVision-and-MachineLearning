@@ -7,11 +7,12 @@ const readJSONFile = (filePath) => JSON.parse(fs.readFileSync(filePath, 'utf8'))
 // Function to generate and save HTML output
 const generateHTML = (differences, outputPath) => {
   let htmlContent = `<html><head><style>
-body { font-family: Arial, sans-serif; }
+body { font-family: Arial, sans-serif; padding: 20px; }
 .diff { color: #FFA500; } /* Style for differences */
 .added { color: green; } /* Style for additions */
 .deleted { color: red; } /* Style for deletions */
-</style></head><body><pre>${differences}</pre></body></html>`;
+pre { white-space: pre-wrap; word-wrap: break-word; }
+</style></head><body><h2>JSON Comparison Result</h2><pre>${differences}</pre></body></html>`;
 
   fs.writeFileSync(outputPath, htmlContent, 'utf8');
   console.log(`Comparison HTML saved to ${outputPath}`);
@@ -24,8 +25,8 @@ const compareAndGenerateHTML = (filePath1, filePath2, outputPath) => {
     const json2 = readJSONFile(filePath2);
 
     // Use json-diff to find differences
-    const differences = diff(json1, json2) || 'No differences found.';
-    const formattedDifferences = JSON.stringify(differences, null, 2);
+    const differences = diff(json1, json2);
+    const formattedDifferences = differences ? JSON.stringify(differences, null, 2) : 'No differences found.';
 
     generateHTML(formattedDifferences, outputPath);
   } catch (error) {
