@@ -1,18 +1,30 @@
 const fs = require('fs');
-const diff = require('json-diff').diff; // Import the diff function
+const diff = require('json-diff').diffString; // Import diffString for colored output
 
 // Function to read a JSON file
 const readJSONFile = (filePath) => JSON.parse(fs.readFileSync(filePath, 'utf8'));
 
-// Function to generate and save HTML output
-const generateHTML = (differences, outputPath) => {
+// Function to generate and save HTML output with side-by-side comparison
+const generateHTML = (json1, json2, differences, outputPath) => {
   let htmlContent = `<html><head><style>
-body { font-family: Arial, sans-serif; padding: 20px; }
-.diff { color: #FFA500; } /* Style for differences */
-.added { color: green; } /* Style for additions */
-.deleted { color: red; } /* Style for deletions */
-pre { white-space: pre-wrap; word-wrap: break-word; }
-</style></head><body><h2>JSON Comparison Result</h2><pre>${differences}</pre></body></html>`;
+body { font-family: Arial, sans-serif; display: flex; justify-content: space-around; padding: 20px; }
+.container { width: 45%; }
+h2 { text-align: center; }
+pre { background-color: #f5f5f5; padding: 10px; border-radius: 5px; white-space: pre-wrap; word-wrap: break-word; }
+</style></head><body>
+<div class="container">
+  <h2>Original JSON</h2>
+  <pre>${JSON.stringify(json1, null, 2)}</pre>
+</div>
+<div class="container">
+  <h2>Modified JSON</h2>
+  <pre>${JSON.stringify(json2, null, 2)}</pre>
+</div>
+<div class="container" style="width: 100%;">
+  <h2>Differences</h2>
+  <pre>${differences}</pre>
+</div>
+</body></html>`;
 
   fs.writeFileSync(outputPath, htmlContent, 'utf8');
   console.log(`Comparison HTML saved to ${outputPath}`);
@@ -25,10 +37,9 @@ const compareAndGenerateHTML = (filePath1, filePath2, outputPath) => {
     const json2 = readJSONFile(filePath2);
 
     // Use json-diff to find differences
-    const differences = diff(json1, json2);
-    const formattedDifferences = differences ? JSON.stringify(differences, null, 2) : 'No differences found.';
+    const differences = diff(json1, json2, { color: false }); // Set color to false to avoid ANSI codes in HTML
 
-    generateHTML(formattedDifferences, outputPath);
+    generateHTML(json1, json2, differences || 'No differences found.', outputPath);
   } catch (error) {
     console.error('Error:', error);
   }
