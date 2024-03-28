@@ -1,9 +1,7 @@
-const express = require('express');
 const fs = require('fs');
-const { diff } = require('deep-diff');
-const { html } = require('diff2html');
-const app = express();
-const port = 3000;
+const diff = require('deep-diff').diff;
+const { format } = require('diff2html');
+const path = require('path');
 
 // Function to read JSON data from a file
 const readJsonFromFile = (filePath) => {
@@ -19,20 +17,21 @@ const readJsonFromFile = (filePath) => {
 // Function to generate an HTML diff view
 const generateDiffView = (oldJson, newJson) => {
   const differences = diff(oldJson, newJson);
-  const diffJson = JSON.stringify(differences);
-  const diffHtml = html(diffJson, { drawFileList: false });
+  const diffJson = JSON.stringify(differences, null, 2);
+  const diffHtml = format(diffJson, { drawFileList: false });
   return diffHtml;
 };
 
-// Serve the HTML diff view
-app.get('/', (req, res) => {
-  const oldJson = readJsonFromFile('oldData.json');
-  const newJson = readJsonFromFile('newData.json');
-  const diffHtmlView = generateDiffView(oldJson, newJson);
-  res.send(diffHtmlView);
-});
+// Function to write the HTML content to a file
+const writeHtmlToFile = (htmlContent, fileName) => {
+  fs.writeFileSync(fileName, htmlContent, 'utf8');
+  console.log(`The HTML file has been saved as ${fileName}`);
+};
 
-// Start the server
-app.listen(port, () => {
-  console.log(`Server running at http://localhost:${port}`);
-});
+// Main script
+const oldJson = readJsonFromFile('oldData.json');
+const newJson = readJsonFromFile('newData.json');
+const diffHtmlView = generateDiffView(oldJson, newJson);
+
+const outputFileName = path.join(__dirname, 'jsonComparison.html');
+writeHtmlToFile(diffHtmlView, outputFileName);
