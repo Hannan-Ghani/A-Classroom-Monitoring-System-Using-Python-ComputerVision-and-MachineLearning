@@ -1,5 +1,5 @@
 const fs = require('fs');
-const diff = require('deep-diff').diff;
+const jsonDiff = require('json-diff'); // Make sure to install json-diff package
 
 // Function to read JSON data from a file
 const readJsonFromFile = (filePath) => {
@@ -11,11 +11,10 @@ const readJsonFromFile = (filePath) => {
   }
 };
 
-// Function to generate HTML content for side-by-side comparison
-const generateComparisonHtml = (oldJson, newJson, differences) => {
-  // Convert JSON objects to formatted strings for display
-  const oldJsonString = JSON.stringify(oldJson, null, 2).split('\n');
-  const newJsonString = JSON.stringify(newJson, null, 2).split('\n');
+// Function to generate an HTML file with side-by-side JSON comparison
+const generateDiffHtml = (oldJson, newJson) => {
+  const diffResult = jsonDiff.diffString(oldJson, newJson, { color: false });
+  const diffLines = diffResult.split('\n');
 
   // Start HTML content
   let htmlContent = `
@@ -23,14 +22,15 @@ const generateComparisonHtml = (oldJson, newJson, differences) => {
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>JSON Comparison</title>
+  <title>JSON Diff</title>
   <style>
     body { font-family: sans-serif; }
     table { width: 100%; border-collapse: collapse; }
     th, td { padding: 5px; border: 1px solid #ddd; }
-    .old { background-color: #ffdddd; }
-    .new { background-color: #ddffdd; }
+    .added { background-color: #ddffdd; }
+    .deleted { background-color: #ffdddd; }
     .unchanged { background-color: #f7f7f7; }
+    .updated { background-color: #ffffdd; }
   </style>
 </head>
 <body>
@@ -45,16 +45,19 @@ const generateComparisonHtml = (oldJson, newJson, differences) => {
 `;
 
   // Generate table rows
-  oldJsonString.forEach((line, index) => {
-    const oldLine = line.trim();
-    const newLine = newJsonString[index] ? newJsonString[index].trim() : '';
-    const lineDiff = diff(JSON.parse(oldLine), JSON.parse(newLine));
-    const className = lineDiff ? (lineDiff.kind === 'E' ? 'old' : 'new') : 'unchanged';
+  diffLines.forEach((line) => {
+    let className = 'unchanged';
+    if (line.startsWith('+')) {
+      className = 'added';
+    } else if (line.startsWith('-')) {
+      className = 'deleted';
+    } else if (line.startsWith('~')) {
+      className = 'updated';
+    }
 
     htmlContent += `
       <tr>
-        <td class="${className}">${oldLine}</td>
-        <td class="${className}">${newLine}</td>
+        <td class="${className}">${line}</td>
       </tr>
     `;
   });
@@ -73,8 +76,8 @@ const generateComparisonHtml = (oldJson, newJson, differences) => {
 // Main script
 const oldJson = readJsonFromFile('oldData.json'); // Replace with your actual file path
 const newJson = readJsonFromFile('newData.json'); // Replace with your actual file path
-const differences = diff(oldJson, newJson);
+const diffHtml = generateDiffHtml(oldJson, newJson);
 
-const htmlContent = generateComparisonHtml(oldJson, newJson, differences);
-fs.writeFileSync('comparison.html', htmlContent);
-console.log('Comparison HTML file created successfully.');
+// Write the HTML content to a file
+fs.writeFileSync('jsonDiff.html', diffHtml);
+console.log('The JSON diff HTML file has been generated as jsonDiff.html');
