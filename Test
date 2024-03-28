@@ -14,11 +14,11 @@ function compareAndHighlight(jsonFilePath1, jsonFilePath2, outputHtmlPath) {
     const originalJson = readJSONFile(jsonFilePath1);
     const modifiedJson = readJSONFile(jsonFilePath2);
 
+    // Ensure we always work with an array for differences
     const differences = diff(originalJson, modifiedJson) || [];
 
-    // Simplify by generating HTML directly without modifying the JSON objects
-    const originalHtml = jsonToHtml(originalJson);
-    const modifiedHtml = jsonToHtml(modifiedJson, differences); // Pass differences for highlighting
+    const originalHtml = jsonToHtml(originalJson, []); // Pass an empty array for differences
+    const modifiedHtml = jsonToHtml(modifiedJson, differences); // Pass actual differences
 
     const fullHtml = `<html><head><style>
         body { font-family: monospace; display: flex; padding: 20px; background-color: #f5f5f5; }
@@ -36,23 +36,23 @@ function compareAndHighlight(jsonFilePath1, jsonFilePath2, outputHtmlPath) {
     console.log(`The comparison result has been saved to ${outputHtmlPath}`);
 }
 
-function jsonToHtml(json, differences = null, path = '') {
+function jsonToHtml(json, differences, path = '') {
     if (json && typeof json === 'object') {
+        const isArray = Array.isArray(json);
         const entries = Object.entries(json).map(([key, value]) => {
             const newPath = path + (path ? '.' : '') + key;
             const diffType = findDifferenceType(differences, newPath);
             const valueHtml = jsonToHtml(value, differences, newPath);
-            return `<div${diffType ? ` class="${diffType}"` : ''}>"${key}": ${valueHtml}</div>`;
+            return `<div${diffType ? ` class="${diffType}"` : ''}>${isArray ? '' : `"${key}": `}${valueHtml}</div>`;
         });
-        return `{${entries.join('')}}`;
+        return isArray ? `[${entries.join(',')}]` : `{${entries.join(',')}}`;
     } else {
         return JSON.stringify(json);
     }
 }
 
 function findDifferenceType(differences, path) {
-    // Simplified: Determine if the current path has a difference and return a class name accordingly
-    // This needs to be implemented based on how you choose to track and apply differences
+    // Safely use .find() on differences, as it's ensured to be an array
     const diff = differences.find(d => d.path.join('.') === path);
     return diff ? (diff.kind === 'N' ? 'added' : diff.kind === 'D' ? 'deleted' : 'edited') : '';
 }
