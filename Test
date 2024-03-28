@@ -1,46 +1,80 @@
 const fs = require('fs');
-const jsonDiff = require('json-diff'); // Make sure to install json-diff package
+const diff = require('deep-diff').diff;
 
 // Function to read JSON data from a file
 const readJsonFromFile = (filePath) => {
   try {
-    const fileContent = fs.readFileSync(filePath, 'utf8');
-    return JSON.parse(fileContent);
+    return JSON.parse(fs.readFileSync(filePath, 'utf8'));
   } catch (error) {
     console.error(`Error reading JSON file ${filePath}:`, error);
     process.exit(1);
   }
 };
 
-// Function to generate an HTML file with side-by-side JSON comparison
-const generateDiffHtml = (oldJson, newJson) => {
-  const diffResult = jsonDiff.diffString(oldJson, newJson, { color: false });
-  return `
+// Function to generate HTML content for side-by-side comparison
+const generateComparisonHtml = (oldJson, newJson, differences) => {
+  // Convert JSON objects to formatted strings for display
+  const oldJsonString = JSON.stringify(oldJson, null, 2).split('\n');
+  const newJsonString = JSON.stringify(newJson, null, 2).split('\n');
+
+  // Start HTML content
+  let htmlContent = `
 <!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>JSON Diff</title>
+  <title>JSON Comparison</title>
   <style>
     body { font-family: sans-serif; }
-    .json-diff { white-space: pre-wrap; }
-    .json-diff .added { color: green; }
-    .json-diff .deleted { color: red; }
-    .json-diff .unchanged { color: grey; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { padding: 5px; border: 1px solid #ddd; }
+    .old { background-color: #ffdddd; }
+    .new { background-color: #ddffdd; }
+    .unchanged { background-color: #f7f7f7; }
   </style>
 </head>
 <body>
-  <div class="json-diff">${diffResult}</div>
+  <table>
+    <thead>
+      <tr>
+        <th>Original JSON</th>
+        <th>Modified JSON</th>
+      </tr>
+    </thead>
+    <tbody>
+`;
+
+  // Generate table rows
+  oldJsonString.forEach((line, index) => {
+    const oldLine = line.trim();
+    const newLine = newJsonString[index] ? newJsonString[index].trim() : '';
+    const lineDiff = diff(JSON.parse(oldLine), JSON.parse(newLine));
+    const className = lineDiff ? (lineDiff.kind === 'E' ? 'old' : 'new') : 'unchanged';
+
+    htmlContent += `
+      <tr>
+        <td class="${className}">${oldLine}</td>
+        <td class="${className}">${newLine}</td>
+      </tr>
+    `;
+  });
+
+  // End HTML content
+  htmlContent += `
+    </tbody>
+  </table>
 </body>
 </html>
 `;
+
+  return htmlContent;
 };
 
 // Main script
 const oldJson = readJsonFromFile('oldData.json'); // Replace with your actual file path
 const newJson = readJsonFromFile('newData.json'); // Replace with your actual file path
-const diffHtml = generateDiffHtml(oldJson, newJson);
+const differences = diff(oldJson, newJson);
 
-// Write the HTML content to a file
-fs.writeFileSync('jsonDiff.html', diffHtml);
-console.log('The JSON diff HTML file has been generated as jsonDiff.html');
+const htmlContent = generateComparisonHtml(oldJson, newJson, differences);
+fs.writeFileSync('comparison.html', htmlContent);
+console.log('Comparison HTML file created successfully.');
