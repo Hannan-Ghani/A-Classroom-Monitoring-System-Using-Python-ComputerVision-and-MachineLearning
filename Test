@@ -1,7 +1,5 @@
 const fs = require('fs');
 const diff = require('deep-diff').diff;
-const { format } = require('diff2html');
-const path = require('path');
 
 // Function to read JSON data from a file
 const readJsonFromFile = (filePath) => {
@@ -17,21 +15,37 @@ const readJsonFromFile = (filePath) => {
 // Function to generate an HTML diff view
 const generateDiffView = (oldJson, newJson) => {
   const differences = diff(oldJson, newJson);
-  const diffJson = JSON.stringify(differences, null, 2);
-  const diffHtml = format(diffJson, { drawFileList: false });
-  return diffHtml;
-};
-
-// Function to write the HTML content to a file
-const writeHtmlToFile = (htmlContent, fileName) => {
-  fs.writeFileSync(fileName, htmlContent, 'utf8');
-  console.log(`The HTML file has been saved as ${fileName}`);
+  // Convert the differences to a string that can be used in the HTML
+  const diffString = differences ? differences.map(d => JSON.stringify(d, null, 2)).join('\n') : 'No differences';
+  // Generate the HTML content
+  const htmlContent = `
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>JSON Diff Output</title>
+  <style>
+    body { font-family: sans-serif; }
+    .diff { white-space: pre; background-color: #f8f8f8; }
+    .ins { color: green; }
+    .del { color: red; }
+  </style>
+</head>
+<body>
+  <h1>JSON Differences</h1>
+  <div class="diff">${diffString}</div>
+</body>
+</html>
+`;
+  return htmlContent;
 };
 
 // Main script
-const oldJson = readJsonFromFile('oldData.json');
-const newJson = readJsonFromFile('newData.json');
+const oldJson = readJsonFromFile('oldData.json'); // Replace with the path to your old JSON file
+const newJson = readJsonFromFile('newData.json'); // Replace with the path to your new JSON file
 const diffHtmlView = generateDiffView(oldJson, newJson);
 
-const outputFileName = path.join(__dirname, 'jsonComparison.html');
-writeHtmlToFile(diffHtmlView, outputFileName);
+// Write the HTML content to a file
+fs.writeFileSync('diffOutput.html', diffHtmlView);
+console.log('The HTML diff view has been saved as diffOutput.html');
+
