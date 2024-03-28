@@ -1,53 +1,71 @@
 const fs = require('fs');
-const diff = require('json-diff').diffString; // Import diffString for colored output
+const diff = require('deep-diff').diff;
 
-// Function to read a JSON file
-const readJSONFile = (filePath) => JSON.parse(fs.readFileSync(filePath, 'utf8'));
-
-// Function to generate and save HTML output with side-by-side comparison
-const generateHTML = (json1, json2, differences, outputPath) => {
-  let htmlContent = `<html><head><style>
-body { font-family: Arial, sans-serif; display: flex; justify-content: space-around; padding: 20px; }
-.container { width: 45%; }
-h2 { text-align: center; }
-pre { background-color: #f5f5f5; padding: 10px; border-radius: 5px; white-space: pre-wrap; word-wrap: break-word; }
-</style></head><body>
-<div class="container">
-  <h2>Original JSON</h2>
-  <pre>${JSON.stringify(json1, null, 2)}</pre>
-</div>
-<div class="container">
-  <h2>Modified JSON</h2>
-  <pre>${JSON.stringify(json2, null, 2)}</pre>
-</div>
-<div class="container" style="width: 100%;">
-  <h2>Differences</h2>
-  <pre>${differences}</pre>
-</div>
-</body></html>`;
-
-  fs.writeFileSync(outputPath, htmlContent, 'utf8');
-  console.log(`Comparison HTML saved to ${outputPath}`);
-};
-
-// Main comparison and HTML generation logic
-const compareAndGenerateHTML = (filePath1, filePath2, outputPath) => {
-  try {
-    const json1 = readJSONFile(filePath1);
-    const json2 = readJSONFile(filePath2);
-
-    // Use json-diff to find differences
-    const differences = diff(json1, json2, { color: false }); // Set color to false to avoid ANSI codes in HTML
-
-    generateHTML(json1, json2, differences || 'No differences found.', outputPath);
-  } catch (error) {
-    console.error('Error:', error);
-  }
-};
-
-// CLI handling logic
-if (process.argv.length !== 5) {
-  console.log('Usage: node compare.js <jsonFile1> <jsonFile2> <outputHtmlFile>');
-} else {
-  compareAndGenerateHTML(process.argv[2], process.argv[3], process.argv[4]);
+// Reads a JSON file and parses it into an object.
+function readJSONFile(filePath) {
+  return JSON.parse(fs.readFileSync(filePath, 'utf8'));
 }
+
+// Marks differences between two JSON objects by modifying the target object.
+function markDifferences(original, target) {
+  const differences = diff(original, target) || [];
+  differences.forEach(difference => {
+    let node = target;
+    for (let i = 0; i < difference.path.length - 1; i++) {
+      node = node[difference.path[i]];
+    }
+    const key = difference.path[difference.path.length - 1];
+    switch (difference.kind) {
+      case 'N': // New property
+        node[key] = { _value: node[key], _type: 'added' };
+        break;
+      case 'D': // Deleted property
+        node[key] = { _value: difference.lhs, _type: 'deleted' };
+        break;
+      case 'E': // Edited property
+        node[key] = { _oldValue: difference.lhs, _value: difference.rhs, _type: 'edited' };
+        break;
+      case 'A': // Array change (simplified handling)
+        markDifferences(difference.item.lhs, node[key]);
+        break;
+    }
+  });
+}
+
+// Converts a JSON object to an HTML string, applying styling based on the type of changes.
+function jsonToHtml(json) {
+  if (json && typeof json === 'object') {
+    const entries = Object.entries(json).map(([key, value]) => {
+      if (value && typeof value === 'object' && value._type) {
+        return `<div>"${key}": <span class="${value._type}">${JSON.stringify(value._value)}</span></div>`;
+      } else {
+        return `<div>"${key}": ${jsonToHtml(value)}</div>`;
+      }
+    });
+    return `{${entries.join('')}}`;
+  } else {
+    return JSON.stringify(json);
+  }
+}
+
+// Main function that reads JSON files, marks differences, and generates an HTML output.
+function compareAndHighlight(jsonFilePath1, jsonFilePath2, outputHtmlPath) {
+  const originalJson = readJSONFile(jsonFilePath1);
+  const modifiedJson = readJSONFile(jsonFilePath2);
+
+  markDifferences(originalJson, modifiedJson);
+  const htmlContent = jsonToHtml(modifiedJson);
+
+  const fullHtml = `<html><head><style>
+    .added { background-color: #ddffdd; }
+    .deleted { background-color: #ffdddd; }
+    .edited { background-color: #ffffcc; }
+    body { font-family: monospace; }
+    </style></head><body>${htmlContent}</body></html>`;
+
+  fs.writeFileSync(outputHtmlPath, fullHtml, 'utf8');
+  console.log(`The comparison result has been saved to ${outputHtmlPath}`);
+}
+
+// Example usage
+compareAndHighlight('original.json', 'modified.json', 'output.html');
