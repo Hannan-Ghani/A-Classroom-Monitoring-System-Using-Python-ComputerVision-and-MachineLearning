@@ -1,38 +1,104 @@
-const express = require('express');
-const fs = require('fs');
-const { diff } = require('deep-diff');
-const { html } = require('diff2html');
-const app = express();
-const port = 3000;
+@Test
+public void testJSONArraysWithDifferentOrder() throws Exception {
+    String json1 = "{\"name\":\"John\", \"hobbies\":[\"reading\", \"cycling\"]}";
+    String json2 = "{\"name\":\"John\", \"hobbies\":[\"cycling\", \"reading\"]}";
 
-// Function to read JSON data from a file
-const readJsonFromFile = (filePath) => {
-  try {
-    const fileContent = fs.readFileSync(filePath, 'utf8');
-    return JSON.parse(fileContent);
-  } catch (error) {
-    console.error(`Error reading JSON file ${filePath}:`, error);
-    process.exit(1);
-  }
-};
+    // Use JSONAssert with strict=false to allow different orders in arrays
+    JSONAssert.assertEquals(json1, json2, false);
+}
 
-// Function to generate an HTML diff view
-const generateDiffView = (oldJson, newJson) => {
-  const differences = diff(oldJson, newJson);
-  const diffJson = JSON.stringify(differences);
-  const diffHtml = html(diffJson, { drawFileList: false });
-  return diffHtml;
-};
+@Test
+public void testJSONWithMissingElements() throws Exception {
+    String json1 = "{\"name\":\"John\", \"age\":30}";
+    String json2 = "{\"name\":\"John\"}";
 
-// Serve the HTML diff view
-app.get('/', (req, res) => {
-  const oldJson = readJsonFromFile('oldData.json');
-  const newJson = readJsonFromFile('newData.json');
-  const diffHtmlView = generateDiffView(oldJson, newJson);
-  res.send(diffHtmlView);
-});
+    Exception exception = assertThrows(AssertionError.class, () -> {
+        // Using strict=true because we want to consider the structure and all fields
+        JSONAssert.assertEquals(json1, json2, true);
+    });
 
-// Start the server
-app.listen(port, () => {
-  console.log(`Server running at http://localhost:${port}`);
-});
+    assertTrue(exception.getMessage().contains("age"));
+}
+
+@Test
+public void testJSONWithExtraElements() throws Exception {
+    String json1 = "{\"name\":\"John\"}";
+    String json2 = "{\"name\":\"John\", \"age\":30}";
+
+    Exception exception = assertThrows(AssertionError.class, () -> {
+        // Using strict=false allows extra fields in json2
+        JSONAssert.assertEquals(json1, json2, false);
+    });
+
+    assertNull(exception);
+}
+
+@Test
+public void testJSONWithTypeMismatch() throws Exception {
+    String json1 = "{\"name\":\"John\", \"age\":\"30\"}";
+    String json2 = "{\"name\":\"John\", \"age\":30}";
+
+    Exception exception = assertThrows(AssertionError.class, () -> {
+        JSONAssert.assertEquals(json1, json2, false);
+    });
+
+    assertTrue(exception.getMessage().contains("age"));
+}
+
+import org.json.JSONObject;
+import org.junit.jupiter.api.Test;
+import static org.junit.jupiter.api.Assertions.*;
+import org.skyscreamer.jsonassert.JSONAssert;
+
+public class JSONComparatorTest {
+
+    @Test
+    public void testIdenticalNestedJSONObjects() throws Exception {
+        String json1 = "{\"person\":{\"name\":\"John\", \"address\":{\"city\":\"New York\", \"zip\":\"10001\"}}}";
+        String json2 = "{\"person\":{\"name\":\"John\", \"address\":{\"city\":\"New York\", \"zip\":\"10001\"}}}";
+
+        // This test checks for identical nested JSON objects
+        JSONAssert.assertEquals(json1, json2, true);
+    }
+
+    @Test
+    public void testDifferentNestedJSONObjects() throws Exception {
+        String json1 = "{\"person\":{\"name\":\"John\", \"address\":{\"city\":\"New York\", \"zip\":\"10001\"}}}";
+        String json2 = "{\"person\":{\"name\":\"John\", \"address\":{\"city\":\"Boston\", \"zip\":\"02101\"}}}";
+
+        // This test expects an AssertionError due to differences in nested object values
+        Exception exception = assertThrows(AssertionError.class, () -> {
+            JSONAssert.assertEquals(json1, json2, true);
+        });
+
+        // The message in the exception should indicate the nature of the difference
+        assertTrue(exception.getMessage().contains("Boston"));
+    }
+}
+
+
+
+
+import org.json.JSONObject;
+import org.junit.jupiter.api.Test;
+import static org.junit.jupiter.api.Assertions.*;
+import org.skyscreamer.jsonassert.JSONAssert;
+
+public class JSONComparatorTest {
+
+    @Test
+    public void testJSONsWithSpecialCharacters() throws Exception {
+        // Example JSON strings that include special characters, such as escaped quotes
+        String json1 = "{\"name\":\"John Doe\", \"bio\":\"Loves coding \\\"day and night\\\".\"}";
+        String json2 = "{\"name\":\"John Doe\", \"bio\":\"Loves coding \\\"day and night\\\".\"}";
+
+        // Test to ensure special characters within string values are handled correctly
+        JSONAssert.assertEquals(json1, json2, true);
+    }
+
+}
+
+
+
+
+
