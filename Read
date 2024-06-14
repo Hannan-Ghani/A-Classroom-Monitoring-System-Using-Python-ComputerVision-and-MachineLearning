@@ -1,5 +1,5 @@
 Resources:
-  MySSMRole:
+  MySSMAndXRayRole:
     Type: "AWS::IAM::Role"
     Properties:
       AssumeRolePolicyDocument:
@@ -10,7 +10,7 @@ Resources:
               Service: "ec2.amazonaws.com"
             Action: "sts:AssumeRole"
       Policies:
-        - PolicyName: "SSMAccess"
+        - PolicyName: "SSMAndXRayAccessPolicy"
           PolicyDocument:
             Version: "2012-10-17"
             Statement:
@@ -41,4 +41,6 @@ Resources:
                   - "ec2messages:GetEndpoint"
                   - "ec2messages:GetMessages"
                   - "ec2messages:SendReply"
+                  - "xray:PutTelemetryRecords"
+                  - "xray:PutTraceSegments"
                 Resource: "*"
