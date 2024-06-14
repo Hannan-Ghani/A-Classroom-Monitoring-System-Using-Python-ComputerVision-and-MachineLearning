@@ -1,46 +1,44 @@
-AWSTemplateFormatVersion: '2010-09-09'
-Description: CloudFormation template to create an IAM role for EC2 and attach the AmazonSSMManagedInstanceCore policy.
-
 Resources:
   MySSMRole:
-    Type: 'AWS::IAM::Role'
-    Properties: 
-      AssumeRolePolicyDocument: 
-        Version: '2012-10-17'
-        Statement: 
-          - Effect: 'Allow'
-            Principal: 
-              Service: 
-                - 'ec2.amazonaws.com'
-            Action: 
-              - 'sts:AssumeRole'
-      Path: '/'
-      ManagedPolicyArns:
-        - 'arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore'
-      RoleName: 'EC2SSMRole'
-
-  MyInstanceProfile:
-    Type: 'AWS::IAM::InstanceProfile'
+    Type: "AWS::IAM::Role"
     Properties:
-      Path: '/'
-      Roles:
-        - Ref: MySSMRole
-      InstanceProfileName: 'EC2SSMInstanceProfile'
-
-  MyEC2Instance:
-    Type: 'AWS::EC2::Instance'
-    Properties:
-      ImageId: 'ami-0c55b159cbfafe1f0'  # Update with your desired AMI ID
-      InstanceType: 't2.micro'           # Update with your desired instance type
-      IamInstanceProfile: 
-        Ref: MyInstanceProfile
-      KeyName: 'my-key-pair'             # Update with your key pair name
-      SecurityGroupIds: 
-        - 'sg-0123456789abcdef0'        # Update with your security group ID
-      SubnetId: 'subnet-0123456789abcdef0' # Update with your subnet ID
-
-Outputs:
-  InstanceId:
-    Description: "Instance ID of the newly created EC2 instance"
-    Value: 
-      Ref: MyEC2Instance
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service: "ec2.amazonaws.com"
+            Action: "sts:AssumeRole"
+      Policies:
+        - PolicyName: "SSMAccess"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: "Allow"
+                Action:
+                  - "ssm:DescribeAssociation"
+                  - "ssm:GetDeployablePatchSnapshotForInstance"
+                  - "ssm:GetDocument"
+                  - "ssm:DescribeDocument"
+                  - "ssm:GetManifest"
+                  - "ssm:GetParameter"
+                  - "ssm:GetParameters"
+                  - "ssm:ListAssociations"
+                  - "ssm:ListInstanceAssociations"
+                  - "ssm:PutInventory"
+                  - "ssm:PutComplianceItems"
+                  - "ssm:PutConfigurePackageResult"
+                  - "ssm:UpdateAssociationStatus"
+                  - "ssm:UpdateInstanceAssociationStatus"
+                  - "ssm:UpdateInstanceInformation"
+                  - "ssmmessages:CreateControlChannel"
+                  - "ssmmessages:CreateDataChannel"
+                  - "ssmmessages:OpenControlChannel"
+                  - "ssmmessages:OpenDataChannel"
+                  - "ec2messages:AcknowledgeMessage"
+                  - "ec2messages:DeleteMessage"
+                  - "ec2messages:FailMessage"
+                  - "ec2messages:GetEndpoint"
+                  - "ec2messages:GetMessages"
+                  - "ec2messages:SendReply"
+                Resource: "*"
