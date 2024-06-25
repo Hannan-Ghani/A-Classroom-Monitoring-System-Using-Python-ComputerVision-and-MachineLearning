@@ -1,104 +1,48 @@
-@Test
-public void testJSONArraysWithDifferentOrder() throws Exception {
-    String json1 = "{\"name\":\"John\", \"hobbies\":[\"reading\", \"cycling\"]}";
-    String json2 = "{\"name\":\"John\", \"hobbies\":[\"cycling\", \"reading\"]}";
-
-    // Use JSONAssert with strict=false to allow different orders in arrays
-    JSONAssert.assertEquals(json1, json2, false);
-}
-
-@Test
-public void testJSONWithMissingElements() throws Exception {
-    String json1 = "{\"name\":\"John\", \"age\":30}";
-    String json2 = "{\"name\":\"John\"}";
-
-    Exception exception = assertThrows(AssertionError.class, () -> {
-        // Using strict=true because we want to consider the structure and all fields
-        JSONAssert.assertEquals(json1, json2, true);
-    });
-
-    assertTrue(exception.getMessage().contains("age"));
-}
-
-@Test
-public void testJSONWithExtraElements() throws Exception {
-    String json1 = "{\"name\":\"John\"}";
-    String json2 = "{\"name\":\"John\", \"age\":30}";
-
-    Exception exception = assertThrows(AssertionError.class, () -> {
-        // Using strict=false allows extra fields in json2
-        JSONAssert.assertEquals(json1, json2, false);
-    });
-
-    assertNull(exception);
-}
-
-@Test
-public void testJSONWithTypeMismatch() throws Exception {
-    String json1 = "{\"name\":\"John\", \"age\":\"30\"}";
-    String json2 = "{\"name\":\"John\", \"age\":30}";
-
-    Exception exception = assertThrows(AssertionError.class, () -> {
-        JSONAssert.assertEquals(json1, json2, false);
-    });
-
-    assertTrue(exception.getMessage().contains("age"));
-}
-
-import org.json.JSONObject;
-import org.junit.jupiter.api.Test;
-import static org.junit.jupiter.api.Assertions.*;
-import org.skyscreamer.jsonassert.JSONAssert;
-
-public class JSONComparatorTest {
-
-    @Test
-    public void testIdenticalNestedJSONObjects() throws Exception {
-        String json1 = "{\"person\":{\"name\":\"John\", \"address\":{\"city\":\"New York\", \"zip\":\"10001\"}}}";
-        String json2 = "{\"person\":{\"name\":\"John\", \"address\":{\"city\":\"New York\", \"zip\":\"10001\"}}}";
-
-        // This test checks for identical nested JSON objects
-        JSONAssert.assertEquals(json1, json2, true);
-    }
-
-    @Test
-    public void testDifferentNestedJSONObjects() throws Exception {
-        String json1 = "{\"person\":{\"name\":\"John\", \"address\":{\"city\":\"New York\", \"zip\":\"10001\"}}}";
-        String json2 = "{\"person\":{\"name\":\"John\", \"address\":{\"city\":\"Boston\", \"zip\":\"02101\"}}}";
-
-        // This test expects an AssertionError due to differences in nested object values
-        Exception exception = assertThrows(AssertionError.class, () -> {
-            JSONAssert.assertEquals(json1, json2, true);
-        });
-
-        // The message in the exception should indicate the nature of the difference
-        assertTrue(exception.getMessage().contains("Boston"));
-    }
-}
-
-
-
-
-import org.json.JSONObject;
-import org.junit.jupiter.api.Test;
-import static org.junit.jupiter.api.Assertions.*;
-import org.skyscreamer.jsonassert.JSONAssert;
-
-public class JSONComparatorTest {
-
-    @Test
-    public void testJSONsWithSpecialCharacters() throws Exception {
-        // Example JSON strings that include special characters, such as escaped quotes
-        String json1 = "{\"name\":\"John Doe\", \"bio\":\"Loves coding \\\"day and night\\\".\"}";
-        String json2 = "{\"name\":\"John Doe\", \"bio\":\"Loves coding \\\"day and night\\\".\"}";
-
-        // Test to ensure special characters within string values are handled correctly
-        JSONAssert.assertEquals(json1, json2, true);
-    }
-
-}
-
-
-
-
-
+Resources:
+  MySSMAndXRayRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      RoleName: "app-SSMAndXRayRole"  # Role name starting with "app-" as required
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service: "ec2.amazonaws.com"
+            Action: "sts:AssumeRole"
+      PermissionsBoundary: "arn:aws:iam::279413694679:policy/YourExistingPermissionsBoundary"  # Your existing permissions boundary
+      Policies:
+        - PolicyName: "SSMAndXRayAccessPolicy"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: "Allow"
+                Action:
+                  - "ssm:DescribeAssociation"
+                  - "ssm:GetDeployablePatchSnapshotForInstance"
+                  - "ssm:GetDocument"
+                  - "ssm:DescribeDocument"
+                  - "ssm:GetManifest"
+                  - "ssm:GetParameter"
+                  - "ssm:GetParameters"
+                  - "ssm:ListAssociations"
+                  - "ssm:ListInstanceAssociations"
+                  - "ssm:PutInventory"
+                  - "ssm:PutComplianceItems"
+                  - "ssm:PutConfigurePackageResult"
+                  - "ssm:UpdateAssociationStatus"
+                  - "ssm:UpdateInstanceAssociationStatus"
+                  - "ssm:UpdateInstanceInformation"
+                  - "ssmmessages:CreateControlChannel"
+                  - "ssmmessages:CreateDataChannel"
+                  - "ssmmessages:OpenControlChannel"
+                  - "ssmmessages:OpenDataChannel"
+                  - "ec2messages:AcknowledgeMessage"
+                  - "ec2messages:DeleteMessage"
+                  - "ec2messages:FailMessage"
+                  - "ec2messages:GetEndpoint"
+                  - "ec2messages:GetMessages"
+                  - "ec2messages:SendReply"
+                  - "xray:PutTelemetryRecords"
+                  - "xray:PutTraceSegments"
+                Resource: "*"
