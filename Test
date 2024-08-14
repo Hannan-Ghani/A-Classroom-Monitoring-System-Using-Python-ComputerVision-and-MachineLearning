@@ -1,48 +1,53 @@
-Resources:
-  MySSMAndXRayRole:
-    Type: "AWS::IAM::Role"
-    Properties:
-      RoleName: "app-SSMAndXRayRole"  # Role name starting with "app-" as required
-      AssumeRolePolicyDocument:
-        Version: "2012-10-17"
-        Statement:
-          - Effect: "Allow"
-            Principal:
-              Service: "ec2.amazonaws.com"
-            Action: "sts:AssumeRole"
-      PermissionsBoundary: "arn:aws:iam::279413694679:policy/YourExistingPermissionsBoundary"  # Your existing permissions boundary
-      Policies:
-        - PolicyName: "SSMAndXRayAccessPolicy"
-          PolicyDocument:
-            Version: "2012-10-17"
-            Statement:
-              - Effect: "Allow"
-                Action:
-                  - "ssm:DescribeAssociation"
-                  - "ssm:GetDeployablePatchSnapshotForInstance"
-                  - "ssm:GetDocument"
-                  - "ssm:DescribeDocument"
-                  - "ssm:GetManifest"
-                  - "ssm:GetParameter"
-                  - "ssm:GetParameters"
-                  - "ssm:ListAssociations"
-                  - "ssm:ListInstanceAssociations"
-                  - "ssm:PutInventory"
-                  - "ssm:PutComplianceItems"
-                  - "ssm:PutConfigurePackageResult"
-                  - "ssm:UpdateAssociationStatus"
-                  - "ssm:UpdateInstanceAssociationStatus"
-                  - "ssm:UpdateInstanceInformation"
-                  - "ssmmessages:CreateControlChannel"
-                  - "ssmmessages:CreateDataChannel"
-                  - "ssmmessages:OpenControlChannel"
-                  - "ssmmessages:OpenDataChannel"
-                  - "ec2messages:AcknowledgeMessage"
-                  - "ec2messages:DeleteMessage"
-                  - "ec2messages:FailMessage"
-                  - "ec2messages:GetEndpoint"
-                  - "ec2messages:GetMessages"
-                  - "ec2messages:SendReply"
-                  - "xray:PutTelemetryRecords"
-                  - "xray:PutTraceSegments"
-                Resource: "*"
+import com.amazonaws.services.glue.GlueContext
+import com.amazonaws.services.glue.MappingSpec
+import com.amazonaws.services.glue.errors.CallSite
+import com.amazonaws.services.glue.util.GlueArgParser
+import com.amazonaws.services.glue.util.Job
+import com.amazonaws.services.glue.util.JsonOptions
+import org.apache.spark.sql._
+import org.apache.spark.sql.functions._
+import org.apache.spark.sql.types._
+import org.apache.spark.SparkContext
+import scala.collection.JavaConverters._
+import org.apache.spark.sql.{SaveMode, SparkSession, DataFrame}
+
+object GlueApp {
+  def main(sysArgs: Array[String]): Unit = {
+    val sc: SparkContext = new SparkContext()
+    val glueContext: GlueContext = new GlueContext(sc)
+    val spark: SparkSession = glueContext.getSparkSession
+
+    // Get job parameters from AWS Glue
+    val args = GlueArgParser.getResolvedOptions(sysArgs, Seq("sourcePath", "targetPath", "outputPath", "JOB_NAME").toArray)
+    Job.init(args("JOB_NAME"), glueContext, args.asJava)
+
+    // Get paths from parameters
+    val sourcePath = args("sourcePath")
+    val targetPath = args("targetPath")
+    val outputPath = args("outputPath")
+
+    // Read source and target datasets from S3
+    val transactionSource = spark.read.parquet(s"$sourcePath")
+    val target = spark.read.parquet(s"$targetPath")
+
+    // Process source dataset
+    val sourceNarrative = transactionSource.withColumn(
+      "NARRATIVE",
+      when(trim($"NARRATIVE") === "", null)
+        .when($"NARRATIVE" === "*", null)
+        .otherwise($"NARRATIVE")
+    ).select($"TRANSACTION_ID", $"NARRATIVE")
+
+    // Select target narratives
+    val targetNarrative = target.select($"transactionId", $"narrative")
+
+    // Find differences between source and target
+    val data = sourceNarrative.exceptAll(targetNarrative).limit(10)
+
+    // Save the result to the output path in S3
+    data.write.format("parquet").mode("overwrite").save(s"$outputPath")
+
+    // Commit the Glue job
+    Job.commit()
+  }
+}
