@@ -1,48 +1,20 @@
-Resources:
-  MySSMAndXRayRole:
-    Type: "AWS::IAM::Role"
-    Properties:
-      RoleName: "app-SSMAndXRayRole"  # Role name starting with "app-" as required
-      AssumeRolePolicyDocument:
-        Version: "2012-10-17"
-        Statement:
-          - Effect: "Allow"
-            Principal:
-              Service: "ec2.amazonaws.com"
-            Action: "sts:AssumeRole"
-      PermissionsBoundary: "arn:aws:iam::279413694679:policy/YourExistingPermissionsBoundary"  # Your existing permissions boundary
-      Policies:
-        - PolicyName: "SSMAndXRayAccessPolicy"
-          PolicyDocument:
-            Version: "2012-10-17"
-            Statement:
-              - Effect: "Allow"
-                Action:
-                  - "ssm:DescribeAssociation"
-                  - "ssm:GetDeployablePatchSnapshotForInstance"
-                  - "ssm:GetDocument"
-                  - "ssm:DescribeDocument"
-                  - "ssm:GetManifest"
-                  - "ssm:GetParameter"
-                  - "ssm:GetParameters"
-                  - "ssm:ListAssociations"
-                  - "ssm:ListInstanceAssociations"
-                  - "ssm:PutInventory"
-                  - "ssm:PutComplianceItems"
-                  - "ssm:PutConfigurePackageResult"
-                  - "ssm:UpdateAssociationStatus"
-                  - "ssm:UpdateInstanceAssociationStatus"
-                  - "ssm:UpdateInstanceInformation"
-                  - "ssmmessages:CreateControlChannel"
-                  - "ssmmessages:CreateDataChannel"
-                  - "ssmmessages:OpenControlChannel"
-                  - "ssmmessages:OpenDataChannel"
-                  - "ec2messages:AcknowledgeMessage"
-                  - "ec2messages:DeleteMessage"
-                  - "ec2messages:FailMessage"
-                  - "ec2messages:GetEndpoint"
-                  - "ec2messages:GetMessages"
-                  - "ec2messages:SendReply"
-                  - "xray:PutTelemetryRecords"
-                  - "xray:PutTraceSegments"
-                Resource: "*"
+name := "GlueScalaProject"
+
+version := "0.1"
+
+scalaVersion := "2.13.8"  // You can use a different Scala version if needed
+
+libraryDependencies ++= Seq(
+  // AWS SDK for Glue
+  "com.amazonaws" % "aws-java-sdk-glue" % "1.12.118",
+
+  // Apache Spark Core and SQL
+  "org.apache.spark" %% "spark-core" % "3.4.0",
+  "org.apache.spark" %% "spark-sql" % "3.4.0",
+
+  // Additional Spark components if necessary
+  "org.apache.spark" %% "spark-hive" % "3.4.0",  // If you need Hive support
+  "org.apache.spark" %% "spark-mllib" % "3.4.0"  // If you use MLlib
+)
+
+resolvers += "Akka Snapshot Repository" at "https://repo.akka.io/snapshots/"
