@@ -1,20 +1,19 @@
-name := "GlueScalaProject"
-
-version := "0.1"
-
-scalaVersion := "2.13.8"  // You can use a different Scala version if needed
-
-libraryDependencies ++= Seq(
-  // AWS SDK for Glue
-  "com.amazonaws" % "aws-java-sdk-glue" % "1.12.118",
-
-  // Apache Spark Core and SQL
-  "org.apache.spark" %% "spark-core" % "3.4.0",
-  "org.apache.spark" %% "spark-sql" % "3.4.0",
-
-  // Additional Spark components if necessary
-  "org.apache.spark" %% "spark-hive" % "3.4.0",  // If you need Hive support
-  "org.apache.spark" %% "spark-mllib" % "3.4.0"  // If you use MLlib
-)
-
-resolvers += "Akka Snapshot Repository" at "https://repo.akka.io/snapshots/"
+insert_job: Etl_automation_test
+job_type: CMD
+command: /bin/bash -c "aws glue start-job-run --job-name your-glue-job-name"
+machine: fincrimejumpservsit
+owner: syshddtsfincqtxukccccc
+permission: gx,ge
+description: "Trigger AWS Glue job for ETL automation"
+std_out_file: /path/to/output.log
+std_err_file: /path/to/error.log
+date_conditions: 1
+days_of_week: saturday, sunday
+start_times: "13:00"
+timezone: GMT
+max_retries: 3
+retry_interval: 10
+alarm_if_fail: y
+alarm_if_terminated: y
+notification: SUCCESS
+notification_emailaddress: your-email@example.com
