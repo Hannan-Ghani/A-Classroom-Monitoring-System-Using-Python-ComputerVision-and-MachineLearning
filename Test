@@ -1,31 +1,20 @@
 #!/bin/bash
 
-# Check if the correct number of arguments are passed
-EXPECTED_ARGS=2
-
-if [ "$#" -ne $EXPECTED_ARGS ]; then
-    echo "Error: Incorrect number of arguments."
-    echo "Usage: $0 <glue_job_name> <system_date>"
-    exit 1
-fi
-
-# Assign arguments to variables
-GLUE_JOB_NAME=$1
-SYSTEM_DATE=$2
+# Set the Glue job name
+GLUE_JOB_NAME="gluejobforetl"
 
 # Log the start of the job
-echo "Starting AWS Glue job: $GLUE_JOB_NAME with date: $SYSTEM_DATE"
+echo "Starting AWS Glue job: $GLUE_JOB_NAME"
 
-# Start the Glue job using AWS CLI
-# Replace 'your-region' with the appropriate AWS region (e.g., 'us-west-2')
-response=$(aws glue start-job-run --job-name "$GLUE_JOB_NAME" --region your-region)
+# Start the Glue job using AWS CLI in the specified region (eu-west-1)
+response=$(aws glue start-job-run --job-name "$GLUE_JOB_NAME" --region eu-west-1)
 
 # Capture the exit status of the AWS CLI command
 STATUS=$?
 
 # Check if the Glue job was started successfully
 if [ $STATUS -eq 0 ]; then
-    # Extract JobRunId from the response using jq (make sure jq is installed)
+    # Extract JobRunId from the response using jq (ensure jq is installed)
     JOB_RUN_ID=$(echo $response | jq -r '.JobRunId')
     echo "Glue job started successfully. JobRunId: $JOB_RUN_ID"
     exit 0
