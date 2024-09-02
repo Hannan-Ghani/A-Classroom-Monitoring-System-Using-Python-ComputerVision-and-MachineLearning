@@ -1,53 +1,36 @@
-import com.amazonaws.services.glue.GlueContext
-import com.amazonaws.services.glue.MappingSpec
-import com.amazonaws.services.glue.errors.CallSite
-import com.amazonaws.services.glue.util.GlueArgParser
-import com.amazonaws.services.glue.util.Job
-import com.amazonaws.services.glue.util.JsonOptions
-import org.apache.spark.sql._
-import org.apache.spark.sql.functions._
-import org.apache.spark.sql.types._
-import org.apache.spark.SparkContext
-import scala.collection.JavaConverters._
-import org.apache.spark.sql.{SaveMode, SparkSession, DataFrame}
+#!/bin/bash
 
-object GlueApp {
-  def main(sysArgs: Array[String]): Unit = {
-    val sc: SparkContext = new SparkContext()
-    val glueContext: GlueContext = new GlueContext(sc)
-    val spark: SparkSession = glueContext.getSparkSession
+# Check if the correct number of arguments are passed
+EXPECTED_ARGS=2
 
-    // Get job parameters from AWS Glue
-    val args = GlueArgParser.getResolvedOptions(sysArgs, Seq("sourcePath", "targetPath", "outputPath", "JOB_NAME").toArray)
-    Job.init(args("JOB_NAME"), glueContext, args.asJava)
+if [ "$#" -ne $EXPECTED_ARGS ]; then
+    echo "Error: Incorrect number of arguments."
+    echo "Usage: $0 <glue_job_name> <system_date>"
+    exit 1
+fi
 
-    // Get paths from parameters
-    val sourcePath = args("sourcePath")
-    val targetPath = args("targetPath")
-    val outputPath = args("outputPath")
+# Assign arguments to variables
+GLUE_JOB_NAME=$1
+SYSTEM_DATE=$2
 
-    // Read source and target datasets from S3
-    val transactionSource = spark.read.parquet(s"$sourcePath")
-    val target = spark.read.parquet(s"$targetPath")
+# Log the start of the job
+echo "Starting AWS Glue job: $GLUE_JOB_NAME with date: $SYSTEM_DATE"
 
-    // Process source dataset
-    val sourceNarrative = transactionSource.withColumn(
-      "NARRATIVE",
-      when(trim($"NARRATIVE") === "", null)
-        .when($"NARRATIVE" === "*", null)
-        .otherwise($"NARRATIVE")
-    ).select($"TRANSACTION_ID", $"NARRATIVE")
+# Start the Glue job using AWS CLI
+# Replace 'your-region' with the appropriate AWS region (e.g., 'us-west-2')
+response=$(aws glue start-job-run --job-name "$GLUE_JOB_NAME" --region your-region)
 
-    // Select target narratives
-    val targetNarrative = target.select($"transactionId", $"narrative")
+# Capture the exit status of the AWS CLI command
+STATUS=$?
 
-    // Find differences between source and target
-    val data = sourceNarrative.exceptAll(targetNarrative).limit(10)
-
-    // Save the result to the output path in S3
-    data.write.format("parquet").mode("overwrite").save(s"$outputPath")
-
-    // Commit the Glue job
-    Job.commit()
-  }
-}
+# Check if the Glue job was started successfully
+if [ $STATUS -eq 0 ]; then
+    # Extract JobRunId from the response using jq (make sure jq is installed)
+    JOB_RUN_ID=$(echo $response | jq -r '.JobRunId')
+    echo "Glue job started successfully. JobRunId: $JOB_RUN_ID"
+    exit 0
+else
+    echo "Failed to start Glue job: $GLUE_JOB_NAME"
+    echo "Response: $response"
+    exit $STATUS
+fi
