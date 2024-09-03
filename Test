@@ -1,19 +1,25 @@
-insert_job: Etl_automation_test
-job_type: CMD
-command: /bin/bash -c "aws glue start-job-run --job-name your-glue-job-name"
-machine: fincrimejumpservsit
-owner: syshddtsfincqtxukccccc
-permission: gx,ge
-description: "Trigger AWS Glue job for ETL automation"
-std_out_file: /path/to/output.log
-std_err_file: /path/to/error.log
-date_conditions: 1
-days_of_week: saturday, sunday
-start_times: "13:00"
-timezone: GMT
-max_retries: 3
-retry_interval: 10
-alarm_if_fail: y
-alarm_if_terminated: y
-notification: SUCCESS
-notification_emailaddress: your-email@example.com
+#!/bin/bash
+
+# Set the Glue job name
+GLUE_JOB_NAME="gluejobforetl"
+
+# Log the start of the job
+echo "Starting AWS Glue job: $GLUE_JOB_NAME"
+
+# Start the Glue job using AWS CLI in the specified region (eu-west-1)
+response=$(aws glue start-job-run --job-name "$GLUE_JOB_NAME" --region eu-west-1)
+
+# Capture the exit status of the AWS CLI command
+STATUS=$?
+
+# Check if the Glue job was started successfully
+if [ $STATUS -eq 0 ]; then
+    # Extract JobRunId from the response using basic parsing with awk
+    JOB_RUN_ID=$(echo $response | awk -F'"' '/JobRunId/ {print $4}')
+    echo "Glue job started successfully. JobRunId: $JOB_RUN_ID"
+    exit 0
+else
+    echo "Failed to start Glue job: $GLUE_JOB_NAME"
+    echo "Response: $response"
+    exit $STATUS
+fi
