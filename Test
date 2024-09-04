@@ -1,19 +1,152 @@
-insert_job: Etl_automation_test
-job_type: CMD
-command: /bin/bash -c "aws glue start-job-run --job-name your-glue-job-name"
-machine: fincrimejumpservsit
-owner: syshddtsfincqtxukccccc
-permission: gx,ge
-description: "Trigger AWS Glue job for ETL automation"
-std_out_file: /path/to/output.log
-std_err_file: /path/to/error.log
-date_conditions: 1
-days_of_week: saturday, sunday
-start_times: "13:00"
-timezone: GMT
-max_retries: 3
-retry_interval: 10
-alarm_if_fail: y
-alarm_if_terminated: y
-notification: SUCCESS
-notification_emailaddress: your-email@example.com
+// Import necessary libraries
+import org.apache.spark.sql.functions._
+import org.apache.spark.sql.types._
+import org.apache.spark.sql.expressions.Window
+import org.apache.spark.sql.{SparkSession, SQLContext}
+
+// Initialize Spark session (Glue Context typically handles this in AWS Glue)
+val spark = SparkSession.builder.appName("GlueETLJob").getOrCreate()
+import spark.implicits._
+
+// Read source file and filter out the records not needed
+val a_cus = spark.read.parquet("s3://136731789529-fis-raw-data/customer/20230309/raw/parquet/")
+  .filter("NUM_OF_ACCOUNT >= 0 and (SOURCE_COUNTRY <> 'ZA' or SOURCE_COUNTRY is NULL) and customer_key is not NULL and customer_key not in ('TMAMLO-T', 'TMEMA-*', 'TMUK1-*', 'TMUK2*', 'Not Available')")
+  .withColumn("customerUniqueId", regexp_replace(col("customer_key"), "[^A-Za-z0-9]", ""))
+a_cus.createOrReplaceTempView("a_cus")
+a_cus.cache()
+
+// Product table required
+val a_prod = spark.read.parquet("s3://136731789529-fis-raw-data/product/20230203/raw/parquet/")
+  .filter((col("account_key").isNotNull || col("customer_key").isNotNull) && 
+          (when(col("screening_system").isin("UKCMLPVHI", "UKCMLPV100", "UKCMLPVSK", "UKCMLPV500", "UKCMLPV10K", "UKCMLPVIK", "UKCMLPUNK", "UMLPBHI", "UKC P8200", "КСМІРВК", "КСМРВ5О", "иКСМІРЕК", "ИКСРВК"), lit(true)).otherwise(lit(false))))
+a_prod.createOrReplaceTempView("a_prod")
+a_prod.cache()
+
+// Join eligible customers to product data
+val prod_qtx = a_cus.join(a_prod, a_cus("customerUniqueId") === a_prod("customerUniqueId"), "inner")
+prod_qtx.createOrReplaceTempView("prod_qtx")
+prod_qtx.cache()
+
+// Define the source fields with transformations
+val src_fields = spark.sql("""
+  SELECT customerUniqueId, account_risk_code_desc, name as accountName, substring(account_id,0,5) as accountIdPrefix, 
+  account_no as accountNumber, account_no as CleansedAccountNumber, account_key as accountKey, company_id as companyId, 
+  country_code as country, currency_code as currencyCode, 
+  CASE WHEN financial_institution = 'N' THEN 'false' ELSE 'true' END as financialInstitution,
+  update_tms as lastUpdatedDate, line_of_business_desc as lineOfBusiness, 
+  CASE WHEN joint_account = 'N' THEN 'false' ELSE 'true' END as jointAccount, 
+  CASE WHEN non_operating_entity = 'N' THEN 'false' ELSE 'true' END as nonOperatingEntity, 
+  CASE WHEN numbered_account = 'N' THEN 'false' ELSE 'true' END as numberedAccount, 
+  product_id as productId, region_id as regionId, risk_code as riskCode, 
+  relman_id as rmId, relman_name as rmName, 
+  CASE WHEN sensitive_industry = 'N' THEN 'false' ELSE 'true' END as sensitiveIndustry, 
+  sortcode as sortcode, sortcode as cleansedSortCode, source_sys_code as sourceSystem, 
+  high_account_type as highAccountType, high_account_type_desc as highAccountTypeDescription, 
+  low_account_type as lowAccountType, low_account_type_desc as lowAccountTypeDescription, 
+  external_account_type as externalAccountType, industry_code_desc as industryCodeDescription 
+  FROM prod_qtx
+""")
+src_fields.createOrReplaceTempView("src_fields")
+src_fields.cache()
+
+// Load and process target data
+val Qxta_targt = spark.read.parquet("s3://136731789529-fis-interim-data/customer/2023-05-19_14-31-53-631/DocumentDataModel/DocumentDataModel.parquet/")
+  .select($"customerUniqueId", explode($"account").alias("account"))
+  .select("customerUniqueId", "account.*")
+Qxta_targt.createOrReplaceTempView("Qxta_targt")
+Qxta_targt.cache()
+
+// Bring out selected fields from target data
+val selected_Qxta_targt = spark.sql("""
+  SELECT customerUniqueId, accountRiskCodeDescription, accountName, accountIdPrefix, accountNumber, cleansedAccountNumber, accountKey, 
+  companyId, country, currencyCode, cast(financialInstitution as string) as financialInstitution, 
+  cast(jointAccount as String) as jointAccount, lastUpdatedDate, lineOfBusiness, lineOfBusinessDescription, 
+  maturityDate, cast(nonOperatingEntity as string) as nonOperatingEntity, cast(numberedAccount as string) as numberedAccount, 
+  productId, regionId, riskCode, rmId, rmName, cast(sensitiveIndustry as string) as sensitiveIndustry, 
+  sortcode, cleansedSortCode, sourceSystem, highAccountType, highAccountTypeDescription, 
+  lowAccountType, lowAccountTypeDescription, externalAccountType, industryCodeDescription 
+  FROM Qxta_targt
+""")
+selected_Qxta_targt.createOrReplaceTempView("selected_Qxta_targt")
+selected_Qxta_targt.cache()
+
+// Scenario 1 comparison
+val src_fields1 = spark.sql("""
+  SELECT customerUniqueId, account_risk_code_desc, accountName, accountIdPrefix 
+  FROM src_fields
+""").dropDuplicates()
+src_fields1.createOrReplaceTempView("src_fields1")
+src_fields1.cache()
+
+val targ_fields1 = spark.sql("""
+  SELECT customerUniqueId, accountRiskCodeDescription, accountName, accountIdPrefix 
+  FROM selected_Qxta_targt
+""").dropDuplicates()
+targ_fields1.createOrReplaceTempView("targ_fields1")
+targ_fields1.cache()
+
+// Compare scenario 1
+src_fields1.exceptAll(targ_fields1).show(10, false)
+targ_fields1.exceptAll(src_fields1).show(10, false)
+
+// Scenario 2 comparison
+val src_fields2 = spark.sql("""
+  SELECT customerUniqueId, null as cleansedAccountNumber, accountNumber, accountKey, companyId 
+  FROM src_fields
+""").dropDuplicates()
+src_fields2.createOrReplaceTempView("src_fields2")
+src_fields2.cache()
+
+val targ_fields2 = spark.sql("""
+  SELECT customerUniqueId, cleansedAccountNumber, accountNumber, accountKey, companyId 
+  FROM selected_Qxta_targt
+""").dropDuplicates()
+targ_fields2.createOrReplaceTempView("targ_fields2")
+targ_fields2.cache()
+
+// Compare scenario 2
+src_fields2.exceptAll(targ_fields2).show(10, false)
+targ_fields2.exceptAll(src_fields2).show(10, false)
+
+// Scenario 3 comparison
+val src_fields3 = spark.sql("""
+  SELECT customerUniqueId, country, currencyCode, financialInstitution 
+  FROM src_fields
+""").dropDuplicates()
+src_fields3.createOrReplaceTempView("src_fields3")
+src_fields3.cache()
+
+val targ_fields3 = spark.sql("""
+  SELECT customerUniqueId, country, currencyCode, financialInstitution 
+  FROM selected_Qxta_targt
+""").dropDuplicates()
+targ_fields3.createOrReplaceTempView("targ_fields3")
+targ_fields3.cache()
+
+// Compare scenario 3
+src_fields3.exceptAll(targ_fields3).show(10, false)
+targ_fields3.exceptAll(src_fields3).show(10, false)
+
+// Scenario 4 comparison
+val src_fields4 = spark.sql("""
+  SELECT customerUniqueId, lastUpdatedDate, lineOfBusiness, null as lineOfBusinessDescription, maturityDate, nonOperatingEntity 
+  FROM src_fields
+""").dropDuplicates()
+src_fields4.createOrReplaceTempView("src_fields4")
+src_fields4.cache()
+
+val targ_fields4 = spark.sql("""
+  SELECT customerUniqueId, lastUpdatedDate, lineOfBusiness, lineOfBusinessDescription, maturityDate, nonOperatingEntity 
+  FROM selected_Qxta_targt
+""").dropDuplicates()
+targ_fields4.createOrReplaceTempView("targ_fields4")
+targ_fields4.cache()
+
+// Compare scenario 4
+src_fields4.exceptAll(targ_fields4).show(10, false)
+targ_fields4.exceptAll(src_fields4).show(10, false)
+
+// Additional distinct checks
+spark.sql("SELECT DISTINCT lastUpdatedDate FROM targ_fields4").show(5, false)
+spark.sql("SELECT DISTINCT maturityDate FROM targ_fields4").show(5, false)
+spark.sql("SELECT DISTINCT nonOperatingEntity FROM targ_fields4").show(5, false)
