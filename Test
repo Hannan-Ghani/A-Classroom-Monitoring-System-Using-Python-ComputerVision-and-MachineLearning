@@ -1,70 +1,89 @@
 // Import necessary libraries
+import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.functions._
 import org.apache.spark.sql.types._
-import org.apache.spark.sql.{SparkSession, SQLContext}
 
-// Initialize Spark session (in AWS Glue, GlueContext typically manages this)
-val spark = SparkSession.builder.appName("GlueETLJob").getOrCreate()
-import spark.implicits._
+// Initialize Spark session
+val spark = SparkSession.builder()
+  .appName("CustomerProductETL")
+  .config("spark.executor.memory", "130g")
+  .config("spark.executor.cores", "1")
+  .config("spark.executor.instances", "5")
+  .config("spark.cores.max", "1")
+  .config("spark.driver.memory", "160g")
+  .getOrCreate()
 
-// Read and filter customer data
-val a_cus = spark.read.parquet("s3://136731789529-fis-raw-data/customer/20230309/raw/parquet/")
-  .filter("NUM_OF_ACCOUNT >= 0 and (SOURCE_COUNTRY <> 'ZA' or SOURCE_COUNTRY is NULL) and customer_key is not NULL and customer_key not in ('TMAMLO-T', 'TMEMA-*', 'TMUK1-*', 'TMUK2*', 'Not Available')")
+// Load customer data
+val customerData = spark.read.parquet("s3://136731789529-fis-raw-data/customer/20240129/raw/parquet/")
+  .filter("NUM_OF_ACCOUNT >= 0 and (SOURCE_COUNTRY <> 'ZA' or SOURCE_COUNTRY is NULL) and customer_key is not null and customer_key not in ('TMAMLC-*', 'TMEMA-*', 'TMUK1-*', 'TMUK2-*', 'Not Available')")
   .withColumn("customerUniqueId", regexp_replace(col("customer_key"), "[^A-Za-z0-9]", ""))
-a_cus.createOrReplaceTempView("a_cus")
-a_cus.cache()
+customerData.createOrReplaceTempView("customerData")
+customerData.cache()
 
-// Read and filter product data
-val a_prod = spark.read.parquet("s3://136731789529-fis-raw-data/product/20230203/raw/parquet/")
-  .filter((col("account_key").isNotNull || col("customer_key").isNotNull) && 
-          (when(col("screening_system").isin("UKCMLPVHI", "UKCMLPV100", "UKCMLPVSK", "UKCMLPV500", "UKCMLPV10K", "UKCMLPVIK", "UKCMLPUNK", "UMLPBHI", "UKC P8200", "КСМІРВК", "КСМРВ5О", "иКСМІРЕК", "ИКСРВК"), lit(true)).otherwise(lit(false))))
-a_prod.createOrReplaceTempView("a_prod")
-a_prod.cache()
+// Load product data from two different datasets and union them
+val productData1 = spark.read.parquet("s3://136731789529-fis-raw-data/uk1/product/20230719/raw/parquet/")
+val productData2 = spark.read.parquet("s3://136731789529-fis-raw-data/product/20240129/raw/parquet/")
+
+val productData = productData1.union(productData2)
+productData.createOrReplaceTempView("productData")
+productData.cache()
 
 // Join customer and product data
-val prod_qtx = a_cus.join(a_prod, a_cus("customerUniqueId") === a_prod("customerUniqueId"), "inner")
-prod_qtx.createOrReplaceTempView("prod_qtx")
-prod_qtx.cache()
+val joinedData = customerData.join(productData, "customerUniqueId")
+  .dropDuplicates()
+joinedData.createOrReplaceTempView("joinedData")
+joinedData.cache()
 
-// Define source fields with necessary transformations
-val src_fields = spark.sql("""
-  SELECT customerUniqueId, account_risk_code_desc, name as accountName, substring(account_id,0,5) as accountIdPrefix, 
-  account_no as accountNumber, account_no as CleansedAccountNumber, account_key as accountKey, company_id as companyId, 
-  country_code as country, currency_code as currencyCode, 
-  CASE WHEN financial_institution = 'N' THEN 'false' ELSE 'true' END as financialInstitution,
-  update_tms as lastUpdatedDate, line_of_business_desc as lineOfBusiness, 
-  CASE WHEN joint_account = 'N' THEN 'false' ELSE 'true' END as jointAccount, 
-  CASE WHEN non_operating_entity = 'N' THEN 'false' ELSE 'true' END as nonOperatingEntity, 
-  CASE WHEN numbered_account = 'N' THEN 'false' ELSE 'true' END as numberedAccount, 
-  product_id as productId, region_id as regionId, risk_code as riskCode, 
-  relman_id as rmId, relman_name as rmName, 
-  CASE WHEN sensitive_industry = 'N' THEN 'false' ELSE 'true' END as sensitiveIndustry, 
-  sortcode as sortcode, sortcode as cleansedSortCode, source_sys_code as sourceSystem, 
-  high_account_type as highAccountType, high_account_type_desc as highAccountTypeDescription, 
-  low_account_type as lowAccountType, low_account_type_desc as lowAccountTypeDescription, 
-  external_account_type as externalAccountType, industry_code_desc as industryCodeDescription 
-  FROM prod_qtx
+// Prepare selected fields for further processing
+val preparedData = spark.sql("""
+  SELECT customerUniqueId, account_risk_code_desc, name AS accountName, 
+  SUBSTRING(account_id, 0, 5) AS accountIdPrefix, account_no AS accountNumber, 
+  account_no AS cleansedAccountNumber, account_key AS accountKey, 
+  company_id AS companyId, country_code AS country, currency_code AS currencyCode, 
+  financial_institution, 
+  CASE WHEN joint_account = 'N' THEN 'false' ELSE 'true' END AS jointAccount, 
+  update_tms AS lastUpdatedDate, line_of_business_desc AS lineOfBusiness, 
+  'lineOfBusinessDescription', maturity_date AS maturityDate, 
+  CASE WHEN non_operating_entity = 'N' THEN 'false' ELSE 'true' END AS nonOperatingEntity, 
+  CASE WHEN numbered_account = 'N' THEN 'false' ELSE 'true' END AS numberedAccount, 
+  product_id AS productId, region_id AS regionId, risk_code AS riskCode, 
+  relman_id AS rmId, relman_name AS rmName, 
+  CASE WHEN sensitive_industry = 'N' THEN 'false' ELSE 'true' END AS sensitiveIndustry, 
+  sortcode AS sortcode, sortcode AS cleansedSortCode, source_sys_code AS sourceSystem, 
+  high_account_type AS highAccountType, high_account_type_desc AS highAccountTypeDescription, 
+  low_account_type AS lowAccountType, low_account_type_desc AS lowAccountTypeDescription, 
+  external_account_type AS externalAccountType, industry_code_desc AS industryCodeDescription, 
+  legal_entity
+  FROM joinedData
 """)
-src_fields.createOrReplaceTempView("src_fields")
-src_fields.cache()
+preparedData.createOrReplaceTempView("preparedData")
+preparedData.cache()
 
-// Load target data and explode account details
-val Qxta_targt = spark.read.parquet("s3://136731789529-fis-interim-data/customer/2023-05-19_14-31-53-631/DocumentDataModel/DocumentDataModel.parquet/")
+// Load the document model data
+val documentData = spark.read.parquet("s3://136731789529-fis-interim-data/customer/2024-02-01_12-09-00-078/DocumentDataModel/DocumentDataModel.parquet/")
   .select($"customerUniqueId", explode($"account").alias("account"))
   .select("customerUniqueId", "account.*")
-Qxta_targt.createOrReplaceTempView("Qxta_targt")
-Qxta_targt.cache()
+documentData.createOrReplaceTempView("documentData")
+documentData.cache()
 
-// Select required fields from the target data
-val selected_Qxta_targt = spark.sql("""
-  SELECT customerUniqueId, accountRiskCodeDescription, accountName, accountIdPrefix, accountNumber, cleansedAccountNumber, accountKey, 
-  companyId, country, currencyCode, cast(financialInstitution as string) as financialInstitution, 
-  cast(jointAccount as String) as jointAccount, lastUpdatedDate, lineOfBusiness, lineOfBusinessDescription, 
-  maturityDate, cast(nonOperatingEntity as string) as nonOperatingEntity, cast(numberedAccount as string) as numberedAccount, 
-  productId, regionId, riskCode, rmId, rmName, cast(sensitiveIndustry as string) as sensitiveIndustry, 
-  sortcode, cleansedSortCode, sourceSystem, highAccountType, highAccountTypeDescription, 
-  lowAccountType, lowAccountTypeDescription, externalAccountType, industryCodeDescription 
-  FROM Qxta_targt
+// Prepare selected fields from the document model
+val selectedDocumentData = spark.sql("""
+  SELECT customerUniqueId, accountRiskCodeDescription, accountName, accountIdPrefix, 
+  accountNumber, cleansedAccountNumber, accountKey, companyId, country, currencyCode, 
+  CAST(financialInstitution AS string) AS financialInstitution, 
+  CAST(jointAccount AS String) AS jointAccount, lastUpdatedDate, lineOfBusiness, 
+  lineOfBusinessDescription, maturityDate, 
+  CAST(nonOperatingEntity AS string) AS nonOperatingEntity, 
+  CAST(numberedAccount AS string) AS numberedAccount, 
+  productId, regionId, riskCode, rmId, rmName, 
+  CAST(sensitiveIndustry AS string) AS sensitiveIndustry, sortcode, 
+  cleansedSortCode, sourceSystem, highAccountType, highAccountTypeDescription, 
+  lowAccountType, lowAccountTypeDescription, externalAccountType, industryCodeDescription, 
+  legalEntity 
+  FROM documentData
 """)
-selected_Qxta_targt.createOrReplaceTempView("selected_Qxta_targt")
-selected_Qxta_targt.cache()
+selectedDocumentData.createOrReplaceTempView("selectedDocumentData")
+selectedDocumentData.cache()
+
+// Stop Spark session
+spark.stop()
