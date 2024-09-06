@@ -1,89 +1,57 @@
-// Import necessary libraries
-import org.apache.spark.sql.SparkSession
-import org.apache.spark.sql.functions._
-import org.apache.spark.sql.types._
+#!/bin/bash
 
-// Initialize Spark session
-val spark = SparkSession.builder()
-  .appName("CustomerProductETL")
-  .config("spark.executor.memory", "130g")
-  .config("spark.executor.cores", "1")
-  .config("spark.executor.instances", "5")
-  .config("spark.cores.max", "1")
-  .config("spark.driver.memory", "160g")
-  .getOrCreate()
+# Set the Glue job name
+GLUE_JOB_NAME="gluejobforetl"
+REGION="eu-west-1"
+POLL_INTERVAL=30  # Time in seconds between status checks
 
-// Load customer data
-val customerData = spark.read.parquet("s3://136731789529-fis-raw-data/customer/20240129/raw/parquet/")
-  .filter("NUM_OF_ACCOUNT >= 0 and (SOURCE_COUNTRY <> 'ZA' or SOURCE_COUNTRY is NULL) and customer_key is not null and customer_key not in ('TMAMLC-*', 'TMEMA-*', 'TMUK1-*', 'TMUK2-*', 'Not Available')")
-  .withColumn("customerUniqueId", regexp_replace(col("customer_key"), "[^A-Za-z0-9]", ""))
-customerData.createOrReplaceTempView("customerData")
-customerData.cache()
+# Log the start of the job
+echo "Starting AWS Glue job: $GLUE_JOB_NAME"
 
-// Load product data from two different datasets and union them
-val productData1 = spark.read.parquet("s3://136731789529-fis-raw-data/uk1/product/20230719/raw/parquet/")
-val productData2 = spark.read.parquet("s3://136731789529-fis-raw-data/product/20240129/raw/parquet/")
+# Start the Glue job using AWS CLI and capture the JobRunId
+response=$(aws glue start-job-run --job-name "$GLUE_JOB_NAME" --region "$REGION")
+STATUS=$?
 
-val productData = productData1.union(productData2)
-productData.createOrReplaceTempView("productData")
-productData.cache()
+# Check if the Glue job was started successfully
+if [ $STATUS -ne 0 ]; then
+    echo "Failed to start Glue job: $GLUE_JOB_NAME"
+    echo "Response: $response"
+    exit $STATUS  # Exit with the AWS CLI command status
+fi
 
-// Join customer and product data
-val joinedData = customerData.join(productData, "customerUniqueId")
-  .dropDuplicates()
-joinedData.createOrReplaceTempView("joinedData")
-joinedData.cache()
+# Extract JobRunId from the response using basic parsing with awk
+JOB_RUN_ID=$(echo $response | awk -F'"' '/JobRunId/ {print $4}')
+echo "Glue job started successfully. JobRunId: $JOB_RUN_ID"
 
-// Prepare selected fields for further processing
-val preparedData = spark.sql("""
-  SELECT customerUniqueId, account_risk_code_desc, name AS accountName, 
-  SUBSTRING(account_id, 0, 5) AS accountIdPrefix, account_no AS accountNumber, 
-  account_no AS cleansedAccountNumber, account_key AS accountKey, 
-  company_id AS companyId, country_code AS country, currency_code AS currencyCode, 
-  financial_institution, 
-  CASE WHEN joint_account = 'N' THEN 'false' ELSE 'true' END AS jointAccount, 
-  update_tms AS lastUpdatedDate, line_of_business_desc AS lineOfBusiness, 
-  'lineOfBusinessDescription', maturity_date AS maturityDate, 
-  CASE WHEN non_operating_entity = 'N' THEN 'false' ELSE 'true' END AS nonOperatingEntity, 
-  CASE WHEN numbered_account = 'N' THEN 'false' ELSE 'true' END AS numberedAccount, 
-  product_id AS productId, region_id AS regionId, risk_code AS riskCode, 
-  relman_id AS rmId, relman_name AS rmName, 
-  CASE WHEN sensitive_industry = 'N' THEN 'false' ELSE 'true' END AS sensitiveIndustry, 
-  sortcode AS sortcode, sortcode AS cleansedSortCode, source_sys_code AS sourceSystem, 
-  high_account_type AS highAccountType, high_account_type_desc AS highAccountTypeDescription, 
-  low_account_type AS lowAccountType, low_account_type_desc AS lowAccountTypeDescription, 
-  external_account_type AS externalAccountType, industry_code_desc AS industryCodeDescription, 
-  legal_entity
-  FROM joinedData
-""")
-preparedData.createOrReplaceTempView("preparedData")
-preparedData.cache()
-
-// Load the document model data
-val documentData = spark.read.parquet("s3://136731789529-fis-interim-data/customer/2024-02-01_12-09-00-078/DocumentDataModel/DocumentDataModel.parquet/")
-  .select($"customerUniqueId", explode($"account").alias("account"))
-  .select("customerUniqueId", "account.*")
-documentData.createOrReplaceTempView("documentData")
-documentData.cache()
-
-// Prepare selected fields from the document model
-val selectedDocumentData = spark.sql("""
-  SELECT customerUniqueId, accountRiskCodeDescription, accountName, accountIdPrefix, 
-  accountNumber, cleansedAccountNumber, accountKey, companyId, country, currencyCode, 
-  CAST(financialInstitution AS string) AS financialInstitution, 
-  CAST(jointAccount AS String) AS jointAccount, lastUpdatedDate, lineOfBusiness, 
-  lineOfBusinessDescription, maturityDate, 
-  CAST(nonOperatingEntity AS string) AS nonOperatingEntity, 
-  CAST(numberedAccount AS string) AS numberedAccount, 
-  productId, regionId, riskCode, rmId, rmName, 
-  CAST(sensitiveIndustry AS string) AS sensitiveIndustry, sortcode, 
-  cleansedSortCode, sourceSystem, highAccountType, highAccountTypeDescription, 
-  lowAccountType, lowAccountTypeDescription, externalAccountType, industryCodeDescription, 
-  legalEntity 
-  FROM documentData
-""")
-selectedDocumentData.createOrReplaceTempView("selectedDocumentData")
-selectedDocumentData.cache()
-
-// Stop Spark session
-spark.stop()
+# Poll the Glue job status until it is no longer 'RUNNING'
+while true; do
+    # Get the current status of the Glue job
+    job_status_response=$(aws glue get-job-run --job-name "$GLUE_JOB_NAME" --run-id "$JOB_RUN_ID" --region "$REGION")
+    JOB_STATUS=$(echo $job_status_response | awk -F'"' '/"JobRunState":/ {print $4}')
+    
+    echo "Current Glue job status: $JOB_STATUS"
+    
+    # Check the job status
+    case "$JOB_STATUS" in
+        "SUCCEEDED")
+            echo "Glue job completed successfully."
+            exit 0  # Success exit code
+            ;;
+        "FAILED" | "ERROR" | "TIMEOUT")
+            echo "Glue job failed with status: $JOB_STATUS"
+            exit 1  # Failure exit code
+            ;;
+        "STOPPED")
+            echo "Glue job was stopped."
+            exit 2  # Indicate job was stopped
+            ;;
+        "RUNNING" | "STARTING" | "STOPPING")
+            echo "Glue job is still running, checking again in $POLL_INTERVAL seconds..."
+            sleep $POLL_INTERVAL  # Wait before checking again
+            ;;
+        *)
+            echo "Unexpected job status: $JOB_STATUS"
+            exit 3  # Exit for unknown status
+            ;;
+    esac
+done
