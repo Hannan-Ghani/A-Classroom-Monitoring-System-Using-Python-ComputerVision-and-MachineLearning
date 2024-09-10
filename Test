@@ -1,57 +1,47 @@
-#!/bin/bash
+import com.amazonaws.services.glue.GlueContext
+import com.amazonaws.services.glue.util.GlueArgParser
+import org.apache.spark.sql.{DataFrame, SparkSession}
+import org.apache.spark.SparkContext
+import scala.collection.JavaConverters._
 
-# Set the Glue job name
-GLUE_JOB_NAME="gluejobforetl"
-REGION="eu-west-1"
-POLL_INTERVAL=30  # Time in seconds between status checks
+object GlueApp {
+  def main(sysArgs: Array[String]): Unit = {
+    val sc: SparkContext = new SparkContext()
+    val glueContext: GlueContext = new GlueContext(sc)
+    val spark: SparkSession = glueContext.getSparkSession
 
-# Log the start of the job
-echo "Starting AWS Glue job: $GLUE_JOB_NAME"
+    // Parse job parameters
+    val args = GlueArgParser.getResolvedOptions(sysArgs, Seq("sourcePath", "targetPath", "outputPath", "JOB_NAME").toArray)
+    val sourcePath = args("sourcePath")
+    val targetPath = args("targetPath")
+    val outputPath = args("outputPath")
 
-# Start the Glue job using AWS CLI and capture the JobRunId
-response=$(aws glue start-job-run --job-name "$GLUE_JOB_NAME" --region "$REGION")
-STATUS=$?
+    // Read the source and target datasets
+    val sourceDF: DataFrame = spark.read.parquet(sourcePath)
+    val targetDF: DataFrame = spark.read.parquet(targetPath)
 
-# Check if the Glue job was started successfully
-if [ $STATUS -ne 0 ]; then
-    echo "Failed to start Glue job: $GLUE_JOB_NAME"
-    echo "Response: $response"
-    exit $STATUS  # Exit with the AWS CLI command status
-fi
+    // Dynamically select all columns for comparison
+    val sourceColumns = sourceDF.columns.toSet
+    val targetColumns = targetDF.columns.toSet
 
-# Extract JobRunId from the response using basic parsing with awk
-JOB_RUN_ID=$(echo $response | awk -F'"' '/JobRunId/ {print $4}')
-echo "Glue job started successfully. JobRunId: $JOB_RUN_ID"
+    // Check if both DataFrames have the same columns
+    if (sourceColumns != targetColumns) {
+      println(s"Source and target datasets have different columns: \nSource: $sourceColumns\nTarget: $targetColumns")
+      System.exit(1)  // Exit if columns don't match
+    }
 
-# Poll the Glue job status until it is no longer 'RUNNING'
-while true; do
-    # Get the current status of the Glue job
-    job_status_response=$(aws glue get-job-run --job-name "$GLUE_JOB_NAME" --run-id "$JOB_RUN_ID" --region "$REGION")
-    JOB_STATUS=$(echo $job_status_response | awk -F'"' '/"JobRunState":/ {print $4}')
-    
-    echo "Current Glue job status: $JOB_STATUS"
-    
-    # Check the job status
-    case "$JOB_STATUS" in
-        "SUCCEEDED")
-            echo "Glue job completed successfully."
-            exit 0  # Success exit code
-            ;;
-        "FAILED" | "ERROR" | "TIMEOUT")
-            echo "Glue job failed with status: $JOB_STATUS"
-            exit 1  # Failure exit code
-            ;;
-        "STOPPED")
-            echo "Glue job was stopped."
-            exit 2  # Indicate job was stopped
-            ;;
-        "RUNNING" | "STARTING" | "STOPPING")
-            echo "Glue job is still running, checking again in $POLL_INTERVAL seconds..."
-            sleep $POLL_INTERVAL  # Wait before checking again
-            ;;
-        *)
-            echo "Unexpected job status: $JOB_STATUS"
-            exit 3  # Exit for unknown status
-            ;;
-    esac
-done
+    // Perform the comparison by finding mismatches
+    val mismatchedRecords = sourceDF.except(targetDF).union(targetDF.except(sourceDF))
+
+    // Output the mismatches
+    if (!mismatchedRecords.isEmpty) {
+      mismatchedRecords.show() // Show mismatched records
+      // Save the mismatched records to the output path
+      mismatchedRecords.write.mode("overwrite").parquet(outputPath)
+    } else {
+      println("No mismatches found. The datasets are identical.")
+    }
+
+    println("Glue job completed successfully.")
+  }
+}
