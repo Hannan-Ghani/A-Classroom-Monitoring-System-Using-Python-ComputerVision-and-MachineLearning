@@ -1,47 +1,61 @@
-import com.amazonaws.services.glue.GlueContext
-import com.amazonaws.services.glue.util.GlueArgParser
-import org.apache.spark.sql.{DataFrame, SparkSession}
-import org.apache.spark.SparkContext
-import scala.collection.JavaConverters._
+from pyspark.conf import SparkConf
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import col, regexp_replace, explode
 
-object GlueApp {
-  def main(sysArgs: Array[String]): Unit = {
-    val sc: SparkContext = new SparkContext()
-    val glueContext: GlueContext = new GlueContext(sc)
-    val spark: SparkSession = glueContext.getSparkSession
+# Set up Spark configuration
+conf = SparkConf().setAll([
+    ('spark.executor.memory', '130g'),
+    ('spark.executor.cores', '1'),
+    ('spark.executor.instances', '5'),
+    ('spark.cores.max', '1'),
+    ('spark.driver.memory', '160g')
+])
 
-    // Parse job parameters
-    val args = GlueArgParser.getResolvedOptions(sysArgs, Seq("sourcePath", "targetPath", "outputPath", "JOB_NAME").toArray)
-    val sourcePath = args("sourcePath")
-    val targetPath = args("targetPath")
-    val outputPath = args("outputPath")
+# Initialize Spark session
+spark = SparkSession.builder.config(conf=conf).getOrCreate()
 
-    // Read the source and target datasets
-    val sourceDF: DataFrame = spark.read.parquet(sourcePath)
-    val targetDF: DataFrame = spark.read.parquet(targetPath)
+# Read the customer data from core
+a_cus = spark.read.parquet('s3://136731789529-fis-raw-data/customer/20240129/raw/parquet/*.parquet') \
+    .filter("NUM_OF_ACCOUNT >= 0 and (SOURCE_COUNTRY <> 'ZA' or SOURCE_COUNTRY is NULL) and customer_key is not null") \
+    .withColumn('customerUniqueId', regexp_replace(col('customer_key'), '[^\\w]', ''))
 
-    // Dynamically select all columns for comparison
-    val sourceColumns = sourceDF.columns.toSet
-    val targetColumns = targetDF.columns.toSet
+a_cus.createOrReplaceTempView('a_cus')
 
-    // Check if both DataFrames have the same columns
-    if (sourceColumns != targetColumns) {
-      println(s"Source and target datasets have different columns: \nSource: $sourceColumns\nTarget: $targetColumns")
-      System.exit(1)  // Exit if columns don't match
-    }
+# Read the product data from two sources
+Prod_fortent = spark.read.parquet('s3://136731789529-fis-raw-data/uk1/product/20230719/raw/parquet/')
+Prod_fortent.createOrReplaceTempView('Prod_fortent')
 
-    // Perform the comparison by finding mismatches
-    val mismatchedRecords = sourceDF.except(targetDF).union(targetDF.except(sourceDF))
+Prod_core = spark.read.parquet('s3://136731789529-fis-raw-data/product/20240129/raw/parquet/*.parquet')
+Prod_core.createOrReplaceTempView('Prod_core')
 
-    // Output the mismatches
-    if (!mismatchedRecords.isEmpty) {
-      mismatchedRecords.show() // Show mismatched records
-      // Save the mismatched records to the output path
-      mismatchedRecords.write.mode("overwrite").parquet(outputPath)
-    } else {
-      println("No mismatches found. The datasets are identical.")
-    }
+# Union of product data
+prodJoin = spark.sql("SELECT * FROM Prod_core UNION SELECT * FROM Prod_fortent")
+prodJoin.createOrReplaceTempView('prodJoin')
 
-    println("Glue job completed successfully.")
-  }
-}
+# Filter joined product data
+a_prod = prodJoin.filter(
+    (col('account_key').isNotNull() | col('customer_key').isNotNull()) &
+    (~col('customer_role').isin("CML - COMP PARENT", "PRIMARY")) &
+    (col('low_account_type').isin(
+        "UKCMLPVHI", "UKCMLPV100", "UKCMLPV5K", "UKCMLPV500", "UKCMLPV10K",
+        "UKCMLPV1K", "UKCMLPVUNK", "UKCMLPBHI", "UKCMLPB100", "UKCMLPB5K",
+        "UKCMLPB500", "UKCMLPB1K", "UKCM"
+    ))
+).withColumn('customerUniqueId', regexp_replace(col('customer_key'), '[^\\w]', ''))
+
+a_prod.createOrReplaceTempView('a_prod')
+
+# Join customer and product data
+prod_qtx = spark.sql("""
+    SELECT * 
+    FROM a_cus 
+    INNER JOIN a_prod ON a_cus.customerUniqueId = a_prod.customerUniqueId
+""").dropDuplicates()
+
+prod_qtx.createOrReplaceTempView('prod_qtx')
+
+# Output the results or save to S3
+output_path = "s3://your-output-bucket/path/to/save/results"
+prod_qtx.write.mode("overwrite").parquet(output_path)
+
+print("ETL job completed successfully.")
