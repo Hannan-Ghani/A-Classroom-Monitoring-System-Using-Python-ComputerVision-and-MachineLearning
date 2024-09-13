@@ -1,74 +1,72 @@
-import com.amazonaws.services.glue.GlueContext
-import com.amazonaws.services.glue.util.GlueArgParser
-import org.apache.spark.SparkContext
-import org.apache.spark.sql.{DataFrame, SparkSession}
-import org.apache.spark.sql.functions._
+import sys
+from pyspark.context import SparkContext
+from awsglue.context import GlueContext
+from awsglue.transforms import *
+from awsglue.utils import getResolvedOptions
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import col, sum
 
-object GlueApp {
-  def main(sysArgs: Array[String]): Unit = {
-    // Initialize Spark and Glue contexts
-    val sc: SparkContext = new SparkContext()
-    val glueContext: GlueContext = new GlueContext(sc)
-    val spark: SparkSession = glueContext.getSparkSession
+# Initialize Glue Context
+glueContext = GlueContext(SparkContext.getOrCreate())
+spark = glueContext.spark_session
 
-    // Parse job parameters
-    val args = GlueArgParser.getResolvedOptions(sysArgs, Array(
-      "JOB_NAME",
-      "SOURCE_PATH_CUSTOMER",
-      "SOURCE_PATH_PRODUCT_CORE",
-      "SOURCE_PATH_PRODUCT_FORTENT",
-      "OUTPUT_PATH"
-    ))
+# Load transaction data
+transaction_date_source = spark.read.parquet("s3://136731789529-fis-raw-data/transaction/*/raw/parquet/*")
+transaction_count = transaction_date_source.count()  # Counting rows (stored but not displayed)
 
-    val jobName = args("JOB_NAME")
-    val customerPath = args("SOURCE_PATH_CUSTOMER")
-    val productCorePath = args("SOURCE_PATH_PRODUCT_CORE")
-    val productFortentPath = args("SOURCE_PATH_PRODUCT_FORTENT")
-    val outputPath = args("OUTPUT_PATH")
+# Select specific columns
+source = transaction_date_source.select(
+    col("customer_key"),
+    col("account_key"),
+    col("execution_date"),
+    col("transaction_date"),
+    col("original_amount"),
+    col("original_currency_code"),
+    col("transaction_location"),
+    col("transaction_country"),
+    col("transaction_country_iso_code"),
+    col("narrative"),
+    col("shortnarrative"),
+    col("transaction_type"),
+    col("txn_direction"),
+    col("txn_direction_desc"),
+    col("transaction_type_desc"),
+    col("amount"),
+    col("transaction_id"),
+    col("transaction_code"),
+    col("transaction_code_desc"),
+    col("sterling_equivalent"),
+    col("int_dollar_equivalent"),
+    col("transaction_routing_number"),
+    col("external_account_number"),
+    col("counterparty_customer_key"),
+    col("counterparty_product_key"),
+    col("counterparty_id"),
+    col("source_transaction_id"),
+    col("branch_key"),
+    col("account_bucket"),
+    col("jurisdiction"),
+    col("screening_system"),
+    col("source_system"),
+    col("EFF_START_DATE")
+)
 
-    // Read customer data
-    val aCus = spark.read.parquet(customerPath)
-      .filter("NUM_OF_ACCOUNT >= 0 AND (SOURCE_COUNTRY <> 'ZA' OR SOURCE_COUNTRY IS NULL) AND customer_key IS NOT NULL")
-      .withColumn("customerUniqueId", regexp_replace(col("customer_key"), "[^\\w]", ""))
-    
-    aCus.createOrReplaceTempView("a_cus")
+# Reading another transaction source
+transaction_source = spark.read.parquet("s3://136731789529-fis-raw-data/transaction/*/raw/parquet/*")
+transaction_source_count = transaction_source.count()  # Counting rows (stored but not displayed)
 
-    // Read product data from both sources
-    val prodCore = spark.read.parquet(productCorePath)
-    prodCore.createOrReplaceTempView("Prod_core")
+# Reading CSV data with specific options
+data = spark.read.option("header", "true").option("delimiter", "|").csv("s3://136731789529-fis-raw-data/transaction/*/raw/parquet/qtx_common_*")
+data_master = data.agg(sum(col("Count").cast("long"))).first()[0]  # Aggregating count (stored but not displayed)
 
-    val prodFortent = spark.read.parquet(productFortentPath)
-    prodFortent.createOrReplaceTempView("Prod_fortent")
+# Reading a specific parquet file and counting rows
+parquet_20230914 = spark.read.parquet("s3://136731789529-fis-raw-data/transaction/*/raw/parquet/*")
+parquet_20230914_count = parquet_20230914.count()  # Counting rows (stored but not displayed)
 
-    // Union of product data
-    val prodJoin = spark.sql("SELECT * FROM Prod_core UNION SELECT * FROM Prod_fortent")
-    prodJoin.createOrReplaceTempView("prodJoin")
+# Reading metadata file
+metadata_file = spark.read.parquet("s3://136731789529-fis-interim-data/transaction/metadata.parquet/")
 
-    // Filter joined product data
-    val aProd = prodJoin.filter(
-      (col("account_key").isNotNull || col("customer_key").isNotNull) &&
-      (!col("customer_role").isin("CML - COMP PARENT", "PRIMARY")) &&
-      col("low_account_type").isin(
-        "UKCMLPVHI", "UKCMLPV100", "UKCMLPV5K", "UKCMLPV500", "UKCMLPV10K",
-        "UKCMLPV1K", "UKCMLPVUNK", "UKCMLPBHI", "UKCMLPB100", "UKCMLPB5K",
-        "UKCMLPB500", "UKCMLPB1K", "UKCM"
-      )
-    ).withColumn("customerUniqueId", regexp_replace(col("customer_key"), "[^\\w]", ""))
-
-    aProd.createOrReplaceTempView("a_prod")
-
-    // Join customer and product data
-    val prodQtx = spark.sql("""
-      SELECT * 
-      FROM a_cus 
-      INNER JOIN a_prod ON a_cus.customerUniqueId = a_prod.customerUniqueId
-    """).dropDuplicates()
-
-    prodQtx.createOrReplaceTempView("prod_qtx")
-
-    // Write results to the specified output path
-    prodQtx.write.mode("overwrite").parquet(outputPath)
-
-    println("ETL job completed successfully.")
-  }
-}
+# Filtering audit summary data
+audit_summary = spark.read.parquet("s3://136731789529-fis-interim-data/auditSummary/quantexaAuditSummary.parquet/*") \
+    .filter(col("batchId").isin("2023-10-23_13-03-31-472")) \
+    .filter(~col("processingStage").isin("InputRawToPartition", "S3RawLayer"))
