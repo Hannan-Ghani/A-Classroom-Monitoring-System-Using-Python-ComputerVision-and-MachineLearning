@@ -112,3 +112,59 @@ target.write.mode("overwrite").parquet(targetPath)
 
 // Log the path where the data is saved
 println(s"Processed data has been saved to: $targetPath")
+
+
+
+
+
+Here's a mapping of the variables used in the updated Scala Spark code along with their original hardcoded values or placeholders from your initial code. You can use this information to correctly set up the parameters in AWS Glue job configuration.
+
+### Mapping of Variables for Glue Configuration
+
+1. **`SOURCE_PATH`**
+   - **Original Value in Code:** `"s3://136731789529-fis-raw-data/transaction/*/raw/parquet/*"`
+   - **Glue Parameter Key:** `--SOURCE_PATH`
+   - **Description:** This parameter points to the S3 path where the raw transaction data is stored.
+
+2. **`TARGET_PATH`**
+   - **Original Placeholder in Updated Code:** `"s3://your-output-bucket/processed/target_data/"`
+   - **Glue Parameter Key:** `--TARGET_PATH`
+   - **Description:** This parameter specifies the S3 path where the processed data will be saved. Replace with the actual S3 path where you want to store your output files.
+
+3. **`BATCH_ID`**
+   - **Original Hardcoded Filter in Code:** `"2023-10-23_13-03-31-472"`
+   - **Glue Parameter Key:** `--BATCH_ID`
+   - **Description:** Used for filtering audit summary data based on a specific batch ID. Set this to the batch ID value you need for filtering the audit summary records.
+
+4. **`OUTPUT_BUCKET`**
+   - **Original Placeholder in Updated Code:** `"s3://your-output-bucket/processed/"`
+   - **Glue Parameter Key:** `--OUTPUT_BUCKET`
+   - **Description:** This parameter specifies the base S3 bucket path for additional outputs like audit summaries. Replace with your desired S3 bucket path.
+
+### Steps to Add These Parameters in AWS Glue:
+
+1. **Navigate to AWS Glue Console:**
+   - Go to your AWS Glue dashboard.
+
+2. **Edit or Create a Job:**
+   - Choose an existing job to edit, or create a new job.
+
+3. **Add Job Parameters:**
+   - Under the "Job parameters" section, add the following parameters with their keys and respective values:
+   
+   | Glue Parameter Key | Example Value                                      | Description                               |
+   |--------------------|----------------------------------------------------|-------------------------------------------|
+   | `--SOURCE_PATH`    | `s3://136731789529-fis-raw-data/transaction/*/raw/parquet/*` | Path to your source data in S3. |
+   | `--TARGET_PATH`    | `s3://your-output-bucket/processed/target_data/`   | Path to save the processed output.        |
+   | `--BATCH_ID`       | `2023-10-23_13-03-31-472`                          | Specific batch ID for filtering data.     |
+   | `--OUTPUT_BUCKET`  | `s3://your-output-bucket/processed/`               | Base bucket for additional outputs.       |
+
+4. **Run the Glue Job:**
+   - Ensure that the parameters are correctly set and run your Glue job. The job will use these parameters to dynamically load, process, and save your data according to the paths and criteria specified.
+
+This setup will allow you to control the Glue job dynamically by adjusting these parameters in the Glue job configuration, making it flexible for different data processing needs.
+
+
+
+
+
