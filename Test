@@ -70,3 +70,42 @@ metadata_file = spark.read.parquet("s3://136731789529-fis-interim-data/transacti
 audit_summary = spark.read.parquet("s3://136731789529-fis-interim-data/auditSummary/quantexaAuditSummary.parquet/*") \
     .filter(col("batchId").isin("2023-10-23_13-03-31-472")) \
     .filter(~col("processingStage").isin("InputRawToPartition", "S3RawLayer"))
+
+# Reading target source
+target_source = spark.read.parquet("s3://path-to-target-source/transaction/*/raw/parquet/*")  # Replace with the correct S3 path
+target = target_source.select(
+    col("customer_key"),
+    col("account_key"),
+    col("account_id"),
+    col("account_sk"),
+    col("execution_date"),
+    col("transaction_date"),
+    col("original_amount"),
+    col("original_currency_code"),
+    col("transaction_location"),
+    col("transaction_country_iso_code"),
+    col("narrative"),
+    col("shortnarrative"),
+    col("transaction_type"),
+    col("txn_direction"),
+    col("txn_direction_desc"),
+    col("transaction_type_desc"),
+    col("amount"),
+    col("transaction_id"),
+    col("transaction_code"),
+    col("transaction_code_desc"),
+    col("sterling_equivalent"),
+    col("int_dollar_equivalent"),
+    col("transaction_routing_number"),
+    col("external_account_number"),
+    col("counterparty_customer_key"),
+    col("counterparty_product_key"),
+    col("counterparty_id"),
+    col("source_transaction_id"),
+    col("branch_key"),
+    col("account_bucket"),
+    col("jurisdiction"),
+    col("screening_system"),
+    col("source_system"),
+    col("EFF_START_DATE")
+)
