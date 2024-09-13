@@ -1,111 +1,114 @@
-import sys
-from pyspark.context import SparkContext
-from awsglue.context import GlueContext
-from awsglue.transforms import *
-from awsglue.utils import getResolvedOptions
-from pyspark.sql import SparkSession
-from pyspark.sql.functions import col, sum
+import org.apache.spark.sql.SparkSession
+import org.apache.spark.sql.functions._
+import com.amazonaws.services.glue.util.GlueArgParser
 
-# Initialize Glue Context
-glueContext = GlueContext(SparkContext.getOrCreate())
-spark = glueContext.spark_session
+// Initialize Spark Session
+val spark = SparkSession.builder.appName("TransactionProcessing").getOrCreate()
 
-# Load transaction data
-transaction_date_source = spark.read.parquet("s3://136731789529-fis-raw-data/transaction/*/raw/parquet/*")
-transaction_count = transaction_date_source.count()  # Counting rows (stored but not displayed)
+// Retrieve job parameters from Glue job configuration
+val args = GlueArgParser.getResolvedOptions(sysArgs, Seq(
+  "SOURCE_PATH",           // S3 path for source data
+  "TARGET_PATH",           // S3 path for target output
+  "BATCH_ID",              // Batch ID for filtering
+  "OUTPUT_BUCKET"          // S3 output bucket for saving results
+).toArray)
 
-# Select specific columns
-source = transaction_date_source.select(
-    col("customer_key"),
-    col("account_key"),
-    col("execution_date"),
-    col("transaction_date"),
-    col("original_amount"),
-    col("original_currency_code"),
-    col("transaction_location"),
-    col("transaction_country"),
-    col("transaction_country_iso_code"),
-    col("narrative"),
-    col("shortnarrative"),
-    col("transaction_type"),
-    col("txn_direction"),
-    col("txn_direction_desc"),
-    col("transaction_type_desc"),
-    col("amount"),
-    col("transaction_id"),
-    col("transaction_code"),
-    col("transaction_code_desc"),
-    col("sterling_equivalent"),
-    col("int_dollar_equivalent"),
-    col("transaction_routing_number"),
-    col("external_account_number"),
-    col("counterparty_customer_key"),
-    col("counterparty_product_key"),
-    col("counterparty_id"),
-    col("source_transaction_id"),
-    col("branch_key"),
-    col("account_bucket"),
-    col("jurisdiction"),
-    col("screening_system"),
-    col("source_system"),
-    col("EFF_START_DATE")
+// Extract parameter values
+val sourcePath = args("SOURCE_PATH")             // Example: "s3://136731789529-fis-raw-data/transaction/*/raw/parquet/*"
+val targetPath = args("TARGET_PATH")             // Example: "s3://your-output-bucket/processed/target_data/"
+val batchId = args("BATCH_ID")                   // Example: "2023-10-23_13-03-31-472"
+val outputBucket = args("OUTPUT_BUCKET")         // Example: "s3://your-output-bucket/processed/"
+
+// Load transaction data from S3 using the source path
+val transactionDateSource = spark.read.parquet(sourcePath)
+val transactionCount = transactionDateSource.count()  // Count total rows in the transaction dataset
+
+// Select specific columns from the loaded data
+val source = transactionDateSource.select(
+    $"customer_key",
+    $"account_key",
+    $"execution_date",
+    $"transaction_date",
+    $"original_amount",
+    $"original_currency_code",
+    $"transaction_location",
+    $"transaction_country",
+    $"transaction_country_iso_code",
+    $"narrative",
+    $"shortnarrative",
+    $"transaction_type",
+    $"txn_direction",
+    $"txn_direction_desc",
+    $"transaction_type_desc",
+    $"amount",
+    $"transaction_id",
+    $"transaction_code",
+    $"transaction_code_desc",
+    $"sterling_equivalent",
+    $"int_dollar_equivalent",
+    $"transaction_routing_number",
+    $"external_account_number",
+    $"counterparty_customer_key",
+    $"counterparty_product_key",
+    $"counterparty_id",
+    $"source_transaction_id",
+    $"branch_key",
+    $"account_bucket",
+    $"jurisdiction",
+    $"screening_system",
+    $"source_system",
+    $"EFF_START_DATE"
 )
 
-# Reading another transaction source
-transaction_source = spark.read.parquet("s3://136731789529-fis-raw-data/transaction/*/raw/parquet/*")
-transaction_source_count = transaction_source.count()  # Counting rows (stored but not displayed)
+// Read another transaction source data
+val transactionSource = spark.read.parquet(sourcePath)
+val transactionSourceCount = transactionSource.count()  // Count total rows in the new transaction dataset
 
-# Reading CSV data with specific options
-data = spark.read.option("header", "true").option("delimiter", "|").csv("s3://136731789529-fis-raw-data/transaction/*/raw/parquet/qtx_common_*")
-data_master = data.agg(sum(col("Count").cast("long"))).first()[0]  # Aggregating count (stored but not displayed)
+// Filter audit summary data using the batch ID
+val auditSummary = spark.read.parquet(s"${outputBucket}auditSummary/quantexaAuditSummary.parquet/*")
+  .filter($"batchId" isin (batchId))
+  .filter(!($"processingStage" isin ("InputRawToPartition", "S3RawLayer")))
 
-# Reading a specific parquet file and counting rows
-parquet_20230914 = spark.read.parquet("s3://136731789529-fis-raw-data/transaction/*/raw/parquet/*")
-parquet_20230914_count = parquet_20230914.count()  # Counting rows (stored but not displayed)
-
-# Reading metadata file
-metadata_file = spark.read.parquet("s3://136731789529-fis-interim-data/transaction/metadata.parquet/")
-
-# Filtering audit summary data
-audit_summary = spark.read.parquet("s3://136731789529-fis-interim-data/auditSummary/quantexaAuditSummary.parquet/*") \
-    .filter(col("batchId").isin("2023-10-23_13-03-31-472")) \
-    .filter(~col("processingStage").isin("InputRawToPartition", "S3RawLayer"))
-
-# Reading target source
-target_source = spark.read.parquet("s3://path-to-target-source/transaction/*/raw/parquet/*")  # Replace with the correct S3 path
-target = target_source.select(
-    col("customer_key"),
-    col("account_key"),
-    col("account_id"),
-    col("account_sk"),
-    col("execution_date"),
-    col("transaction_date"),
-    col("original_amount"),
-    col("original_currency_code"),
-    col("transaction_location"),
-    col("transaction_country_iso_code"),
-    col("narrative"),
-    col("shortnarrative"),
-    col("transaction_type"),
-    col("txn_direction"),
-    col("txn_direction_desc"),
-    col("transaction_type_desc"),
-    col("amount"),
-    col("transaction_id"),
-    col("transaction_code"),
-    col("transaction_code_desc"),
-    col("sterling_equivalent"),
-    col("int_dollar_equivalent"),
-    col("transaction_routing_number"),
-    col("external_account_number"),
-    col("counterparty_customer_key"),
-    col("counterparty_product_key"),
-    col("counterparty_id"),
-    col("source_transaction_id"),
-    col("branch_key"),
-    col("account_bucket"),
-    col("jurisdiction"),
-    col("screening_system"),
-    col("source_system"),
-    col("EFF_START_DATE")
+// Reading and processing target source
+val target = transactionDateSource.select(
+    $"customer_key",
+    $"account_key",
+    $"account_id",
+    $"account_sk",
+    $"execution_date",
+    $"transaction_date",
+    $"original_amount",
+    $"original_currency_code",
+    $"transaction_location",
+    $"transaction_country_iso_code",
+    $"narrative",
+    $"shortnarrative",
+    $"transaction_type",
+    $"txn_direction",
+    $"txn_direction_desc",
+    $"transaction_type_desc",
+    $"amount",
+    $"transaction_id",
+    $"transaction_code",
+    $"transaction_code_desc",
+    $"sterling_equivalent",
+    $"int_dollar_equivalent",
+    $"transaction_routing_number",
+    $"external_account_number",
+    $"counterparty_customer_key",
+    $"counterparty_product_key",
+    $"counterparty_id",
+    $"source_transaction_id",
+    $"branch_key",
+    $"account_bucket",
+    $"jurisdiction",
+    $"screening_system",
+    $"source_system",
+    $"EFF_START_DATE"
 )
+
+// Save the target DataFrame to the specified S3 bucket as a Parquet file
+target.write.mode("overwrite").parquet(targetPath)
+
+// Log the path where the data is saved
+println(s"Processed data has been saved to: $targetPath")
