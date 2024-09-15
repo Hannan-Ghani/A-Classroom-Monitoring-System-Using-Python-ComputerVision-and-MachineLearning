@@ -1,170 +1,34 @@
-import org.apache.spark.sql.SparkSession
-import org.apache.spark.sql.functions._
-import com.amazonaws.services.glue.util.GlueArgParser
+import sys
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import col, count, min, max
+from awsglue.utils import getResolvedOptions
+from awsglue.context import GlueContext
+from awsglue.job import Job
 
-// Initialize Spark Session
-val spark = SparkSession.builder.appName("TransactionProcessing").getOrCreate()
+# Initialize Glue job
+args = getResolvedOptions(sys.argv, ['JOB_NAME'])
+spark = SparkSession.builder.appName('GlueJob').getOrCreate()
+glueContext = GlueContext(spark.sparkContext)
+job = Job(glueContext)
+job.init(args['JOB_NAME'], args)
 
-// Retrieve job parameters from Glue job configuration
-val args = GlueArgParser.getResolvedOptions(sysArgs, Seq(
-  "SOURCE_PATH",           // S3 path for source data
-  "TARGET_PATH",           // S3 path for target output
-  "BATCH_ID",              // Batch ID for filtering
-  "OUTPUT_BUCKET"          // S3 output bucket for saving results
-).toArray)
+# Reading and filtering transaction data
+transaction_source = spark.read.parquet("s3://136731789529-fis-raw-data/transaction/raw/parquet/") \
+    .filter((col("transaction_date") >= "2023-09-15") & (col("transaction_date") <= "2023-09-28"))
 
-// Extract parameter values
-val sourcePath = args("SOURCE_PATH")             // Example: "s3://136731789529-fis-raw-data/transaction/*/raw/parquet/*"
-val targetPath = args("TARGET_PATH")             // Example: "s3://your-output-bucket/processed/target_data/"
-val batchId = args("BATCH_ID")                   // Example: "2023-10-23_13-03-31-472"
-val outputBucket = args("OUTPUT_BUCKET")         // Example: "s3://your-output-bucket/processed/"
+# Saving the count result to S3
+transaction_source \
+    .agg(count("*").alias("transaction_count")) \
+    .write.mode("overwrite").csv("s3://your-output-bucket/path/transaction_count.csv")
 
-// Load transaction data from S3 using the source path
-val transactionDateSource = spark.read.parquet(sourcePath)
-val transactionCount = transactionDateSource.count()  // Count total rows in the transaction dataset
+# Reading Case Class data
+transaction_case = spark.read.parquet("s3://136731789529-fis-interim-data/transaction/2023-10-25_10-46-40-587/CaseClass/fullRawCaseClass.parquet/")
+transaction_case \
+    .agg(count("*").alias("case_count")) \
+    .write.mode("overwrite").csv("s3://your-output-bucket/path/case_count.csv")
 
-// Select specific columns from the loaded data
-val source = transactionDateSource.select(
-    $"customer_key",
-    $"account_key",
-    $"execution_date",
-    $"transaction_date",
-    $"original_amount",
-    $"original_currency_code",
-    $"transaction_location",
-    $"transaction_country",
-    $"transaction_country_iso_code",
-    $"narrative",
-    $"shortnarrative",
-    $"transaction_type",
-    $"txn_direction",
-    $"txn_direction_desc",
-    $"transaction_type_desc",
-    $"amount",
-    $"transaction_id",
-    $"transaction_code",
-    $"transaction_code_desc",
-    $"sterling_equivalent",
-    $"int_dollar_equivalent",
-    $"transaction_routing_number",
-    $"external_account_number",
-    $"counterparty_customer_key",
-    $"counterparty_product_key",
-    $"counterparty_id",
-    $"source_transaction_id",
-    $"branch_key",
-    $"account_bucket",
-    $"jurisdiction",
-    $"screening_system",
-    $"source_system",
-    $"EFF_START_DATE"
-)
+# Continue for other datasets as needed...
 
-// Read another transaction source data
-val transactionSource = spark.read.parquet(sourcePath)
-val transactionSourceCount = transactionSource.count()  // Count total rows in the new transaction dataset
-
-// Filter audit summary data using the batch ID
-val auditSummary = spark.read.parquet(s"${outputBucket}auditSummary/quantexaAuditSummary.parquet/*")
-  .filter($"batchId" isin (batchId))
-  .filter(!($"processingStage" isin ("InputRawToPartition", "S3RawLayer")))
-
-// Reading and processing target source
-val target = transactionDateSource.select(
-    $"customer_key",
-    $"account_key",
-    $"account_id",
-    $"account_sk",
-    $"execution_date",
-    $"transaction_date",
-    $"original_amount",
-    $"original_currency_code",
-    $"transaction_location",
-    $"transaction_country_iso_code",
-    $"narrative",
-    $"shortnarrative",
-    $"transaction_type",
-    $"txn_direction",
-    $"txn_direction_desc",
-    $"transaction_type_desc",
-    $"amount",
-    $"transaction_id",
-    $"transaction_code",
-    $"transaction_code_desc",
-    $"sterling_equivalent",
-    $"int_dollar_equivalent",
-    $"transaction_routing_number",
-    $"external_account_number",
-    $"counterparty_customer_key",
-    $"counterparty_product_key",
-    $"counterparty_id",
-    $"source_transaction_id",
-    $"branch_key",
-    $"account_bucket",
-    $"jurisdiction",
-    $"screening_system",
-    $"source_system",
-    $"EFF_START_DATE"
-)
-
-// Save the target DataFrame to the specified S3 bucket as a Parquet file
-target.write.mode("overwrite").parquet(targetPath)
-
-// Log the path where the data is saved
-println(s"Processed data has been saved to: $targetPath")
-
-
-
-
-
-Here's a mapping of the variables used in the updated Scala Spark code along with their original hardcoded values or placeholders from your initial code. You can use this information to correctly set up the parameters in AWS Glue job configuration.
-
-### Mapping of Variables for Glue Configuration
-
-1. **`SOURCE_PATH`**
-   - **Original Value in Code:** `"s3://136731789529-fis-raw-data/transaction/*/raw/parquet/*"`
-   - **Glue Parameter Key:** `--SOURCE_PATH`
-   - **Description:** This parameter points to the S3 path where the raw transaction data is stored.
-
-2. **`TARGET_PATH`**
-   - **Original Placeholder in Updated Code:** `"s3://your-output-bucket/processed/target_data/"`
-   - **Glue Parameter Key:** `--TARGET_PATH`
-   - **Description:** This parameter specifies the S3 path where the processed data will be saved. Replace with the actual S3 path where you want to store your output files.
-
-3. **`BATCH_ID`**
-   - **Original Hardcoded Filter in Code:** `"2023-10-23_13-03-31-472"`
-   - **Glue Parameter Key:** `--BATCH_ID`
-   - **Description:** Used for filtering audit summary data based on a specific batch ID. Set this to the batch ID value you need for filtering the audit summary records.
-
-4. **`OUTPUT_BUCKET`**
-   - **Original Placeholder in Updated Code:** `"s3://your-output-bucket/processed/"`
-   - **Glue Parameter Key:** `--OUTPUT_BUCKET`
-   - **Description:** This parameter specifies the base S3 bucket path for additional outputs like audit summaries. Replace with your desired S3 bucket path.
-
-### Steps to Add These Parameters in AWS Glue:
-
-1. **Navigate to AWS Glue Console:**
-   - Go to your AWS Glue dashboard.
-
-2. **Edit or Create a Job:**
-   - Choose an existing job to edit, or create a new job.
-
-3. **Add Job Parameters:**
-   - Under the "Job parameters" section, add the following parameters with their keys and respective values:
-   
-   | Glue Parameter Key | Example Value                                      | Description                               |
-   |--------------------|----------------------------------------------------|-------------------------------------------|
-   | `--SOURCE_PATH`    | `s3://136731789529-fis-raw-data/transaction/*/raw/parquet/*` | Path to your source data in S3. |
-   | `--TARGET_PATH`    | `s3://your-output-bucket/processed/target_data/`   | Path to save the processed output.        |
-   | `--BATCH_ID`       | `2023-10-23_13-03-31-472`                          | Specific batch ID for filtering data.     |
-   | `--OUTPUT_BUCKET`  | `s3://your-output-bucket/processed/`               | Base bucket for additional outputs.       |
-
-4. **Run the Glue Job:**
-   - Ensure that the parameters are correctly set and run your Glue job. The job will use these parameters to dynamically load, process, and save your data according to the paths and criteria specified.
-
-This setup will allow you to control the Glue job dynamically by adjusting these parameters in the Glue job configuration, making it flexible for different data processing needs.
-
-
-
-
-
+# Finish job
+job.commit()
+spark.stop()
