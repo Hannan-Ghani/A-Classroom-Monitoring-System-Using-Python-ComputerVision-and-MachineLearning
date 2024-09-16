@@ -1,93 +1,119 @@
-import sys
-from pyspark.sql import SparkSession
-from pyspark.sql.functions import col, count, expr
-from awsglue.utils import getResolvedOptions
-from awsglue.context import GlueContext
-from awsglue.job import Job
+import org.apache.spark.sql.SparkSession
+import org.apache.spark.sql.functions._
+import com.amazonaws.services.glue.util.GlueArgParser
 
-# Initialize Glue job
-args = getResolvedOptions(sys.argv, ['JOB_NAME'])
-spark = SparkSession.builder.appName('GlueJob').getOrCreate()
-glueContext = GlueContext(spark.sparkContext)
-job = Job(glueContext)
-job.init(args['JOB_NAME'], args)
+object TransactionProcessing {
 
-# Read Raw file (Payment Raw Cleanse Case class)
-payment_create = spark.read.parquet("s3://136731789529-fis-interim-data/payment/202202-202301-uk-uae-Full/DocumentDataModel/CleansedDocumentDataModel.parquet/")
-payment_create.createOrReplaceTempView("payment_create")
+  def main(sysArgs: Array[String]): Unit = {
+    // Initialize Spark Session
+    val spark = SparkSession.builder.appName("TransactionProcessing").getOrCreate()
 
-# Read target file (Payment Aggregate Create Case class)
-pagg_create = spark.read.parquet("s3://136731789529-fis-interim-data/aggregatedPayments/2023-96-14_11-49-35-565/DocumentDataModel/DocumentDataModel.parquet/*")
-pagg_create.createOrReplaceTempView("pagg_create")
+    // Retrieve job parameters from Glue job configuration
+    val args = GlueArgParser.getResolvedOptions(sysArgs, Seq(
+      "SOURCE_PATH",           // S3 path for source data
+      "TARGET_PATH",           // S3 path for target output
+      "BATCH_ID",              // Batch ID for filtering
+      "OUTPUT_BUCKET"          // S3 output bucket for saving results
+    ).toArray)
 
-# Check count
-raw_count = spark.sql("""
-    SELECT count(distinct ukAggregationId) as count, 'Payment Raw' as source FROM payment_create
-    WHERE sourcesystem IN ('FPSBI', 'FPSBUK')
-    AND originator.accountNumber <> beneficiary.accountNumber
-    UNION ALL
-    SELECT count(*) as count, 'Payment Aggregate' as source FROM pagg_create
-""")
-raw_count.write.mode("overwrite").csv("s3://your-output-bucket/path/raw_count.csv")
+    // Extract parameter values
+    val sourcePath = args("SOURCE_PATH")             // Example: "s3://136731789529-fis-raw-data/transaction/*/raw/parquet/*"
+    val targetPath = args("TARGET_PATH")             // Example: "s3://your-output-bucket/processed/target_data/"
+    val batchId = args("BATCH_ID")                   // Example: "2023-10-23_13-03-31-472"
+    val outputBucket = args("OUTPUT_BUCKET")         // Example: "s3://your-output-bucket/processed/"
 
-# Fetch account details from Payment Raw
-payment_data_val_aAccount = spark.sql("""
-    SELECT distinct PO.ukAggregationId, originator.accountNumber as aAccountUniqueId,
-           originator.id, originator.accountNumber, originator.sortCode, originator.iban, 
-           originator.cleansedAccountNumber, originator.cleansedSortCode,
-           COALESCE(originator.countryCode, originator.parsedAddress.countryCode) as aBankCountryIso3,
-           originator.parsedAddress.addressDisplay, originator.Name
-    FROM payment_create PO 
-    WHERE sourcesystem IN ('FPSBI', 'FPSBUK')
-    AND originator.accountNumber <> beneficiary.accountNumber
-""")
-payment_data_val_aAccount.createOrReplaceTempView("payment_data_val_aAccount")
+    // Load transaction data from S3 using the source path
+    val transactionDateSource = spark.read.parquet(sourcePath)
+    val transactionCount = transactionDateSource.count()  // Count total rows in the transaction dataset
 
-# Fetch account details from Payment Aggregate Document Data Model
-pagg_data_val_aAccount = spark.sql("""
-    SELECT aggregatedTransactionId, aAccount.accountUniqueId as aAccountUniqueId,
-           aAccount.accountId as aAccountId, aAccount.accountNumber, aAccount.accountSortCode as aSortCode,
-           aAccount.accountIban as aIban, aAccount.cleansedAccountNumber as AccountNumberCleansed, 
-           aAccount.cleansedSortCode as aSortCodeCleansed, aAccount.accountCountry as aBankCountry,
-           aAccount.accountCountryIso3 as aBankCountryIso3, aAccount.Address as Address, 
-           aAccount.party.partyName as aName
-    FROM pagg_create
-""")
-pagg_data_val_aAccount.createOrReplaceTempView("pagg_data_val_aAccount")
+    // Select specific columns from the loaded data
+    val source = transactionDateSource.select(
+        $"customer_key",
+        $"account_key",
+        $"execution_date",
+        $"transaction_date",
+        $"original_amount",
+        $"original_currency_code",
+        $"transaction_location",
+        $"transaction_country",
+        $"transaction_country_iso_code",
+        $"narrative",
+        $"shortnarrative",
+        $"transaction_type",
+        $"txn_direction",
+        $"txn_direction_desc",
+        $"transaction_type_desc",
+        $"amount",
+        $"transaction_id",
+        $"transaction_code",
+        $"transaction_code_desc",
+        $"sterling_equivalent",
+        $"int_dollar_equivalent",
+        $"transaction_routing_number",
+        $"external_account_number",
+        $"counterparty_customer_key",
+        $"counterparty_product_key",
+        $"counterparty_id",
+        $"source_transaction_id",
+        $"branch_key",
+        $"account_bucket",
+        $"jurisdiction",
+        $"screening_system",
+        $"source_system",
+        $"EFF_START_DATE"
+    )
 
-# Compare Account Data
-pagg_data_val_aAccount.exceptAll(payment_data_val_aAccount).show(10, False)
-payment_data_val_aAccount.exceptAll(pagg_data_val_aAccount).show(10, False)
+    // Read another transaction source data
+    val transactionSource = spark.read.parquet(sourcePath)
+    val transactionSourceCount = transactionSource.count()  // Count total rows in the new transaction dataset
 
-# Fetch bAccount details from Payment Raw
-payment_data_val_bAccount = spark.sql("""
-    SELECT distinct PO.ukAggregationId, beneficiary.accountNumber as bAccountUniqueId,
-           beneficiary.id, beneficiary.accountNumber, beneficiary.sortCode, 
-           beneficiary.iban, beneficiary.cleansedAccountNumber, beneficiary.cleansedSortCode,
-           COALESCE(beneficiary.countryCode, beneficiary.parsedAddress.countryCode) as bBankCountryIso3,
-           beneficiary.parsedAddress.addressDisplay, beneficiary.Name
-    FROM payment_create PO 
-    WHERE sourcesystem IN ('FPSBI', 'FPSBUK')
-    AND originator.accountNumber <> beneficiary.accountNumber
-""")
-payment_data_val_bAccount.createOrReplaceTempView("payment_data_val_bAccount")
+    // Filter audit summary data using the batch ID
+    val auditSummary = spark.read.parquet(s"${outputBucket}auditSummary/quantexaAuditSummary.parquet/*")
+      .filter($"batchId" isin (batchId))
+      .filter(!($"processingStage" isin ("InputRawToPartition", "S3RawLayer")))
 
-# Fetch bAccount details from Payment Aggregate Document Data Model
-pagg_data_val_bAccount = spark.sql("""
-    SELECT aggregatedTransactionId, bAccount.accountUniqueId as bAccountUniqueId,
-           bAccount.accountId as bAccountId, bAccount.accountNumber as bAccountNumber,
-           bAccount.accountSortCode as bSortCode, bAccount.accountIban as bIban,
-           bAccount.cleansedAccountNumber as bAccountNumberCleansed, 
-           bAccount.cleansedSortCode as bSortCodeCleansed, bAccount.accountCountry as bBankCountry,
-           bAccount.accountCountryIso3 as bBankCountryIso3, bAccount.Address as bAddress, 
-           bAccount.party.partyName as bName
-    FROM pagg_create
-""")
-pagg_data_val_bAccount.createOrReplaceTempView("pagg_data_val_bAccount")
+    // Reading and processing target source
+    val target = transactionDateSource.select(
+        $"customer_key",
+        $"account_key",
+        $"account_id",
+        $"account_sk",
+        $"execution_date",
+        $"transaction_date",
+        $"original_amount",
+        $"original_currency_code",
+        $"transaction_location",
+        $"transaction_country_iso_code",
+        $"narrative",
+        $"shortnarrative",
+        $"transaction_type",
+        $"txn_direction",
+        $"txn_direction_desc",
+        $"transaction_type_desc",
+        $"amount",
+        $"transaction_id",
+        $"transaction_code",
+        $"transaction_code_desc",
+        $"sterling_equivalent",
+        $"int_dollar_equivalent",
+        $"transaction_routing_number",
+        $"external_account_number",
+        $"counterparty_customer_key",
+        $"counterparty_product_key",
+        $"counterparty_id",
+        $"source_transaction_id",
+        $"branch_key",
+        $"account_bucket",
+        $"jurisdiction",
+        $"screening_system",
+        $"source_system",
+        $"EFF_START_DATE"
+    )
 
-# Compare bAccount Data
-pagg_data_val_bAccount.exceptAll(payment_data_val_bAccount).show(10, False)
+    // Save the target DataFrame to the specified S3 bucket as a Parquet file
+    target.write.mode("overwrite").parquet(targetPath)
 
-# Commit job
-job.commit()
-spark.stop()
+    // Log the path where the data is saved
+    println(s"Processed data has been saved to: $targetPath")
+  }
+}
