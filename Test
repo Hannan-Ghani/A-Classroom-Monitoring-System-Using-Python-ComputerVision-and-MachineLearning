@@ -15,108 +15,32 @@ object TransactionProcessing {
     val args = GlueArgParser.getResolvedOptions(sysArgs, Seq(
       "SOURCE_PATH",           // S3 path for source data
       "TARGET_PATH",           // S3 path for target output
-      "BATCH_ID",              // Batch ID for filtering
-      "OUTPUT_BUCKET"          // S3 output bucket for saving results
+      "OUTPUT_PATH"            // S3 path for saving difference results
     ).toArray)
 
     // Extract parameter values
-    val sourcePath = args("SOURCE_PATH")             // Example: "s3://136731789529-fis-raw-data/transaction/*/raw/parquet/*"
-    val targetPath = args("TARGET_PATH")             // Example: "s3://your-output-bucket/processed/target_data/"
-    val batchId = args("BATCH_ID")                   // Example: "2023-10-23_13-03-31-472"
-    val outputBucket = args("OUTPUT_BUCKET")         // Example: "s3://your-output-bucket/processed/"
+    val sourcePath = args("SOURCE_PATH")             // Path to source data
+    val targetPath = args("TARGET_PATH")             // Path to target data
+    val outputPath = args("OUTPUT_PATH")             // Path to save differences
 
-    // Load transaction data from S3 using the source path
-    val transactionDateSource = spark.read.parquet(sourcePath)
-    val transactionCount = transactionDateSource.count()  // Count total rows in the transaction dataset
+    // Load source and target DataFrames from S3
+    val source = spark.read.parquet(sourcePath)
+    val target = spark.read.parquet(targetPath)
 
-    // Select specific columns from the loaded data using col() or $"column_name" syntax
-    val source = transactionDateSource.select(
-      col("customer_key"),
-      col("account_key"),
-      col("execution_date"),
-      col("transaction_date"),
-      col("original_amount"),
-      col("original_currency_code"),
-      col("transaction_location"),
-      col("transaction_country"),
-      col("transaction_country_iso_code"),
-      col("narrative"),
-      col("shortnarrative"),
-      col("transaction_type"),
-      col("txn_direction"),
-      col("txn_direction_desc"),
-      col("transaction_type_desc"),
-      col("amount"),
-      col("transaction_id"),
-      col("transaction_code"),
-      col("transaction_code_desc"),
-      col("sterling_equivalent"),
-      col("int_dollar_equivalent"),
-      col("transaction_routing_number"),
-      col("external_account_number"),
-      col("counterparty_customer_key"),
-      col("counterparty_product_key"),
-      col("counterparty_id"),
-      col("source_transaction_id"),
-      col("branch_key"),
-      col("account_bucket"),
-      col("jurisdiction"),
-      col("screening_system"),
-      col("source_system"),
-      col("EFF_START_DATE")
-    )
+    // Find differences: Rows in source but not in target
+    val differences = source.exceptAll(target)
 
-    // Read another transaction source data
-    val transactionSource = spark.read.parquet(sourcePath)
-    val transactionSourceCount = transactionSource.count()  // Count total rows in the new transaction dataset
+    // Optionally, find rows in target but not in source (reverse comparison)
+    val reverseDifferences = target.exceptAll(source)
 
-    // Filter audit summary data using the batch ID
-    val auditSummary = spark.read.parquet(s"${outputBucket}auditSummary/quantexaAuditSummary.parquet/*")
-      .filter(col("batchId") isin (batchId))
-      .filter(!col("processingStage").isin("InputRawToPartition", "S3RawLayer"))
+    // Save the differences to the specified S3 path as a Parquet file
+    differences.write.mode("overwrite").parquet(s"$outputPath/source_not_in_target")
 
-    // Reading and processing target source
-    val target = transactionDateSource.select(
-      col("customer_key"),
-      col("account_key"),
-      col("account_id"),
-      col("account_sk"),
-      col("execution_date"),
-      col("transaction_date"),
-      col("original_amount"),
-      col("original_currency_code"),
-      col("transaction_location"),
-      col("transaction_country_iso_code"),
-      col("narrative"),
-      col("shortnarrative"),
-      col("transaction_type"),
-      col("txn_direction"),
-      col("txn_direction_desc"),
-      col("transaction_type_desc"),
-      col("amount"),
-      col("transaction_id"),
-      col("transaction_code"),
-      col("transaction_code_desc"),
-      col("sterling_equivalent"),
-      col("int_dollar_equivalent"),
-      col("transaction_routing_number"),
-      col("external_account_number"),
-      col("counterparty_customer_key"),
-      col("counterparty_product_key"),
-      col("counterparty_id"),
-      col("source_transaction_id"),
-      col("branch_key"),
-      col("account_bucket"),
-      col("jurisdiction"),
-      col("screening_system"),
-      col("source_system"),
-      col("EFF_START_DATE")
-    )
-
-    // Save the target DataFrame to the specified S3 bucket as a Parquet file
-    target.write.mode("overwrite").parquet(targetPath)
+    // Save reverse differences if needed
+    reverseDifferences.write.mode("overwrite").parquet(s"$outputPath/target_not_in_source")
 
     // Log the path where the data is saved
-    println(s"Processed data has been saved to: $targetPath")
+    println(s"Differences (source not in target) have been saved to: $outputPath/source_not_in_target")
+    println(s"Differences (target not in source) have been saved to: $outputPath/target_not_in_source")
   }
 }
