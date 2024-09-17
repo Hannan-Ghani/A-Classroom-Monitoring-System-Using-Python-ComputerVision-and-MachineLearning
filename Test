@@ -27,20 +27,90 @@ object TransactionProcessing {
     val source = spark.read.parquet(sourcePath)
     val target = spark.read.parquet(targetPath)
 
-    // Find differences: Rows in source but not in target
-    val differences = source.exceptAll(target)
+    // Select specific columns for comparison
+    val sourceSelected = source.select(
+      col("customer_key"),
+      col("account_key"),
+      col("execution_date"),
+      col("transaction_date"),
+      col("original_amount"),
+      col("original_currency_code"),
+      col("transaction_location"),
+      col("transaction_country"),
+      col("transaction_country_iso_code"),
+      col("narrative"),
+      col("shortnarrative"),
+      col("transaction_type"),
+      col("txn_direction"),
+      col("txn_direction_desc"),
+      col("transaction_type_desc"),
+      col("amount"),
+      col("transaction_id"),
+      col("transaction_code"),
+      col("transaction_code_desc"),
+      col("sterling_equivalent"),
+      col("int_dollar_equivalent"),
+      col("transaction_routing_number"),
+      col("external_account_number"),
+      col("counterparty_customer_key"),
+      col("counterparty_product_key"),
+      col("counterparty_id"),
+      col("source_transaction_id"),
+      col("branch_key"),
+      col("account_bucket"),
+      col("jurisdiction"),
+      col("screening_system"),
+      col("source_system"),
+      col("EFF_START_DATE")
+    )
 
-    // Optionally, find rows in target but not in source (reverse comparison)
-    val reverseDifferences = target.exceptAll(source)
+    val targetSelected = target.select(
+      col("customer_key"),
+      col("account_key"),
+      col("execution_date"),
+      col("transaction_date"),
+      col("original_amount"),
+      col("original_currency_code"),
+      col("transaction_location"),
+      col("transaction_country"),
+      col("transaction_country_iso_code"),
+      col("narrative"),
+      col("shortnarrative"),
+      col("transaction_type"),
+      col("txn_direction"),
+      col("txn_direction_desc"),
+      col("transaction_type_desc"),
+      col("amount"),
+      col("transaction_id"),
+      col("transaction_code"),
+      col("transaction_code_desc"),
+      col("sterling_equivalent"),
+      col("int_dollar_equivalent"),
+      col("transaction_routing_number"),
+      col("external_account_number"),
+      col("counterparty_customer_key"),
+      col("counterparty_product_key"),
+      col("counterparty_id"),
+      col("source_transaction_id"),
+      col("branch_key"),
+      col("account_bucket"),
+      col("jurisdiction"),
+      col("screening_system"),
+      col("source_system"),
+      col("EFF_START_DATE")
+    )
+
+    // Find differences: Rows in source but not in target
+    val differences = sourceSelected.exceptAll(targetSelected)
 
     // Save the differences to the specified S3 path as a Parquet file
-    differences.write.mode("overwrite").parquet(s"$outputPath/source_not_in_target")
+    differences.write.mode("overwrite").parquet(s"$outputPath/differences")
 
-    // Save reverse differences if needed
-    reverseDifferences.write.mode("overwrite").parquet(s"$outputPath/target_not_in_source")
-
-    // Log the path where the data is saved
-    println(s"Differences (source not in target) have been saved to: $outputPath/source_not_in_target")
-    println(s"Differences (target not in source) have been saved to: $outputPath/target_not_in_source")
+    // Log a message based on the differences
+    if (differences.isEmpty) {
+      println(s"No differences found. The output is an empty table.")
+    } else {
+      println(s"Differences have been found and saved to: $outputPath/differences")
+    }
   }
 }
