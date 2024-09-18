@@ -8,13 +8,10 @@ object TransactionProcessing {
     // Initialize Spark Session
     val spark = SparkSession.builder.appName("TransactionProcessing").getOrCreate()
 
-    // Import implicits for using $"column_name" syntax
-    import spark.implicits._
-
     // Retrieve job parameters from Glue job configuration
     val args = GlueArgParser.getResolvedOptions(sysArgs, Seq(
       "SOURCE_PATH",           // S3 path for source data
-      "TARGET_PATH",           // S3 path for target output
+      "TARGET_PATH",           // S3 path for target data
       "OUTPUT_PATH"            // S3 path for saving difference results
     ).toArray)
 
@@ -27,87 +24,26 @@ object TransactionProcessing {
     val source = spark.read.parquet(sourcePath)
     val target = spark.read.parquet(targetPath)
 
-    // Select specific columns for comparison
-    val sourceSelected = source.select(
-      col("customer_key"),
-      col("account_key"),
-      col("execution_date"),
-      col("transaction_date"),
-      col("original_amount"),
-      col("original_currency_code"),
-      col("transaction_location"),
-      col("transaction_country"),
-      col("transaction_country_iso_code"),
-      col("narrative"),
-      col("shortnarrative"),
-      col("transaction_type"),
-      col("txn_direction"),
-      col("txn_direction_desc"),
-      col("transaction_type_desc"),
-      col("amount"),
-      col("transaction_id"),
-      col("transaction_code"),
-      col("transaction_code_desc"),
-      col("sterling_equivalent"),
-      col("int_dollar_equivalent"),
-      col("transaction_routing_number"),
-      col("external_account_number"),
-      col("counterparty_customer_key"),
-      col("counterparty_product_key"),
-      col("counterparty_id"),
-      col("source_transaction_id"),
-      col("branch_key"),
-      col("account_bucket"),
-      col("jurisdiction"),
-      col("screening_system"),
-      col("source_system"),
-      col("EFF_START_DATE")
-    )
+    // Dynamically compare all columns by ensuring both DataFrames have the same columns
+    val commonColumns = source.columns.toSet.intersect(target.columns.toSet).toSeq
 
-    val targetSelected = target.select(
-      col("customer_key"),
-      col("account_key"),
-      col("execution_date"),
-      col("transaction_date"),
-      col("original_amount"),
-      col("original_currency_code"),
-      col("transaction_location"),
-      col("transaction_country"),
-      col("transaction_country_iso_code"),
-      col("narrative"),
-      col("shortnarrative"),
-      col("transaction_type"),
-      col("txn_direction"),
-      col("txn_direction_desc"),
-      col("transaction_type_desc"),
-      col("amount"),
-      col("transaction_id"),
-      col("transaction_code"),
-      col("transaction_code_desc"),
-      col("sterling_equivalent"),
-      col("int_dollar_equivalent"),
-      col("transaction_routing_number"),
-      col("external_account_number"),
-      col("counterparty_customer_key"),
-      col("counterparty_product_key"),
-      col("counterparty_id"),
-      col("source_transaction_id"),
-      col("branch_key"),
-      col("account_bucket"),
-      col("jurisdiction"),
-      col("screening_system"),
-      col("source_system"),
-      col("EFF_START_DATE")
-    )
+    val sourceSelected = source.select(commonColumns.map(col): _*)
+    val targetSelected = target.select(commonColumns.map(col): _*)
 
-    // Find differences: Rows in source but not in target
-    val differences = sourceSelected.exceptAll(targetSelected)
+    // Find rows in source but not in target (differences from source perspective)
+    val sourceDifferences = sourceSelected.exceptAll(targetSelected)
+
+    // Find rows in target but not in source (differences from target perspective)
+    val targetDifferences = targetSelected.exceptAll(sourceSelected)
+
+    // Combine both sets of differences
+    val allDifferences = sourceDifferences.union(targetDifferences).distinct()
 
     // Save the differences to the specified S3 path as a Parquet file
-    differences.write.mode("overwrite").parquet(s"$outputPath/differences")
+    allDifferences.write.mode("overwrite").parquet(s"$outputPath/differences")
 
     // Log a message based on the differences
-    if (differences.isEmpty) {
+    if (allDifferences.isEmpty) {
       println(s"No differences found. The output is an empty table.")
     } else {
       println(s"Differences have been found and saved to: $outputPath/differences")
