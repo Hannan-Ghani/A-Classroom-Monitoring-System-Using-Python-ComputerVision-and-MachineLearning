@@ -24,21 +24,12 @@ object TransactionProcessing {
     val source = spark.read.parquet(sourcePath)
     val target = spark.read.parquet(targetPath)
 
-    // Select the exact fields for comparison
-    val columnsToCompare = Seq(
-      "CUSTOMER_KEY", "ACCOUNT_KEY", "ACCOUNT_ID", "ACCOUNT_SK", "EXECUTION_DATE", "TRANSACTION_DATE", 
-      "ORIGINAL_AMOUNT", "ORIGINAL_CURRENCY_CODE", "TRANSACTION_LOCATION", "TRANSACTION_COUNTRY", 
-      "TRANSACTION_COUNTRY_ISO_CODE", "NARRATIVE", "SHORTNARRATIVE", "TRANSACTION_TYPE", "TXN_DIRECTION", 
-      "TXN_DIRECTION_DESC", "TRANSACTION_TYPE_DESC", "AMOUNT", "TRANSACTION_ID", "TRANSACTION_CODE", 
-      "TRANSACTION_CODE_DESC", "STERLING_EQUIVALENT", "INT_DOLLAR_EQUIVALENT", "TRANSACTION_ROUTING_NUMBER", 
-      "EXTERNAL_ACCOUNT_NUMBER", "COUNTERPARTY_CUSTOMER_KEY", "COUNTERPARTY_PRODUCT_KEY", 
-      "COUNTERPARTY_ID", "SOURCE_TRANSACTION_ID", "BRANCH_KEY", "ACCOUNT_BUCKET", "JURISDICTION", 
-      "SOURCE_SYSTEM", "SCREENING_SYSTEM", "EFF_START_DATE"
-    )
+    // Find the common columns between the source and target datasets
+    val commonColumns = source.columns.toSet.intersect(target.columns.toSet).toSeq
 
-    // Select these columns from both source and target DataFrames
-    val sourceSelected = source.select(columnsToCompare.map(col): _*)
-    val targetSelected = target.select(columnsToCompare.map(col): _*)
+    // Select only the common columns from both DataFrames
+    val sourceSelected = source.select(commonColumns.map(col): _*)
+    val targetSelected = target.select(commonColumns.map(col): _*)
 
     // Find rows in source but not in target (differences from source perspective)
     val sourceDifferences = sourceSelected.exceptAll(targetSelected)
