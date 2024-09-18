@@ -24,11 +24,16 @@ object TransactionProcessing {
     val source = spark.read.parquet(sourcePath)
     val target = spark.read.parquet(targetPath)
 
-    // Dynamically compare all columns by ensuring both DataFrames have the same columns
-    val commonColumns = source.columns.toSet.intersect(target.columns.toSet).toSeq
+    // Select only the TRANSACTION_ID and NARRATIVE columns for comparison
+    val sourceSelected = source.select(
+      col("TRANSACTION_ID"),
+      col("NARRATIVE")
+    )
 
-    val sourceSelected = source.select(commonColumns.map(col): _*)
-    val targetSelected = target.select(commonColumns.map(col): _*)
+    val targetSelected = target.select(
+      col("TRANSACTION_ID"),
+      col("NARRATIVE")
+    )
 
     // Find rows in source but not in target (differences from source perspective)
     val sourceDifferences = sourceSelected.exceptAll(targetSelected)
