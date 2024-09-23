@@ -1,53 +1,50 @@
-import org.apache.spark.sql.SparkSession
-import org.apache.spark.sql.functions._
+import com.amazonaws.services.glue.GlueContext
 import com.amazonaws.services.glue.util.GlueArgParser
+import org.apache.spark.SparkContext
+import org.apache.spark.sql.{DataFrame, SparkSession}
+import org.apache.spark.sql.functions._
 
-object TransactionProcessing {
-
+object GlueApp {
   def main(sysArgs: Array[String]): Unit = {
-    // Initialize Spark Session
-    val spark = SparkSession.builder.appName("TransactionProcessing").getOrCreate()
+    // Initialize Spark and Glue contexts
+    val sc: SparkContext = new SparkContext()
+    val glueContext: GlueContext = new GlueContext(sc)
+    val spark: SparkSession = glueContext.getSparkSession
 
-    // Retrieve job parameters from Glue job configuration
-    val args = GlueArgParser.getResolvedOptions(sysArgs, Seq(
-      "SOURCE_PATH",           // S3 path for source data
-      "TARGET_PATH",           // S3 path for target data
-      "OUTPUT_PATH"            // S3 path for saving difference results
-    ).toArray)
+    // Parse job parameters from AWS Glue
+    val args = GlueArgParser.getResolvedOptions(sysArgs, Array(
+      "SOURCE_PATH",  // Source Parquet file path
+      "TARGET_PATH",  // Target Parquet file path
+      "OUTPUT_PATH"   // Output path for the comparison result
+    ))
 
-    // Extract parameter values
-    val sourcePath = args("SOURCE_PATH")             // Path to source data
-    val targetPath = args("TARGET_PATH")             // Path to target data
-    val outputPath = args("OUTPUT_PATH")             // Path to save differences
+    // Extract paths from parameters
+    val sourceFilePath = args("SOURCE_PATH")
+    val targetFilePath = args("TARGET_PATH")
+    val outputPath = args("OUTPUT_PATH")
 
-    // Load source and target DataFrames from S3
-    val source = spark.read.parquet(sourcePath)
-    val target = spark.read.parquet(targetPath)
+    // Load the Parquet files into DataFrames
+    val source = spark.read.parquet(sourceFilePath)
+    val target = spark.read.parquet(targetFilePath)
 
-    // Find the common columns between the source and target datasets
+    // Get the list of common columns between source and target
     val commonColumns = source.columns.toSet.intersect(target.columns.toSet).toSeq
 
-    // Select only the common columns from both DataFrames
-    val sourceSelected = source.select(commonColumns.map(col): _*)
-    val targetSelected = target.select(commonColumns.map(col): _*)
+    // Select the common columns from both source and target DataFrames
+    val sourceCommon = source.select(commonColumns.map(col): _*)
+    val targetCommon = target.select(commonColumns.map(col): _*)
 
-    // Find rows in source but not in target (differences from source perspective)
-    val sourceDifferences = sourceSelected.exceptAll(targetSelected)
-
-    // Find rows in target but not in source (differences from target perspective)
-    val targetDifferences = targetSelected.exceptAll(sourceSelected)
-
-    // Combine both sets of differences
-    val allDifferences = sourceDifferences.union(targetDifferences).distinct()
-
-    // Save the differences to the specified S3 path as a Parquet file
-    allDifferences.write.mode("overwrite").parquet(s"$outputPath/differences")
-
-    // Log a message based on the differences
-    if (allDifferences.isEmpty) {
-      println(s"No differences found. The output is an empty table.")
-    } else {
-      println(s"Differences have been found and saved to: $outputPath/differences")
+    // Perform the comparison for each common column
+    val comparison = commonColumns.foldLeft(sourceCommon.join(targetCommon, Seq("transactionId"), "outer")) { (df, colName) =>
+      df.withColumn(
+        s"${colName}_comparison",
+        when(sourceCommon(colName) === targetCommon(colName), "MATCH").otherwise("DIFFERENT")
+      )
     }
+
+    // Write the comparison result to the specified output path
+    comparison.write.mode("overwrite").parquet(outputPath)
+
+    println("ETL job completed successfully.")
   }
 }
