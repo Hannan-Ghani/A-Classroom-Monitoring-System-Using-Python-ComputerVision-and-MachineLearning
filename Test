@@ -27,23 +27,40 @@ object GlueApp {
     val source = spark.read.parquet(sourceFilePath)
     val target = spark.read.parquet(targetFilePath)
 
+    // Print the schema to verify columns
+    println("Source DataFrame Schema:")
+    source.printSchema()
+
+    println("Target DataFrame Schema:")
+    target.printSchema()
+
     // Get the list of common columns between source and target
     val commonColumns = source.columns.toSet.intersect(target.columns.toSet).toSeq
+
+    // If no common columns exist, log the issue and return
+    if (commonColumns.isEmpty) {
+      println("No common columns found between source and target DataFrames. Exiting job.")
+      return
+    }
 
     // Select the common columns from both source and target DataFrames
     val sourceCommon = source.select(commonColumns.map(col): _*)
     val targetCommon = target.select(commonColumns.map(col): _*)
 
     // Perform the comparison for each common column
-    val comparison = commonColumns.foldLeft(sourceCommon.join(targetCommon, Seq("transactionId"), "outer")) { (df, colName) =>
+    val comparison = commonColumns.foldLeft(sourceCommon.join(targetCommon, commonColumns, "outer")) { (df, colName) =>
       df.withColumn(
         s"${colName}_comparison",
         when(sourceCommon(colName) === targetCommon(colName), "MATCH").otherwise("DIFFERENT")
       )
     }
 
+    // Select only the comparison columns and the common columns for output
+    val comparisonColumns = commonColumns.map(c => s"${c}_comparison")
+    val outputDF = comparison.select((commonColumns ++ comparisonColumns).map(col): _*)
+
     // Write the comparison result to the specified output path
-    comparison.write.mode("overwrite").parquet(outputPath)
+    outputDF.write.mode("overwrite").parquet(outputPath)
 
     println("ETL job completed successfully.")
   }
