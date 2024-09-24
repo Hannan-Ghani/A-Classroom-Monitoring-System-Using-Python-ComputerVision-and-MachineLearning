@@ -27,21 +27,24 @@ object GlueApp {
     val source = spark.read.parquet(sourceFilePath)
     val target = spark.read.parquet(targetFilePath)
 
-    // Print the schema to verify columns
+    // Print the schema and row counts to ensure data is loaded properly
     println("Source DataFrame Schema:")
     source.printSchema()
+    println(s"Source DataFrame Row Count: ${source.count()}")
 
     println("Target DataFrame Schema:")
     target.printSchema()
+    println(s"Target DataFrame Row Count: ${target.count()}")
 
     // Get the list of common columns between source and target
     val commonColumns = source.columns.toSet.intersect(target.columns.toSet).toSeq
 
-    // If no common columns exist, log the issue and return
+    // Check if there are no common columns
     if (commonColumns.isEmpty) {
       println("No common columns found between source and target DataFrames. Exiting job.")
       return
     }
+    println(s"Common Columns: ${commonColumns.mkString(", ")}")
 
     // Select the common columns from both source and target DataFrames
     val sourceCommon = source.select(commonColumns.map(col): _*)
@@ -59,7 +62,8 @@ object GlueApp {
     val comparisonColumns = commonColumns.map(c => s"${c}_comparison")
     val outputDF = comparison.select((commonColumns ++ comparisonColumns).map(col): _*)
 
-    // Write the comparison result to the specified output path
+    // Write the output, even if no differences were found
+    println(s"Writing results to $outputPath ...")
     outputDF.write.mode("overwrite").parquet(outputPath)
 
     println("ETL job completed successfully.")
