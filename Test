@@ -30,11 +30,24 @@ object GlueApp {
     // Print the schema and row counts to ensure data is loaded properly
     println("Source DataFrame Schema:")
     source.printSchema()
-    println(s"Source DataFrame Row Count: ${source.count()}")
+    val sourceRowCount = source.count()
+    println(s"Source DataFrame Row Count: $sourceRowCount")
 
     println("Target DataFrame Schema:")
     target.printSchema()
-    println(s"Target DataFrame Row Count: ${target.count()}")
+    val targetRowCount = target.count()
+    println(s"Target DataFrame Row Count: $targetRowCount")
+
+    // Check if source or target is empty
+    if (sourceRowCount == 0) {
+      println("Source DataFrame is empty. Exiting job.")
+      return
+    }
+    
+    if (targetRowCount == 0) {
+      println("Target DataFrame is empty. Exiting job.")
+      return
+    }
 
     // Get the list of common columns between source and target
     val commonColumns = source.columns.toSet.intersect(target.columns.toSet).toSeq
@@ -67,12 +80,12 @@ object GlueApp {
     println(s"Output DataFrame Row Count: $outputRowCount")
 
     // Ensure that output is written, even if no rows are present
-    if (outputRowCount >= 0 && commonColumns.nonEmpty) {
+    if (outputRowCount > 0) {
       println(s"Writing results to $outputPath ...")
       outputDF.write.mode("overwrite").parquet(outputPath)
       println(s"Results successfully written to: $outputPath")
     } else {
-      println("No common columns or rows found. Writing an empty file with schema.")
+      println("No rows found in the comparison. Writing an empty file with schema.")
       // Write an empty DataFrame with the schema of the common columns
       val emptyDF = spark.createDataFrame(spark.sparkContext.emptyRDD[org.apache.spark.sql.Row], outputDF.schema)
       emptyDF.write.mode("overwrite").parquet(outputPath)
