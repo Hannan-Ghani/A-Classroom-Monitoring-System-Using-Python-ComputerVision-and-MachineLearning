@@ -13,16 +13,13 @@ object GlueApp {
     // Parse the arguments from the Glue job
     val args = GlueArgParser.getResolvedOptions(
       sysArgs, 
-      Array("sourcePath", "targetPath", "outputPath", "JOB_NAME")
+      Array("sourcePath", "targetPath", "outputPath")
     )
 
     val sourcePath = args("sourcePath")
     val targetPath = args("targetPath")
     val outputPath = args("outputPath")
     
-    // Initialize the Glue job
-    Job.init(args("JOB_NAME"), glueContext)
-
     // Load the source and target datasets dynamically
     val source = spark.read.parquet(sourcePath)
     val target = spark.read.parquet(targetPath)
@@ -31,10 +28,9 @@ object GlueApp {
     val commonColumns = source.columns.toSet.intersect(target.columns.toSet).toSeq
     println(s"Common Columns: ${commonColumns.mkString(", ")}")
 
-    // If no common columns are found, log and exit the job
+    // If no common columns are found, fail the job with an error message
     if (commonColumns.isEmpty) {
-      println("No common columns found between source and target datasets. Exiting job.")
-      return
+      throw new Exception("No common columns found between source and target datasets. Failing job.")
     }
 
     // Select only common columns from both datasets
@@ -58,7 +54,6 @@ object GlueApp {
       emptyDF.write.mode("overwrite").parquet(outputPath)
     }
 
-    // Commit the job once completed
-    Job.commit()
+    println("ETL job completed successfully.")
   }
 }
