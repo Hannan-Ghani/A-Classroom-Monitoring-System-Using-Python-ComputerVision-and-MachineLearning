@@ -1,20 +1,27 @@
+import com.amazonaws.services.glue.GlueContext
+import com.amazonaws.services.glue.util.GlueArgParser
+import org.apache.spark.SparkContext
+import org.apache.spark.sql.SparkSession
+
 object GlueApp {
   def main(sysArgs: Array[String]): Unit = {
+    // Initialize Spark and Glue contexts
     val sc: SparkContext = new SparkContext()
     val glueContext: GlueContext = new GlueContext(sc)
     val spark: SparkSession = glueContext.getSparkSession
 
-    // Parse job parameters from AWS Glue
+    // Parse the arguments from the Glue job
     val args = GlueArgParser.getResolvedOptions(
-      sysArgs,
-      Seq("sourcePath", "targetPath", "outputPath", "JOB_NAME").toArray
+      sysArgs, 
+      Array("sourcePath", "targetPath", "outputPath", "JOB_NAME")
     )
 
     val sourcePath = args("sourcePath")
     val targetPath = args("targetPath")
     val outputPath = args("outputPath")
-
-    Job.init(args("JOB_NAME"), glueContext, args.asJava)
+    
+    // Initialize the Glue job
+    Job.init(args("JOB_NAME"), glueContext)
 
     // Load the source and target datasets dynamically
     val source = spark.read.parquet(sourcePath)
@@ -51,6 +58,7 @@ object GlueApp {
       emptyDF.write.mode("overwrite").parquet(outputPath)
     }
 
+    // Commit the job once completed
     Job.commit()
   }
 }
