@@ -38,20 +38,20 @@ object GlueApp {
 
     // Get the list of common columns between source and target
     val commonColumns = source.columns.toSet.intersect(target.columns.toSet).toSeq
+    println(s"Common Columns: ${commonColumns.mkString(", ")}")
 
     // Check if there are no common columns
     if (commonColumns.isEmpty) {
       println("No common columns found between source and target DataFrames. Exiting job.")
       return
     }
-    println(s"Common Columns: ${commonColumns.mkString(", ")}")
 
     // Select the common columns from both source and target DataFrames
     val sourceCommon = source.select(commonColumns.map(col): _*)
     val targetCommon = target.select(commonColumns.map(col): _*)
 
-    // Perform the comparison for each common column
-    val comparison = commonColumns.foldLeft(sourceCommon.join(targetCommon, commonColumns, "outer")) { (df, colName) =>
+    // Perform the comparison for each common column (left outer join to retain source data)
+    val comparison = commonColumns.foldLeft(sourceCommon.join(targetCommon, commonColumns, "left_outer")) { (df, colName) =>
       df.withColumn(
         s"${colName}_comparison",
         when(sourceCommon(colName) === targetCommon(colName), "MATCH").otherwise("DIFFERENT")
@@ -62,9 +62,22 @@ object GlueApp {
     val comparisonColumns = commonColumns.map(c => s"${c}_comparison")
     val outputDF = comparison.select((commonColumns ++ comparisonColumns).map(col): _*)
 
-    // Write the output, even if no differences were found
-    println(s"Writing results to $outputPath ...")
-    outputDF.write.mode("overwrite").parquet(outputPath)
+    // Check the row count of the output DataFrame
+    val outputRowCount = outputDF.count()
+    println(s"Output DataFrame Row Count: $outputRowCount")
+
+    // Ensure that output is written, even if no rows are present
+    if (outputRowCount >= 0 && commonColumns.nonEmpty) {
+      println(s"Writing results to $outputPath ...")
+      outputDF.write.mode("overwrite").parquet(outputPath)
+      println(s"Results successfully written to: $outputPath")
+    } else {
+      println("No common columns or rows found. Writing an empty file with schema.")
+      // Write an empty DataFrame with the schema of the common columns
+      val emptyDF = spark.createDataFrame(spark.sparkContext.emptyRDD[org.apache.spark.sql.Row], outputDF.schema)
+      emptyDF.write.mode("overwrite").parquet(outputPath)
+      println(s"Empty schema written to: $outputPath")
+    }
 
     println("ETL job completed successfully.")
   }
