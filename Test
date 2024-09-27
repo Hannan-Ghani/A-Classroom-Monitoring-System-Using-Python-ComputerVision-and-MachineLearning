@@ -1,102 +1,125 @@
-import json
-import boto3
-import sys
-from pyspark.sql import functions as F
-from pyspark.sql.types import DoubleType
-from awsglue.utils import getResolvedOptions
+import com.amazonaws.services.s3.AmazonS3ClientBuilder
+import com.amazonaws.services.s3.model.GetObjectRequest
+import org.apache.spark.sql.SparkSession
+import org.apache.spark.sql.functions._
+import org.apache.spark.sql.types.DoubleType
+import org.apache.spark.sql.DataFrame
+import scala.io.Source
+import scala.collection.JavaConverters._
+import com.amazonaws.services.glue.util.JsonOptions
+import com.amazonaws.services.glue.util.GlueArgParser
+import java.net.URI
 
-# Get parameters from the Glue job
-args = getResolvedOptions(sys.argv, ['SOURCE_FILE', 'TARGET_FILE', 'OUTPUT_FILE', 'CONFIG_FILE', 'S3_BUCKET'])
+// Helper function to load configuration from S3
+def loadConfigFromS3(configFilePath: String): Map[String, Any] = {
+    val uri = new URI(configFilePath)
+    val bucket = uri.getHost
+    val key = uri.getPath.stripPrefix("/")
 
-# Retrieve the job parameters
-source_file = args['SOURCE_FILE']  # Path to the source file (S3 path to Parquet file)
-target_file = args['TARGET_FILE']  # Path to the target file (S3 path to Parquet file)
-output_file = args['OUTPUT_FILE']  # Path for the output file (S3 path to output Parquet file)
-config_file = args['CONFIG_FILE']  # Path to the config file (S3 path to JSON file)
-bucket = args['S3_BUCKET']         # S3 bucket where the config file resides
+    val s3Client = AmazonS3ClientBuilder.defaultClient()
+    val s3Object = s3Client.getObject(new GetObjectRequest(bucket, key))
+    val configFileContent = Source.fromInputStream(s3Object.getObjectContent).getLines.mkString
+    spark.read.json(Seq(configFileContent).toDS()).collect().map(row => row.getValuesMap[Any](row.schema.fieldNames)).head
+}
 
-# Load the config file from S3
-s3 = boto3.client('s3')
-config_obj = s3.get_object(Bucket=bucket, Key=config_file)
-config_data = json.loads(config_obj['Body'].read().decode('utf-8'))
+// Function to check if a column exists in DataFrame
+def columnExists(df: DataFrame, colName: String): Boolean = df.columns.contains(colName)
 
-# Load source and target data from the specified Parquet files
-sourceDF = spark.read.parquet(source_file)
-targetDF = spark.read.parquet(target_file)
+// Load arguments from Glue job parameters
+val args = GlueArgParser.getResolvedOptions(
+    sysArgs,
+    Seq("SOURCE_FILE", "TARGET_FILE", "OUTPUT_FILE", "CONFIG_FILE_PATH").toArray
+)
 
-# Helper function to check if column exists in DataFrame
-def column_exists(df, col_name):
-    return col_name in df.columns
+// Parse arguments
+val sourceFile = args("SOURCE_FILE")
+val targetFile = args("TARGET_FILE")
+val outputFile = args("OUTPUT_FILE")
+val configFilePath = args("CONFIG_FILE_PATH")  // Full S3 path to the config file
 
-# Apply transformations dynamically based on the config
-for rule in config_data['rules']:
-    source_col = rule['source_column']
-    target_col = rule['target_column']
-    
-    if column_exists(sourceDF, source_col):
-        if rule['transformation'] == 'copy':
-            sourceDF = sourceDF.withColumn(target_col, F.col(source_col))
-        
-        elif rule['transformation'] == 'concat':
-            separator = rule['separator']
-            additional_col = rule.get('additional_source_column', None)
-            if additional_col and column_exists(sourceDF, additional_col):
-                sourceDF = sourceDF.withColumn(target_col, F.concat_ws(separator, F.col(source_col), F.col(additional_col)))
-        
-        elif rule['transformation'] == 'conditional':
-            condition_field = rule['condition']['field']
-            condition_value = rule['condition']['value']
-            else_value = rule['condition']['else_value']
-            if column_exists(sourceDF, condition_field):
-                sourceDF = sourceDF.withColumn(target_col, 
-                    F.when(F.col(condition_field) == condition_value, F.col(source_col)).otherwise(F.col(else_value)))
-        
-        elif rule['transformation'] == 'cast':
-            data_type = rule['type']
-            if data_type == 'double':
-                sourceDF = sourceDF.withColumn(target_col, F.col(source_col).cast(DoubleType()))
-            # Add other types if needed
+// Initialize SparkSession
+val spark = SparkSession.builder.appName("DataValidationJob").getOrCreate()
 
-# Check if columns exist in both source and target before joining
-common_columns = [col for col in targetDF.columns if col in sourceDF.columns]
+// Load the source and target files
+val sourceDF = spark.read.parquet(sourceFile)
+val targetDF = spark.read.parquet(targetFile)
 
-# Build a list of transformed column names from the rules (only include columns that exist in both source and target)
-transformed_common_columns = [
-    rule['target_column'] for rule in config_data['rules'] if column_exists(sourceDF, rule['target_column']) and column_exists(targetDF, rule['target_column'])
-]
+// Load config file from S3
+val configData = loadConfigFromS3(configFilePath)
 
-# Join on available columns
-if "transactionId" in common_columns:
-    validationDF = sourceDF.alias("source").join(targetDF.alias("target"), "transactionId")
+// Apply transformations dynamically based on the config
+var transformedSourceDF = sourceDF
 
-    # Define a function to compare values that handles nulls and different types
-    def compareColumns(col1, col2):
-        return F.when(col1.isNull() & col2.isNull(), True) \
-                .otherwise(col1.cast("string") == col2.cast("string"))
-    
-    # Create a list of comparison columns dynamically based on available columns
-    comparison_columns = []
-    for rule in config_data['rules']:
-        target_col = rule['target_column']
-        if column_exists(targetDF, target_col) and column_exists(sourceDF, target_col):
-            comparison_columns.append(
-                compareColumns(F.col(f"source.{target_col}"), F.col(f"target.{target_col}")).alias(f"{target_col}_match")
-            )
+// Iterate through the rules and apply transformations
+for (rule <- configData("rules").asInstanceOf[List[Map[String, Any]]]) {
+    val sourceCol = rule("source_column").toString
+    val targetCol = rule("target_column").toString
 
-    # Create a DataFrame of comparisons and filter for mismatches
-    if comparison_columns:
-        comparisonDF = validationDF.select("transactionId", *comparison_columns)
-        
-        # Find mismatched rows
-        mismatchDF = comparisonDF.filter(F.array(*comparison_columns).contains(False))
+    if (columnExists(transformedSourceDF, sourceCol)) {
+        rule("transformation").toString match {
+            case "copy" =>
+                transformedSourceDF = transformedSourceDF.withColumn(targetCol, col(sourceCol))
+            
+            case "concat" =>
+                val separator = rule("separator").toString
+                val additionalCol = rule.get("additional_source_column").map(_.toString)
+                if (additionalCol.isDefined && columnExists(transformedSourceDF, additionalCol.get)) {
+                    transformedSourceDF = transformedSourceDF.withColumn(targetCol, concat_ws(separator, col(sourceCol), col(additionalCol.get)))
+                }
+            
+            case "conditional" =>
+                val conditionField = rule("condition").asInstanceOf[Map[String, String]]("field")
+                val conditionValue = rule("condition").asInstanceOf[Map[String, String]]("value")
+                val elseValue = rule("condition").asInstanceOf[Map[String, String]]("else_value")
+                if (columnExists(transformedSourceDF, conditionField)) {
+                    transformedSourceDF = transformedSourceDF.withColumn(targetCol, 
+                        when(col(conditionField) === conditionValue, col(sourceCol)).otherwise(col(elseValue))
+                    )
+                }
 
-        # Check if there are any mismatches
-        if mismatchDF.count() > 0:
-            # Save mismatches to S3
-            mismatchDF.write.parquet(output_file)
-        else:
-            # If no mismatches, output only transformed common columns
-            commonDF = validationDF.select(*transformed_common_columns)
-            commonDF.write.parquet(output_file)
-else:
-    print("No common columns to join between source and target.")
+            case "cast" =>
+                val dataType = rule("type").toString
+                if (dataType == "double") {
+                    transformedSourceDF = transformedSourceDF.withColumn(targetCol, col(sourceCol).cast(DoubleType))
+                }
+        }
+    }
+}
+
+// Find common columns between source and target
+val commonColumns = targetDF.columns.toSet.intersect(transformedSourceDF.columns.toSet).toSeq
+
+// Get transformed column names from the config
+val transformedCommonColumns = configData("rules").asInstanceOf[List[Map[String, Any]]]
+  .filter(rule => commonColumns.contains(rule("source_column").toString))
+  .map(rule => rule("target_column").toString)
+
+// Join source and target on common columns (assuming transactionId is the key)
+if (commonColumns.contains("transactionId")) {
+    val validationDF = transformedSourceDF.as("source").join(targetDF.as("target"), Seq("transactionId"), "inner")
+
+    // Function to compare columns
+    def compareColumns(col1: Column, col2: Column): Column = {
+        when(col1.isNull && col2.isNull, true).otherwise(col1.cast("string") === col2.cast("string"))
+    }
+
+    // Create list of comparison columns
+    val comparisonColumns = configData("rules").asInstanceOf[List[Map[String, Any]]]
+      .filter(rule => commonColumns.contains(rule("source_column").toString))
+      .map(rule => compareColumns(col(s"source.${rule("target_column")}"), col(s"target.${rule("target_column")}")).alias(s"${rule("target_column")}_match"))
+
+    // Select comparison columns
+    val comparisonDF = validationDF.select(col("transactionId") +: comparisonColumns: _*)
+
+    // Filter mismatches
+    val mismatchDF = comparisonDF.filter(!comparisonDF.columns.map(colName => col(colName)).reduce(_ && _))
+
+    // Output mismatches or common columns if no mismatches
+    if (mismatchDF.count() > 0) {
+        mismatchDF.write.parquet(outputFile)
+    } else {
+        validationDF.select(transformedCommonColumns.head, transformedCommonColumns.tail: _*).write.parquet(outputFile)
+    }
+} else {
+    println("No common columns to join between source and target.")
+}
