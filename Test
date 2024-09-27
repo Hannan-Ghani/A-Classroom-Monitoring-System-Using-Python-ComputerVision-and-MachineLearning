@@ -1,125 +1,37 @@
-import com.amazonaws.services.s3.AmazonS3ClientBuilder
-import com.amazonaws.services.s3.model.GetObjectRequest
-import org.apache.spark.sql.SparkSession
-import org.apache.spark.sql.functions._
-import org.apache.spark.sql.types.DoubleType
-import org.apache.spark.sql.DataFrame
-import scala.io.Source
-import scala.collection.JavaConverters._
-import com.amazonaws.services.glue.util.JsonOptions
-import com.amazonaws.services.glue.util.GlueArgParser
-import java.net.URI
-
-// Helper function to load configuration from S3
-def loadConfigFromS3(configFilePath: String): Map[String, Any] = {
-    val uri = new URI(configFilePath)
-    val bucket = uri.getHost
-    val key = uri.getPath.stripPrefix("/")
-
-    val s3Client = AmazonS3ClientBuilder.defaultClient()
-    val s3Object = s3Client.getObject(new GetObjectRequest(bucket, key))
-    val configFileContent = Source.fromInputStream(s3Object.getObjectContent).getLines.mkString
-    spark.read.json(Seq(configFileContent).toDS()).collect().map(row => row.getValuesMap[Any](row.schema.fieldNames)).head
-}
-
-// Function to check if a column exists in DataFrame
-def columnExists(df: DataFrame, colName: String): Boolean = df.columns.contains(colName)
-
-// Load arguments from Glue job parameters
-val args = GlueArgParser.getResolvedOptions(
-    sysArgs,
-    Seq("SOURCE_FILE", "TARGET_FILE", "OUTPUT_FILE", "CONFIG_FILE_PATH").toArray
-)
-
-// Parse arguments
-val sourceFile = args("SOURCE_FILE")
-val targetFile = args("TARGET_FILE")
-val outputFile = args("OUTPUT_FILE")
-val configFilePath = args("CONFIG_FILE_PATH")  // Full S3 path to the config file
-
-// Initialize SparkSession
-val spark = SparkSession.builder.appName("DataValidationJob").getOrCreate()
-
-// Load the source and target files
-val sourceDF = spark.read.parquet(sourceFile)
-val targetDF = spark.read.parquet(targetFile)
-
-// Load config file from S3
-val configData = loadConfigFromS3(configFilePath)
-
-// Apply transformations dynamically based on the config
-var transformedSourceDF = sourceDF
-
-// Iterate through the rules and apply transformations
-for (rule <- configData("rules").asInstanceOf[List[Map[String, Any]]]) {
-    val sourceCol = rule("source_column").toString
-    val targetCol = rule("target_column").toString
-
-    if (columnExists(transformedSourceDF, sourceCol)) {
-        rule("transformation").toString match {
-            case "copy" =>
-                transformedSourceDF = transformedSourceDF.withColumn(targetCol, col(sourceCol))
-            
-            case "concat" =>
-                val separator = rule("separator").toString
-                val additionalCol = rule.get("additional_source_column").map(_.toString)
-                if (additionalCol.isDefined && columnExists(transformedSourceDF, additionalCol.get)) {
-                    transformedSourceDF = transformedSourceDF.withColumn(targetCol, concat_ws(separator, col(sourceCol), col(additionalCol.get)))
-                }
-            
-            case "conditional" =>
-                val conditionField = rule("condition").asInstanceOf[Map[String, String]]("field")
-                val conditionValue = rule("condition").asInstanceOf[Map[String, String]]("value")
-                val elseValue = rule("condition").asInstanceOf[Map[String, String]]("else_value")
-                if (columnExists(transformedSourceDF, conditionField)) {
-                    transformedSourceDF = transformedSourceDF.withColumn(targetCol, 
-                        when(col(conditionField) === conditionValue, col(sourceCol)).otherwise(col(elseValue))
-                    )
-                }
-
-            case "cast" =>
-                val dataType = rule("type").toString
-                if (dataType == "double") {
-                    transformedSourceDF = transformedSourceDF.withColumn(targetCol, col(sourceCol).cast(DoubleType))
-                }
-        }
+{
+  "rules": [
+    {
+      "source_column": "TRANSACTION_ID",
+      "target_column": "transactionId",
+      "transformation": "copy"
+    },
+    {
+      "source_column": "TRANSACTION_ID",
+      "additional_source_column": "eff_start_date",
+      "target_column": "transactionUniqueId",
+      "transformation": "concat",
+      "separator": "//"
+    },
+    {
+      "source_column": "TRANSACTION_TYPE",
+      "target_column": "transactionType",
+      "transformation": "copy"
+    },
+    {
+      "source_column": "ACCOUNT_ID",
+      "target_column": "aAccountId",
+      "transformation": "conditional",
+      "condition": {
+        "field": "transactionType",
+        "value": "DEBIT",
+        "else_value": "COUNTERPARTY_ID"
+      }
+    },
+    {
+      "source_column": "ORIGINAL_AMOUNT",
+      "target_column": "amountLocal",
+      "transformation": "cast",
+      "type": "double"
     }
-}
-
-// Find common columns between source and target
-val commonColumns = targetDF.columns.toSet.intersect(transformedSourceDF.columns.toSet).toSeq
-
-// Get transformed column names from the config
-val transformedCommonColumns = configData("rules").asInstanceOf[List[Map[String, Any]]]
-  .filter(rule => commonColumns.contains(rule("source_column").toString))
-  .map(rule => rule("target_column").toString)
-
-// Join source and target on common columns (assuming transactionId is the key)
-if (commonColumns.contains("transactionId")) {
-    val validationDF = transformedSourceDF.as("source").join(targetDF.as("target"), Seq("transactionId"), "inner")
-
-    // Function to compare columns
-    def compareColumns(col1: Column, col2: Column): Column = {
-        when(col1.isNull && col2.isNull, true).otherwise(col1.cast("string") === col2.cast("string"))
-    }
-
-    // Create list of comparison columns
-    val comparisonColumns = configData("rules").asInstanceOf[List[Map[String, Any]]]
-      .filter(rule => commonColumns.contains(rule("source_column").toString))
-      .map(rule => compareColumns(col(s"source.${rule("target_column")}"), col(s"target.${rule("target_column")}")).alias(s"${rule("target_column")}_match"))
-
-    // Select comparison columns
-    val comparisonDF = validationDF.select(col("transactionId") +: comparisonColumns: _*)
-
-    // Filter mismatches
-    val mismatchDF = comparisonDF.filter(!comparisonDF.columns.map(colName => col(colName)).reduce(_ && _))
-
-    // Output mismatches or common columns if no mismatches
-    if (mismatchDF.count() > 0) {
-        mismatchDF.write.parquet(outputFile)
-    } else {
-        validationDF.select(transformedCommonColumns.head, transformedCommonColumns.tail: _*).write.parquet(outputFile)
-    }
-} else {
-    println("No common columns to join between source and target.")
+  ]
 }
