@@ -1,27 +1,102 @@
-Source,Target,Logic
-transaction.TRANSACTION_ID,transactionId,Copy as is
-transaction.TRANSACTION_ID and transaction.eff_start_date,transactionUniqueId,Concatenate with //
-transaction.TRANSACTION_TYPE,transactionType,Copy as is
-transaction.ACCOUNT_ID or transaction.COUNTERPARTY_ID,aAccountId,If DEBIT, use ACCOUNT_ID; if CREDIT, use COUNTERPARTY_ID
-Derived from aAccountId,aAccountIdPrefix,Substring from aAccountId, first 5 chars
-Derived from aAccountId and aAccountIdPrefix,aAccountNumber,If UKUBA, substring(8,16); If UKGTS, substring(7,16)
-Derived from aAccountNumber,aAccountNumberCleansed,Remove special characters
-transaction.ACCOUNT_KEY or transaction.COUNTERPARTY_PRODUCT_KEY,aAccountKey,If DEBIT, use ACCOUNT_KEY; If CREDIT, use COUNTERPARTY_PRODUCT_KEY
-Derived from aSortCode, aAccountNumber, aAccountKey,aAccountUniqueId,Concat aSortCode + aAccountNumber; else split aAccountKey
-transaction.CUSTOMER_KEY or transaction.COUNTERPARTY_CUSTOMER_KEY,aCustomerId,If DEBIT, use COUNTERPARTY_CUSTOMER_KEY; If CREDIT, use CUSTOMER_KEY
-transaction.BRANCH_KEY,aBranchUniqueId,If DEBIT, use BRANCH_KEY; else blank
-Derived from aAccountId or transaction.TRANSACTION_ROUTING_NUMBER,aSortCode,Extract from aAccountId; fallback to TRANSACTION_ROUTING_NUMBER
-transaction.ACCOUNT_ID or transaction.COUNTERPARTY_ID,bAccountId,If DEBIT, use COUNTERPARTY_ID; If CREDIT, use ACCOUNT_ID
-transaction.ACCOUNT_KEY or transaction.COUNTERPARTY_PRODUCT_KEY,bAccountKey,If DEBIT, use COUNTERPARTY_PRODUCT_KEY; If CREDIT, use ACCOUNT_KEY
-transaction.CUSTOMER_KEY or transaction.COUNTERPARTY_CUSTOMER_KEY,bCustomerId,If DEBIT, use COUNTERPARTY_CUSTOMER_KEY; If CREDIT, use CUSTOMER_KEY
-transaction.NARRATIVE,narrative,Copy as is
-transaction.SHORTNARRATIVE,narrativeShort,Copy as is
-transaction.TRANSACTION_CODE,transactionCode,Copy as is
-transaction.TRANSACTION_CODE_DESC,transactionCodeDescription,Copy as is
-transaction.SOURCE_TRANSACTIONLID,sourceTransactionId,Copy as is
-transaction.TRANSACTION_DATE,transactionDate,Format to YYYY-MM-DD
-transaction.ORIGINAL_AMOUNT,amountLocal,Cast to double
-transaction.TRANSACTION_COUNTRY,transactionCountry,Copy as is
-transaction.TRANSACTION_LOCATION,transactionLocation,Copy as is
-transaction.SCREENING_SYSTEM,sourceSystem,Copy as is
-transaction.EFF_START_DATE,effStartDate,Copy as is
+import json
+import boto3
+import sys
+from pyspark.sql import functions as F
+from pyspark.sql.types import DoubleType
+from awsglue.utils import getResolvedOptions
+
+# Get parameters from the Glue job
+args = getResolvedOptions(sys.argv, ['SOURCE_FILE', 'TARGET_FILE', 'OUTPUT_FILE', 'CONFIG_FILE', 'S3_BUCKET'])
+
+# Retrieve the job parameters
+source_file = args['SOURCE_FILE']  # Path to the source file (S3 path to Parquet file)
+target_file = args['TARGET_FILE']  # Path to the target file (S3 path to Parquet file)
+output_file = args['OUTPUT_FILE']  # Path for the output file (S3 path to output Parquet file)
+config_file = args['CONFIG_FILE']  # Path to the config file (S3 path to JSON file)
+bucket = args['S3_BUCKET']         # S3 bucket where the config file resides
+
+# Load the config file from S3
+s3 = boto3.client('s3')
+config_obj = s3.get_object(Bucket=bucket, Key=config_file)
+config_data = json.loads(config_obj['Body'].read().decode('utf-8'))
+
+# Load source and target data from the specified Parquet files
+sourceDF = spark.read.parquet(source_file)
+targetDF = spark.read.parquet(target_file)
+
+# Helper function to check if column exists in DataFrame
+def column_exists(df, col_name):
+    return col_name in df.columns
+
+# Apply transformations dynamically based on the config
+for rule in config_data['rules']:
+    source_col = rule['source_column']
+    target_col = rule['target_column']
+    
+    if column_exists(sourceDF, source_col):
+        if rule['transformation'] == 'copy':
+            sourceDF = sourceDF.withColumn(target_col, F.col(source_col))
+        
+        elif rule['transformation'] == 'concat':
+            separator = rule['separator']
+            additional_col = rule.get('additional_source_column', None)
+            if additional_col and column_exists(sourceDF, additional_col):
+                sourceDF = sourceDF.withColumn(target_col, F.concat_ws(separator, F.col(source_col), F.col(additional_col)))
+        
+        elif rule['transformation'] == 'conditional':
+            condition_field = rule['condition']['field']
+            condition_value = rule['condition']['value']
+            else_value = rule['condition']['else_value']
+            if column_exists(sourceDF, condition_field):
+                sourceDF = sourceDF.withColumn(target_col, 
+                    F.when(F.col(condition_field) == condition_value, F.col(source_col)).otherwise(F.col(else_value)))
+        
+        elif rule['transformation'] == 'cast':
+            data_type = rule['type']
+            if data_type == 'double':
+                sourceDF = sourceDF.withColumn(target_col, F.col(source_col).cast(DoubleType()))
+            # Add other types if needed
+
+# Check if columns exist in both source and target before joining
+common_columns = [col for col in targetDF.columns if col in sourceDF.columns]
+
+# Build a list of transformed column names from the rules (only include columns that exist in both source and target)
+transformed_common_columns = [
+    rule['target_column'] for rule in config_data['rules'] if column_exists(sourceDF, rule['target_column']) and column_exists(targetDF, rule['target_column'])
+]
+
+# Join on available columns
+if "transactionId" in common_columns:
+    validationDF = sourceDF.alias("source").join(targetDF.alias("target"), "transactionId")
+
+    # Define a function to compare values that handles nulls and different types
+    def compareColumns(col1, col2):
+        return F.when(col1.isNull() & col2.isNull(), True) \
+                .otherwise(col1.cast("string") == col2.cast("string"))
+    
+    # Create a list of comparison columns dynamically based on available columns
+    comparison_columns = []
+    for rule in config_data['rules']:
+        target_col = rule['target_column']
+        if column_exists(targetDF, target_col) and column_exists(sourceDF, target_col):
+            comparison_columns.append(
+                compareColumns(F.col(f"source.{target_col}"), F.col(f"target.{target_col}")).alias(f"{target_col}_match")
+            )
+
+    # Create a DataFrame of comparisons and filter for mismatches
+    if comparison_columns:
+        comparisonDF = validationDF.select("transactionId", *comparison_columns)
+        
+        # Find mismatched rows
+        mismatchDF = comparisonDF.filter(F.array(*comparison_columns).contains(False))
+
+        # Check if there are any mismatches
+        if mismatchDF.count() > 0:
+            # Save mismatches to S3
+            mismatchDF.write.parquet(output_file)
+        else:
+            # If no mismatches, output only transformed common columns
+            commonDF = validationDF.select(*transformed_common_columns)
+            commonDF.write.parquet(output_file)
+else:
+    print("No common columns to join between source and target.")
