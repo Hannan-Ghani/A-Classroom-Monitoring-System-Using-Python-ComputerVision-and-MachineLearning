@@ -1,9 +1,8 @@
 import com.amazonaws.services.glue.util.GlueArgParser
 import org.apache.spark.SparkContext
-import org.apache.spark.sql.{DataFrame, SparkSession}
+import org.apache.spark.sql.{DataFrame, SparkSession, Row, Column}
 import org.apache.spark.sql.functions._
 import org.apache.spark.sql.types.DoubleType
-import scala.util.parsing.json.JSON
 
 object DataValidationJob {
 
@@ -31,9 +30,14 @@ object DataValidationJob {
     // Load the JSON configuration file from S3
     val configDF = spark.read.json(configFile)
 
+    // Ensure that the configDF contains the expected structure
+    if (configDF.count() == 0) {
+      throw new Exception("The configuration file is empty or not properly formatted.")
+    }
+
     // Convert the config DataFrame to a Map for easy access
     val configData = configDF.collect().map(row => {
-      val rules = row.getSeq[Row](row.fieldIndex("rules")).map(rule => {
+      val rules = row.getAs[Seq[Row]]("rules").map(rule => {
         Map(
           "source_column" -> rule.getAs[String]("source_column"),
           "target_column" -> rule.getAs[String]("target_column"),
@@ -42,7 +46,7 @@ object DataValidationJob {
         )
       })
       Map("rules" -> rules)
-    }).head
+    }).headOption.getOrElse(throw new Exception("Configuration data is missing or invalid."))
 
     // Load the source and target Parquet files directly from S3 as DataFrames
     val sourceDF = spark.read.parquet(sourceFile)
