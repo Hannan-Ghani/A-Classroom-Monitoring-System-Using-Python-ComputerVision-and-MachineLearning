@@ -1,55 +1,62 @@
-import org.apache.spark.sql.{SparkSession, DataFrame, Column}
+import com.amazonaws.services.glue.{GlueContext, DynamicFrame}
+import com.amazonaws.services.glue.util.GlueArgParser
+import org.apache.spark.SparkContext
 import org.apache.spark.sql.functions._
 import org.apache.spark.sql.types.DoubleType
-import com.amazonaws.services.glue.util.GlueArgParser
+import org.apache.spark.sql.{DataFrame, SparkSession}
+import scala.util.parsing.json.JSON
 
 object DataValidationJob {
-
-  // Function to load configuration directly from S3 using Spark
-  def loadConfigFromS3(spark: SparkSession, configFilePath: String): Map[String, Any] = {
-    spark.read.json(configFilePath).collect()
-      .map(row => row.getValuesMap[Any](row.schema.fieldNames)).head
-  }
 
   // Function to check if a column exists in DataFrame
   def columnExists(df: DataFrame, colName: String): Boolean = df.columns.contains(colName)
 
-  // Function to write a simple text file to S3 when no common columns are found
-  def writeNoCommonColumnsMessage(spark: SparkSession, outputFilePath: String, message: String): Unit = {
-    import spark.implicits._
-    // Write the message as a single-line text file to S3
-    spark.sparkContext.parallelize(Seq(message)).toDF().write.text(outputFilePath)
-  }
-
   def main(sysArgs: Array[String]): Unit = {
+
+    // Initialize GlueContext
+    val sc: SparkContext = new SparkContext()
+    val glueContext = new GlueContext(sc)
 
     // Load arguments from Glue job parameters
     val args = GlueArgParser.getResolvedOptions(
       sysArgs,
-      Seq("SOURCE_FILE", "TARGET_FILE", "OUTPUT_FILE", "CONFIG_FILE_PATH").toArray
+      Seq("SOURCE_FILE", "TARGET_FILE", "OUTPUT_FILE", "CONFIG_FILE").toArray
     )
 
     // Parse arguments
     val sourceFile = args("SOURCE_FILE")
     val targetFile = args("TARGET_FILE")
     val outputFile = args("OUTPUT_FILE")
-    val configFilePath = args("CONFIG_FILE_PATH")  // Full S3 path to the config file
+    val configFile = args("CONFIG_FILE")  // This should be the path to your JSON config file in S3
 
-    // Initialize SparkSession
-    val spark = SparkSession.builder.appName("DataValidationJob").getOrCreate()
-    import spark.implicits._  // For toDS
+    // Load the JSON configuration file from S3
+    val spark: SparkSession = glueContext.getSparkSession
+    val configDF = spark.read.json(configFile)
 
-    // Load the source and target files
-    val sourceDF = spark.read.parquet(sourceFile)
-    val targetDF = spark.read.parquet(targetFile)
+    // Convert the config DataFrame to a Map for easy access
+    val configData = configDF.collect().map(row => {
+      val rules = row.getSeq[Row](row.fieldIndex("rules")).map(rule => {
+        Map(
+          "source_column" -> rule.getAs[String]("source_column"),
+          "target_column" -> rule.getAs[String]("target_column"),
+          "transformation" -> rule.getAs[String]("transformation"),
+          "type" -> rule.getAs[String]("type")
+        )
+      })
+      Map("rules" -> rules)
+    }).head
 
-    // Load config file from S3
-    val configData = loadConfigFromS3(spark, configFilePath)
+    // Load the source and target files as DynamicFrames
+    val sourceDynamicFrame: DynamicFrame = glueContext.getCatalogSource(database = "your-database", tableName = sourceFile).getDynamicFrame()
+    val targetDynamicFrame: DynamicFrame = glueContext.getCatalogSource(database = "your-database", tableName = targetFile).getDynamicFrame()
+
+    // Convert DynamicFrames to DataFrames for transformations
+    val sourceDF = sourceDynamicFrame.toDF()
+    val targetDF = targetDynamicFrame.toDF()
 
     // Apply transformations dynamically based on the config
     var transformedSourceDF = sourceDF
 
-    // Iterate through the rules and apply transformations
     for (rule <- configData("rules").asInstanceOf[List[Map[String, Any]]]) {
       val sourceCol = rule("source_column").toString
       val targetCol = rule("target_column").toString
@@ -60,7 +67,7 @@ object DataValidationJob {
             transformedSourceDF = transformedSourceDF.withColumn(targetCol, col(sourceCol))
 
           case "concat" =>
-            val separator = rule("separator").toString
+            val separator = rule.get("separator").map(_.toString).getOrElse("")
             val additionalCol = rule.get("additional_source_column").map(_.toString)
             if (additionalCol.isDefined && columnExists(transformedSourceDF, additionalCol.get)) {
               transformedSourceDF = transformedSourceDF.withColumn(targetCol, concat_ws(separator, col(sourceCol), col(additionalCol.get)))
@@ -77,7 +84,7 @@ object DataValidationJob {
             }
 
           case "cast" =>
-            val dataType = rule("type").toString
+            val dataType = rule.get("type").map(_.toString).getOrElse("string")
             if (dataType == "double") {
               transformedSourceDF = transformedSourceDF.withColumn(targetCol, col(sourceCol).cast(DoubleType))
             }
@@ -93,40 +100,36 @@ object DataValidationJob {
       .filter(rule => commonColumns.contains(rule("source_column").toString))
       .map(rule => rule("target_column").toString)
 
-    // If there are no common columns, write a text file and exit
-    if (commonColumns.isEmpty) {
-      val message = "No common columns were found between the source and target files."
-      writeNoCommonColumnsMessage(spark, outputFile, message)
-    } else {
-      // Join source and target on common columns (assuming transactionId is the key)
-      if (commonColumns.contains("transactionId")) {
-        val validationDF = transformedSourceDF.as("source").join(targetDF.as("target"), Seq("transactionId"), "inner")
+    // Join source and target on common columns (assuming transactionId is the key)
+    if (commonColumns.contains("transactionId")) {
+      val validationDF = transformedSourceDF.as("source").join(targetDF.as("target"), Seq("transactionId"), "inner")
 
-        // Function to compare columns
-        def compareColumns(col1: Column, col2: Column): Column = {
-          when(col1.isNull && col2.isNull, true).otherwise(col1.cast("string") === col2.cast("string"))
-        }
-
-        // Create list of comparison columns
-        val comparisonColumns = configData("rules").asInstanceOf[List[Map[String, Any]]]
-          .filter(rule => commonColumns.contains(rule("source_column").toString))
-          .map(rule => compareColumns(col(s"source.${rule("target_column")}"), col(s"target.${rule("target_column")}")).alias(s"${rule("target_column")}_match"))
-
-        // Select comparison columns
-        val comparisonDF = validationDF.select(col("transactionId") +: comparisonColumns: _*)
-
-        // Filter mismatches
-        val mismatchDF = comparisonDF.filter(!comparisonDF.columns.map(colName => col(colName)).reduce(_ && _))
-
-        // Output mismatches or common columns if no mismatches
-        if (mismatchDF.count() > 0) {
-          mismatchDF.write.parquet(outputFile)
-        } else {
-          validationDF.select(transformedCommonColumns.head, transformedCommonColumns.tail: _*).write.parquet(outputFile)
-        }
-      } else {
-        println("No common columns to join between source and target.")
+      // Function to compare columns
+      def compareColumns(col1: Column, col2: Column): Column = {
+        when(col1.isNull && col2.isNull, true).otherwise(col1.cast("string") === col2.cast("string"))
       }
+
+      // Create list of comparison columns
+      val comparisonColumns = configData("rules").asInstanceOf[List[Map[String, Any]]]
+        .filter(rule => commonColumns.contains(rule("source_column").toString))
+        .map(rule => compareColumns(col(s"source.${rule("target_column")}"), col(s"target.${rule("target_column")}")).alias(s"${rule("target_column")}_match"))
+
+      // Select comparison columns
+      val comparisonDF = validationDF.select(col("transactionId") +: comparisonColumns: _*)
+
+      // Filter mismatches
+      val mismatchDF = comparisonDF.filter(!comparisonDF.columns.map(colName => col(colName)).reduce(_ && _))
+
+      // Output mismatches or common columns if no mismatches
+      if (mismatchDF.count() > 0) {
+        val mismatchDynamicFrame = DynamicFrame(mismatchDF, glueContext)
+        glueContext.getSinkWithFormat(connectionType = "s3", options = JsonOptions(Map("path" -> outputFile)), format = "parquet").writeDynamicFrame(mismatchDynamicFrame)
+      } else {
+        val outputDynamicFrame = DynamicFrame(validationDF.select(transformedCommonColumns.head, transformedCommonColumns.tail: _*), glueContext)
+        glueContext.getSinkWithFormat(connectionType = "s3", options = JsonOptions(Map("path" -> outputFile)), format = "parquet").writeDynamicFrame(outputDynamicFrame)
+      }
+    } else {
+      println("No common columns to join between source and target.")
     }
   }
 }
