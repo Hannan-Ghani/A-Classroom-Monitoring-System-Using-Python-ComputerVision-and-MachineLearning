@@ -1,157 +1,83 @@
-{
-  "rules": [
-    {
-      "source_column": "TRANSACTION_ID",
-      "target_column": "transactionId",
-      "transformation": "copy"
-    },
-    {
-      "source_column": "TRANSACTION_ID",
-      "target_column": "transactionUniqueId",
-      "transformation": "concat",
-      "additional_source_column": "EFF_START_DATE",
-      "separator": "//"
-    },
-    {
-      "source_column": "TRANSACTION_TYPE",
-      "target_column": "transactionType",
-      "transformation": "copy"
-    },
-    {
-      "source_column": "ACCOUNT_ID",
-      "target_column": "aAccountId",
-      "transformation": "conditional",
-      "condition": {
-        "field": "DEBIT_CREDIT_INDICATOR",
-        "value": "DEBIT",
-        "else_value": "COUNTERPARTY_ID"
+import com.amazonaws.services.glue.GlueContext
+import com.amazonaws.services.glue.util.GlueArgParser
+import com.amazonaws.services.glue.util.Job
+import org.apache.spark.SparkContext
+import org.apache.spark.sql.functions._
+import org.apache.spark.sql.{SaveMode, SparkSession}
+
+object GlueApp {
+  def main(sysArgs: Array[String]): Unit = {
+    // Initialize GlueContext and SparkSession
+    val sc: SparkContext = new SparkContext()
+    val glueContext: GlueContext = new GlueContext(sc)
+    val spark: SparkSession = glueContext.getSparkSession
+
+    // Parse arguments
+    val args = GlueArgParser.getResolvedOptions(sysArgs, Seq("sourcePath", "targetPath", "outputPath", "configPath", "JOB_NAME").toArray)
+    Job.init(args("JOB_NAME"), glueContext, args.asJava)
+
+    // Paths
+    val sourcePath = args("sourcePath")
+    val targetPath = args("targetPath")
+    val outputPath = args("outputPath")
+    val configPath = args("configPath")
+
+    // Read source, target, and config data
+    val transactionSource = spark.read.parquet(s"$sourcePath")
+    val target = spark.read.parquet(s"$targetPath")
+    val configDF = spark.read.json(s"$configPath")
+
+    // Convert config JSON to a map
+    val configData = configDF.collect().map(row => {
+      val rules = row.getAs[Seq[org.apache.spark.sql.Row]]("rules").map(rule => {
+        Map(
+          "source_column" -> rule.getAs[String]("source_column"),
+          "target_column" -> rule.getAs[String]("target_column"),
+          "transformation" -> rule.getAs[String]("transformation"),
+          "type" -> rule.getAs[String]("type")
+        )
+      })
+      Map("rules" -> rules)
+    }).headOption.getOrElse(throw new Exception("Configuration data is missing or invalid."))
+
+    // Apply transformations based on config data
+    var transformedSourceDF = transactionSource
+
+    for (rule <- configData("rules").asInstanceOf[List[Map[String, Any]]]) {
+      val sourceCol = rule("source_column").toString
+      val targetCol = rule("target_column").toString
+
+      rule("transformation").toString match {
+        case "copy" =>
+          transformedSourceDF = transformedSourceDF.withColumn(targetCol, col(sourceCol))
+
+        case "cast" if rule("type") == "double" =>
+          transformedSourceDF = transformedSourceDF.withColumn(targetCol, col(sourceCol).cast("double"))
+
+        case "concat" =>
+          val additionalCol = rule.get("additional_source_column").map(_.toString).getOrElse("")
+          val separator = rule.get("separator").map(_.toString).getOrElse("")
+          transformedSourceDF = transformedSourceDF.withColumn(targetCol, concat_ws(separator, col(sourceCol), col(additionalCol)))
+
+        case "conditional" =>
+          val conditionField = rule("condition").asInstanceOf[Map[String, String]]("field")
+          val conditionValue = rule("condition").asInstanceOf[Map[String, String]]("value")
+          val elseValue = rule("condition").asInstanceOf[Map[String, String]]("else_value")
+          transformedSourceDF = transformedSourceDF.withColumn(targetCol, when(col(conditionField) === conditionValue, col(sourceCol)).otherwise(col(elseValue)))
       }
-    },
-    {
-      "source_column": "ACCOUNT_ID",
-      "target_column": "bAccountId",
-      "transformation": "conditional",
-      "condition": {
-        "field": "DEBIT_CREDIT_INDICATOR",
-        "value": "CREDIT",
-        "else_value": "ACCOUNT_ID"
-      }
-    },
-    {
-      "source_column": "ACCOUNT_KEY",
-      "target_column": "aAccountKey",
-      "transformation": "conditional",
-      "condition": {
-        "field": "DEBIT_CREDIT_INDICATOR",
-        "value": "DEBIT",
-        "else_value": "COUNTERPARTY_PRODUCT_KEY"
-      }
-    },
-    {
-      "source_column": "ACCOUNT_KEY",
-      "target_column": "bAccountKey",
-      "transformation": "conditional",
-      "condition": {
-        "field": "DEBIT_CREDIT_INDICATOR",
-        "value": "CREDIT",
-        "else_value": "ACCOUNT_KEY"
-      }
-    },
-    {
-      "source_column": "CUSTOMER_KEY",
-      "target_column": "aCustomerId",
-      "transformation": "conditional",
-      "condition": {
-        "field": "DEBIT_CREDIT_INDICATOR",
-        "value": "DEBIT",
-        "else_value": "COUNTERPARTY_CUSTOMER_KEY"
-      }
-    },
-    {
-      "source_column": "CUSTOMER_KEY",
-      "target_column": "bCustomerId",
-      "transformation": "conditional",
-      "condition": {
-        "field": "DEBIT_CREDIT_INDICATOR",
-        "value": "CREDIT",
-        "else_value": "CUSTOMER_KEY"
-      }
-    },
-    {
-      "source_column": "BRANCH_KEY",
-      "target_column": "aBranchUniqueId",
-      "transformation": "conditional",
-      "condition": {
-        "field": "DEBIT_CREDIT_INDICATOR",
-        "value": "DEBIT",
-        "else_value": ""
-      }
-    },
-    {
-      "source_column": "TRANSACTION_ROUTING_NUMBER",
-      "target_column": "aSortCode",
-      "transformation": "copy"
-    },
-    {
-      "source_column": "TRANSACTION_ROUTING_NUMBER",
-      "target_column": "bSortCode",
-      "transformation": "copy"
-    },
-    {
-      "source_column": "NARRATIVE",
-      "target_column": "narrative",
-      "transformation": "copy"
-    },
-    {
-      "source_column": "SHORTNARRATIVE",
-      "target_column": "narrativeShort",
-      "transformation": "copy"
-    },
-    {
-      "source_column": "TRANSACTION_CODE",
-      "target_column": "transactionCode",
-      "transformation": "copy"
-    },
-    {
-      "source_column": "TRANSACTION_CODE_DESC",
-      "target_column": "transactionCodeDescription",
-      "transformation": "copy"
-    },
-    {
-      "source_column": "SOURCE_TRANSACTION_ID",
-      "target_column": "sourceTransactionId",
-      "transformation": "copy"
-    },
-    {
-      "source_column": "TRANSACTION_DATE",
-      "target_column": "transactionDate",
-      "transformation": "copy"
-    },
-    {
-      "source_column": "ORIGINAL_AMOUNT",
-      "target_column": "amountLocal",
-      "transformation": "cast",
-      "type": "double"
-    },
-    {
-      "source_column": "TRANSACTION_COUNTRY",
-      "target_column": "transactionCountry",
-      "transformation": "copy"
-    },
-    {
-      "source_column": "TRANSACTION_LOCATION",
-      "target_column": "transactionLocation",
-      "transformation": "copy"
-    },
-    {
-      "source_column": "SCREENING_SYSTEM",
-      "target_column": "sourceSystem",
-      "transformation": "copy"
-    },
-    {
-      "source_column": "EFF_START_DATE",
-      "target_column": "effStartDate",
-      "transformation": "copy"
     }
-  ]
+
+    // Select columns to compare
+    val sourceColumns = transformedSourceDF.select("transactionId", "narrative").as("source")
+    val targetColumns = target.select("transactionId", "narrative").as("target")
+
+    // Compare source and target data
+    val dataDifference = sourceColumns.exceptAll(targetColumns).limit(10)
+
+    // Write output to parquet
+    dataDifference.write.format("parquet").mode(SaveMode.Overwrite).save(s"$outputPath")
+
+    // Commit the job
+    Job.commit()
+  }
 }
