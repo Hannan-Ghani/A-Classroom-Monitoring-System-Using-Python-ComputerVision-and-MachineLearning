@@ -1,27 +1,13 @@
-import com.amazonaws.services.s3.AmazonS3ClientBuilder
-import com.amazonaws.services.s3.model.PutObjectRequest
-import org.apache.spark.sql.SparkSession
+import org.apache.spark.sql.{SparkSession, DataFrame, Column}
 import org.apache.spark.sql.functions._
 import org.apache.spark.sql.types.DoubleType
-import org.apache.spark.sql.DataFrame
-import scala.io.Source
 import com.amazonaws.services.glue.util.GlueArgParser
-import java.net.URI
-import java.nio.file.Files
-import java.nio.file.Paths
 
 object DataValidationJob {
 
-  // Helper function to load configuration from S3
-  def loadConfigFromS3(configFilePath: String): Map[String, Any] = {
-    val uri = new URI(configFilePath)
-    val bucket = uri.getHost
-    val key = uri.getPath.stripPrefix("/")
-
-    val s3Client = AmazonS3ClientBuilder.defaultClient()
-    val s3Object = s3Client.getObject(new GetObjectRequest(bucket, key))
-    val configFileContent = Source.fromInputStream(s3Object.getObjectContent).getLines.mkString
-    SparkSession.builder.getOrCreate().read.json(Seq(configFileContent).toDS()).collect()
+  // Function to load configuration directly from S3 using Spark
+  def loadConfigFromS3(spark: SparkSession, configFilePath: String): Map[String, Any] = {
+    spark.read.json(configFilePath).collect()
       .map(row => row.getValuesMap[Any](row.schema.fieldNames)).head
   }
 
@@ -29,16 +15,10 @@ object DataValidationJob {
   def columnExists(df: DataFrame, colName: String): Boolean = df.columns.contains(colName)
 
   // Function to write a simple text file to S3 when no common columns are found
-  def writeNoCommonColumnsMessage(outputFilePath: String, message: String): Unit = {
-    val uri = new URI(outputFilePath)
-    val bucket = uri.getHost
-    val key = uri.getPath.stripPrefix("/")
-
-    val tempFilePath = Files.createTempFile("no-common-columns", ".txt")
-    Files.write(tempFilePath, message.getBytes)
-
-    val s3Client = AmazonS3ClientBuilder.defaultClient()
-    s3Client.putObject(new PutObjectRequest(bucket, key, tempFilePath.toFile))
+  def writeNoCommonColumnsMessage(spark: SparkSession, outputFilePath: String, message: String): Unit = {
+    import spark.implicits._
+    // Write the message as a single-line text file to S3
+    spark.sparkContext.parallelize(Seq(message)).toDF().write.text(outputFilePath)
   }
 
   def main(sysArgs: Array[String]): Unit = {
@@ -57,13 +37,14 @@ object DataValidationJob {
 
     // Initialize SparkSession
     val spark = SparkSession.builder.appName("DataValidationJob").getOrCreate()
+    import spark.implicits._  // For toDS
 
     // Load the source and target files
     val sourceDF = spark.read.parquet(sourceFile)
     val targetDF = spark.read.parquet(targetFile)
 
     // Load config file from S3
-    val configData = loadConfigFromS3(configFilePath)
+    val configData = loadConfigFromS3(spark, configFilePath)
 
     // Apply transformations dynamically based on the config
     var transformedSourceDF = sourceDF
@@ -115,7 +96,7 @@ object DataValidationJob {
     // If there are no common columns, write a text file and exit
     if (commonColumns.isEmpty) {
       val message = "No common columns were found between the source and target files."
-      writeNoCommonColumnsMessage(outputFile, message)
+      writeNoCommonColumnsMessage(spark, outputFile, message)
     } else {
       // Join source and target on common columns (assuming transactionId is the key)
       if (commonColumns.contains("transactionId")) {
