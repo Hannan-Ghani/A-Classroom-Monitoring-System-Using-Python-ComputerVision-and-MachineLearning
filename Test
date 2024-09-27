@@ -1,9 +1,8 @@
-import com.amazonaws.services.glue.{GlueContext, DynamicFrame}
 import com.amazonaws.services.glue.util.GlueArgParser
 import org.apache.spark.SparkContext
+import org.apache.spark.sql.{DataFrame, SparkSession}
 import org.apache.spark.sql.functions._
 import org.apache.spark.sql.types.DoubleType
-import org.apache.spark.sql.{DataFrame, SparkSession}
 import scala.util.parsing.json.JSON
 
 object DataValidationJob {
@@ -13,9 +12,9 @@ object DataValidationJob {
 
   def main(sysArgs: Array[String]): Unit = {
 
-    // Initialize GlueContext
+    // Initialize SparkContext (AWS Glue automatically provides this)
     val sc: SparkContext = new SparkContext()
-    val glueContext = new GlueContext(sc)
+    val spark: SparkSession = SparkSession.builder().getOrCreate()
 
     // Load arguments from Glue job parameters
     val args = GlueArgParser.getResolvedOptions(
@@ -30,7 +29,6 @@ object DataValidationJob {
     val configFile = args("CONFIG_FILE")  // Path to the JSON config file in S3
 
     // Load the JSON configuration file from S3
-    val spark: SparkSession = glueContext.getSparkSession
     val configDF = spark.read.json(configFile)
 
     // Convert the config DataFrame to a Map for easy access
@@ -46,22 +44,9 @@ object DataValidationJob {
       Map("rules" -> rules)
     }).head
 
-    // Load the source and target files directly from S3 as DynamicFrames
-    val sourceDynamicFrame: DynamicFrame = glueContext.getSourceWithFormat(
-      connectionType = "s3",
-      options = JsonOptions(Map("paths" -> Seq(sourceFile))),
-      format = "parquet"
-    ).getDynamicFrame()
-
-    val targetDynamicFrame: DynamicFrame = glueContext.getSourceWithFormat(
-      connectionType = "s3",
-      options = JsonOptions(Map("paths" -> Seq(targetFile))),
-      format = "parquet"
-    ).getDynamicFrame()
-
-    // Convert DynamicFrames to DataFrames for transformations
-    val sourceDF = sourceDynamicFrame.toDF()
-    val targetDF = targetDynamicFrame.toDF()
+    // Load the source and target Parquet files directly from S3 as DataFrames
+    val sourceDF = spark.read.parquet(sourceFile)
+    val targetDF = spark.read.parquet(targetFile)
 
     // Apply transformations dynamically based on the config
     var transformedSourceDF = sourceDF
@@ -131,11 +116,9 @@ object DataValidationJob {
 
       // Output mismatches or common columns if no mismatches
       if (mismatchDF.count() > 0) {
-        val mismatchDynamicFrame = DynamicFrame(mismatchDF, glueContext)
-        glueContext.getSinkWithFormat(connectionType = "s3", options = JsonOptions(Map("path" -> outputFile)), format = "parquet").writeDynamicFrame(mismatchDynamicFrame)
+        mismatchDF.write.parquet(outputFile)
       } else {
-        val outputDynamicFrame = DynamicFrame(validationDF.select(transformedCommonColumns.head, transformedCommonColumns.tail: _*), glueContext)
-        glueContext.getSinkWithFormat(connectionType = "s3", options = JsonOptions(Map("path" -> outputFile)), format = "parquet").writeDynamicFrame(outputDynamicFrame)
+        validationDF.select(transformedCommonColumns.head, transformedCommonColumns.tail: _*).write.parquet(outputFile)
       }
     } else {
       println("No common columns to join between source and target.")
