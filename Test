@@ -1,7 +1,8 @@
 import com.amazonaws.services.glue.GlueContext
 import com.amazonaws.services.glue.util.GlueArgParser
 import org.apache.spark.SparkContext
-import org.apache.spark.sql.SparkSession
+import org.apache.spark.sql.{DataFrame, SparkSession}
+import org.apache.spark.sql.functions._
 
 object GlueApp {
   def main(sysArgs: Array[String]): Unit = {
@@ -10,48 +11,85 @@ object GlueApp {
     val glueContext: GlueContext = new GlueContext(sc)
     val spark: SparkSession = glueContext.getSparkSession
 
-    // Parse the arguments from the Glue job
-    val args = GlueArgParser.getResolvedOptions(
-      sysArgs, 
-      Array("sourcePath", "targetPath", "outputPath")
-    )
+    // Parse job parameters from AWS Glue
+    val args = GlueArgParser.getResolvedOptions(sysArgs, Array(
+      "SOURCE_PATH",  // Source Parquet file path
+      "TARGET_PATH",  // Target Parquet file path
+      "OUTPUT_PATH"   // Output path for the comparison result
+    ))
 
-    val sourcePath = args("sourcePath")
-    val targetPath = args("targetPath")
-    val outputPath = args("outputPath")
+    // Extract paths from parameters
+    val sourceFilePath = args("SOURCE_PATH")
+    val targetFilePath = args("TARGET_PATH")
+    val outputPath = args("OUTPUT_PATH")
+
+    // Load the Parquet files into DataFrames
+    val source = spark.read.parquet(sourceFilePath)
+    val target = spark.read.parquet(targetFilePath)
+
+    // Print the schema and row counts to ensure data is loaded properly
+    println("Source DataFrame Schema:")
+    source.printSchema()
+    val sourceRowCount = source.count()
+    println(s"Source DataFrame Row Count: $sourceRowCount")
+
+    println("Target DataFrame Schema:")
+    target.printSchema()
+    val targetRowCount = target.count()
+    println(s"Target DataFrame Row Count: $targetRowCount")
+
+    // Check if source or target is empty
+    if (sourceRowCount == 0) {
+      println("Source DataFrame is empty. Exiting job.")
+      return
+    }
     
-    // Load the source and target datasets dynamically
-    val source = spark.read.parquet(sourcePath)
-    val target = spark.read.parquet(targetPath)
+    if (targetRowCount == 0) {
+      println("Target DataFrame is empty. Exiting job.")
+      return
+    }
 
-    // Dynamically find common columns between source and target
+    // Get the list of common columns between source and target
     val commonColumns = source.columns.toSet.intersect(target.columns.toSet).toSeq
     println(s"Common Columns: ${commonColumns.mkString(", ")}")
 
-    // If no common columns are found, fail the job with an error message
+    // Check if there are no common columns
     if (commonColumns.isEmpty) {
-      throw new Exception("No common columns found between source and target datasets. Failing job.")
+      println("No common columns found between source and target DataFrames. Exiting job.")
+      return
     }
 
-    // Select only common columns from both datasets
+    // Select the common columns from both source and target DataFrames
     val sourceCommon = source.select(commonColumns.map(col): _*)
     val targetCommon = target.select(commonColumns.map(col): _*)
 
-    // Compare rows by using `exceptAll`, which shows differences
-    val differences = sourceCommon.exceptAll(targetCommon)
+    // Perform the comparison for each common column (left outer join to retain source data)
+    val comparison = commonColumns.foldLeft(sourceCommon.join(targetCommon, commonColumns, "left_outer")) { (df, colName) =>
+      df.withColumn(
+        s"${colName}_comparison",
+        when(sourceCommon(colName) === targetCommon(colName), "MATCH").otherwise("DIFFERENT")
+      )
+    }
 
-    // Check row count to ensure output will be written
-    val diffCount = differences.count()
-    println(s"Number of differences found: $diffCount")
+    // Select only the comparison columns and the common columns for output
+    val comparisonColumns = commonColumns.map(c => s"${c}_comparison")
+    val outputDF = comparison.select((commonColumns ++ comparisonColumns).map(col): _*)
 
-    // Write the differences to the output path, or write an empty file if no differences
-    if (diffCount > 0) {
-      println(s"Writing differences to: $outputPath")
-      differences.write.mode("overwrite").parquet(outputPath)
+    // Check the row count of the output DataFrame
+    val outputRowCount = outputDF.count()
+    println(s"Output DataFrame Row Count: $outputRowCount")
+
+    // Ensure that output is written, even if no rows are present
+    if (outputRowCount > 0) {
+      println(s"Writing results to $outputPath ...")
+      outputDF.write.mode("overwrite").parquet(outputPath)
+      println(s"Results successfully written to: $outputPath")
     } else {
-      println(s"No differences found. Writing an empty file with schema to: $outputPath")
-      val emptyDF = spark.createDataFrame(spark.sparkContext.emptyRDD[org.apache.spark.sql.Row], sourceCommon.schema)
+      println("No rows found in the comparison. Writing an empty file with schema.")
+      // Write an empty DataFrame with the schema of the common columns
+      val emptyDF = spark.createDataFrame(spark.sparkContext.emptyRDD[org.apache.spark.sql.Row], outputDF.schema)
       emptyDF.write.mode("overwrite").parquet(outputPath)
+      println(s"Empty schema written to: $outputPath")
     }
 
     println("ETL job completed successfully.")
