@@ -1,115 +1,27 @@
-import com.amazonaws.services.glue.GlueContext
-import com.amazonaws.services.glue.util.GlueArgParser
-import org.apache.spark.SparkContext
-import org.apache.spark.sql.{DataFrame, SparkSession}
-import java.nio.file.{Files, Paths, StandardOpenOption}
-import java.io.{BufferedWriter, OutputStreamWriter}
-import java.net.URI
-import org.apache.hadoop.fs.{FileSystem, Path}
-
-object GlueApp {
-  def main(sysArgs: Array[String]): Unit = {
-    // Initialize Spark and Glue contexts
-    val sc: SparkContext = new SparkContext()
-    val glueContext: GlueContext = new GlueContext(sc)
-    val spark: SparkSession = glueContext.getSparkSession
-
-    // Parse job parameters from AWS Glue
-    val args = GlueArgParser.getResolvedOptions(sysArgs, Array(
-      "SOURCE_PATH",  // Source Parquet file path
-      "TARGET_PATH",  // Target Parquet file path
-      "OUTPUT_PATH"   // Output path for the comparison result
-    ))
-
-    // Extract paths from parameters
-    val sourceFilePath = args("SOURCE_PATH")
-    val targetFilePath = args("TARGET_PATH")
-    val outputPath = args("OUTPUT_PATH")
-
-    // Load the Parquet files into DataFrames
-    val source = spark.read.parquet(sourceFilePath)
-    val target = spark.read.parquet(targetFilePath)
-
-    // Check if source or target is empty and write a message to a text file
-    val sourceRowCount = source.count()
-    val targetRowCount = target.count()
-
-    if (sourceRowCount == 0 || targetRowCount == 0) {
-      // Create a message explaining the issue
-      val message = if (sourceRowCount == 0 && targetRowCount == 0) {
-        "Both Source and Target DataFrames are empty."
-      } else if (sourceRowCount == 0) {
-        "Source DataFrame is empty."
-      } else {
-        "Target DataFrame is empty."
-      }
-
-      // Write the message to a text file in the output path
-      val fs = FileSystem.get(new URI(outputPath), sc.hadoopConfiguration)
-      val outputFilePath = new Path(s"${outputPath}/message.txt")
-      val outputStream = fs.create(outputFilePath, true)
-      val writer = new BufferedWriter(new OutputStreamWriter(outputStream))
-
-      writer.write(message)
-      writer.close()
-
-      println(s"Message written to: ${outputPath}/message.txt")
-      return
-    }
-
-    // Get the list of common columns between source and target
-    val commonColumns = source.columns.toSet.intersect(target.columns.toSet).toSeq
-    println(s"Common Columns: ${commonColumns.mkString(", ")}")
-
-    // If no common columns, write a message to the text file
-    if (commonColumns.isEmpty) {
-      val fs = FileSystem.get(new URI(outputPath), sc.hadoopConfiguration)
-      val outputFilePath = new Path(s"${outputPath}/message.txt")
-      val outputStream = fs.create(outputFilePath, true)
-      val writer = new BufferedWriter(new OutputStreamWriter(outputStream))
-
-      writer.write("No common columns found between source and target DataFrames.")
-      writer.close()
-
-      println(s"No common columns message written to: ${outputPath}/message.txt")
-      return
-    }
-
-    // Select the common columns from both source and target DataFrames
-    val sourceCommon = source.select(commonColumns.map(col): _*)
-    val targetCommon = target.select(commonColumns.map(col): _*)
-
-    // Perform the comparison for each common column (left outer join to retain source data)
-    val comparison = commonColumns.foldLeft(sourceCommon.join(targetCommon, commonColumns, "left_outer")) { (df, colName) =>
-      df.withColumn(
-        s"${colName}_comparison",
-        when(sourceCommon(colName) === targetCommon(colName), "MATCH").otherwise("DIFFERENT")
-      )
-    }
-
-    // Select only the comparison columns and the common columns for output
-    val comparisonColumns = commonColumns.map(c => s"${c}_comparison")
-    val outputDF = comparison.select((commonColumns ++ comparisonColumns).map(col): _*)
-
-    // Check the row count of the output DataFrame
-    val outputRowCount = outputDF.count()
-    println(s"Output DataFrame Row Count: $outputRowCount")
-
-    // Print a few rows of the output DataFrame in the logs for debugging purposes
-    outputDF.show(10, truncate = false)  // Show the first 10 rows with no truncation
-
-    // Write the comparison result or an empty DataFrame with schema to the output path
-    if (outputRowCount > 0) {
-      println(s"Writing results to: $outputPath")
-      outputDF.write.mode("overwrite").parquet(outputPath)
-      println(s"Results successfully written to: $outputPath")
-    } else {
-      println("No rows found in the comparison. Writing an empty file with schema.")
-      val emptyDF = spark.createDataFrame(spark.sparkContext.emptyRDD[org.apache.spark.sql.Row], outputDF.schema)
-      emptyDF.write.mode("overwrite").parquet(outputPath)
-      println(s"Empty schema written to: $outputPath")
-    }
-
-    println("ETL job completed successfully.")
-  }
-}
+Source,Target,Logic
+transaction.TRANSACTION_ID,transactionId,Copy as is
+transaction.TRANSACTION_ID and transaction.eff_start_date,transactionUniqueId,Concatenate with //
+transaction.TRANSACTION_TYPE,transactionType,Copy as is
+transaction.ACCOUNT_ID or transaction.COUNTERPARTY_ID,aAccountId,If DEBIT, use ACCOUNT_ID; if CREDIT, use COUNTERPARTY_ID
+Derived from aAccountId,aAccountIdPrefix,Substring from aAccountId, first 5 chars
+Derived from aAccountId and aAccountIdPrefix,aAccountNumber,If UKUBA, substring(8,16); If UKGTS, substring(7,16)
+Derived from aAccountNumber,aAccountNumberCleansed,Remove special characters
+transaction.ACCOUNT_KEY or transaction.COUNTERPARTY_PRODUCT_KEY,aAccountKey,If DEBIT, use ACCOUNT_KEY; If CREDIT, use COUNTERPARTY_PRODUCT_KEY
+Derived from aSortCode, aAccountNumber, aAccountKey,aAccountUniqueId,Concat aSortCode + aAccountNumber; else split aAccountKey
+transaction.CUSTOMER_KEY or transaction.COUNTERPARTY_CUSTOMER_KEY,aCustomerId,If DEBIT, use COUNTERPARTY_CUSTOMER_KEY; If CREDIT, use CUSTOMER_KEY
+transaction.BRANCH_KEY,aBranchUniqueId,If DEBIT, use BRANCH_KEY; else blank
+Derived from aAccountId or transaction.TRANSACTION_ROUTING_NUMBER,aSortCode,Extract from aAccountId; fallback to TRANSACTION_ROUTING_NUMBER
+transaction.ACCOUNT_ID or transaction.COUNTERPARTY_ID,bAccountId,If DEBIT, use COUNTERPARTY_ID; If CREDIT, use ACCOUNT_ID
+transaction.ACCOUNT_KEY or transaction.COUNTERPARTY_PRODUCT_KEY,bAccountKey,If DEBIT, use COUNTERPARTY_PRODUCT_KEY; If CREDIT, use ACCOUNT_KEY
+transaction.CUSTOMER_KEY or transaction.COUNTERPARTY_CUSTOMER_KEY,bCustomerId,If DEBIT, use COUNTERPARTY_CUSTOMER_KEY; If CREDIT, use CUSTOMER_KEY
+transaction.NARRATIVE,narrative,Copy as is
+transaction.SHORTNARRATIVE,narrativeShort,Copy as is
+transaction.TRANSACTION_CODE,transactionCode,Copy as is
+transaction.TRANSACTION_CODE_DESC,transactionCodeDescription,Copy as is
+transaction.SOURCE_TRANSACTIONLID,sourceTransactionId,Copy as is
+transaction.TRANSACTION_DATE,transactionDate,Format to YYYY-MM-DD
+transaction.ORIGINAL_AMOUNT,amountLocal,Cast to double
+transaction.TRANSACTION_COUNTRY,transactionCountry,Copy as is
+transaction.TRANSACTION_LOCATION,transactionLocation,Copy as is
+transaction.SCREENING_SYSTEM,sourceSystem,Copy as is
+transaction.EFF_START_DATE,effStartDate,Copy as is
