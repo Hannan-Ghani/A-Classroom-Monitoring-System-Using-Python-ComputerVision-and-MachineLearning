@@ -2,7 +2,10 @@ import com.amazonaws.services.glue.GlueContext
 import com.amazonaws.services.glue.util.GlueArgParser
 import org.apache.spark.SparkContext
 import org.apache.spark.sql.{DataFrame, SparkSession}
-import org.apache.spark.sql.functions._
+import java.nio.file.{Files, Paths, StandardOpenOption}
+import java.io.{BufferedWriter, OutputStreamWriter}
+import java.net.URI
+import org.apache.hadoop.fs.{FileSystem, Path}
 
 object GlueApp {
   def main(sysArgs: Array[String]): Unit = {
@@ -27,25 +30,30 @@ object GlueApp {
     val source = spark.read.parquet(sourceFilePath)
     val target = spark.read.parquet(targetFilePath)
 
-    // Print the schema and row counts to ensure data is loaded properly
-    println("Source DataFrame Schema:")
-    source.printSchema()
+    // Check if source or target is empty and write a message to a text file
     val sourceRowCount = source.count()
-    println(s"Source DataFrame Row Count: $sourceRowCount")
-
-    println("Target DataFrame Schema:")
-    target.printSchema()
     val targetRowCount = target.count()
-    println(s"Target DataFrame Row Count: $targetRowCount")
 
-    // Check if source or target is empty
-    if (sourceRowCount == 0) {
-      println("Source DataFrame is empty. Exiting job.")
-      return
-    }
-    
-    if (targetRowCount == 0) {
-      println("Target DataFrame is empty. Exiting job.")
+    if (sourceRowCount == 0 || targetRowCount == 0) {
+      // Create a message explaining the issue
+      val message = if (sourceRowCount == 0 && targetRowCount == 0) {
+        "Both Source and Target DataFrames are empty."
+      } else if (sourceRowCount == 0) {
+        "Source DataFrame is empty."
+      } else {
+        "Target DataFrame is empty."
+      }
+
+      // Write the message to a text file in the output path
+      val fs = FileSystem.get(new URI(outputPath), sc.hadoopConfiguration)
+      val outputFilePath = new Path(s"${outputPath}/message.txt")
+      val outputStream = fs.create(outputFilePath, true)
+      val writer = new BufferedWriter(new OutputStreamWriter(outputStream))
+
+      writer.write(message)
+      writer.close()
+
+      println(s"Message written to: ${outputPath}/message.txt")
       return
     }
 
@@ -53,9 +61,17 @@ object GlueApp {
     val commonColumns = source.columns.toSet.intersect(target.columns.toSet).toSeq
     println(s"Common Columns: ${commonColumns.mkString(", ")}")
 
-    // Check if there are no common columns
+    // If no common columns, write a message to the text file
     if (commonColumns.isEmpty) {
-      println("No common columns found between source and target DataFrames. Exiting job.")
+      val fs = FileSystem.get(new URI(outputPath), sc.hadoopConfiguration)
+      val outputFilePath = new Path(s"${outputPath}/message.txt")
+      val outputStream = fs.create(outputFilePath, true)
+      val writer = new BufferedWriter(new OutputStreamWriter(outputStream))
+
+      writer.write("No common columns found between source and target DataFrames.")
+      writer.close()
+
+      println(s"No common columns message written to: ${outputPath}/message.txt")
       return
     }
 
@@ -79,14 +95,16 @@ object GlueApp {
     val outputRowCount = outputDF.count()
     println(s"Output DataFrame Row Count: $outputRowCount")
 
-    // Ensure that output is written, even if no rows are present
+    // Print a few rows of the output DataFrame in the logs for debugging purposes
+    outputDF.show(10, truncate = false)  // Show the first 10 rows with no truncation
+
+    // Write the comparison result or an empty DataFrame with schema to the output path
     if (outputRowCount > 0) {
-      println(s"Writing results to $outputPath ...")
+      println(s"Writing results to: $outputPath")
       outputDF.write.mode("overwrite").parquet(outputPath)
       println(s"Results successfully written to: $outputPath")
     } else {
       println("No rows found in the comparison. Writing an empty file with schema.")
-      // Write an empty DataFrame with the schema of the common columns
       val emptyDF = spark.createDataFrame(spark.sparkContext.emptyRDD[org.apache.spark.sql.Row], outputDF.schema)
       emptyDF.write.mode("overwrite").parquet(outputPath)
       println(s"Empty schema written to: $outputPath")
