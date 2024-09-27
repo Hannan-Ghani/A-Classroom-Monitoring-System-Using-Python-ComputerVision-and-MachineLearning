@@ -23,31 +23,18 @@ object GlueApp {
     val targetFilePath = args("TARGET_PATH")
     val outputPath = args("OUTPUT_PATH")
 
-    // Load the Parquet files into DataFrames
-    val source = spark.read.parquet(sourceFilePath)
-    val target = spark.read.parquet(targetFilePath)
+    // Use wildcard to read all files in the source and target directories
+    val source = spark.read.parquet(s"$sourceFilePath/*")
+    val target = spark.read.parquet(s"$targetFilePath/*")
 
     // Print the schema and row counts to ensure data is loaded properly
     println("Source DataFrame Schema:")
     source.printSchema()
-    val sourceRowCount = source.count()
-    println(s"Source DataFrame Row Count: $sourceRowCount")
+    println(s"Source DataFrame Row Count: ${source.count()}")
 
     println("Target DataFrame Schema:")
     target.printSchema()
-    val targetRowCount = target.count()
-    println(s"Target DataFrame Row Count: $targetRowCount")
-
-    // Check if source or target is empty
-    if (sourceRowCount == 0) {
-      println("Source DataFrame is empty. Exiting job.")
-      return
-    }
-    
-    if (targetRowCount == 0) {
-      println("Target DataFrame is empty. Exiting job.")
-      return
-    }
+    println(s"Target DataFrame Row Count: ${target.count()}")
 
     // Get the list of common columns between source and target
     val commonColumns = source.columns.toSet.intersect(target.columns.toSet).toSeq
@@ -79,16 +66,16 @@ object GlueApp {
     val outputRowCount = outputDF.count()
     println(s"Output DataFrame Row Count: $outputRowCount")
 
-    // Ensure that output is written, even if no rows are present
-    if (outputRowCount > 0) {
+    // Write the output to the specified S3 path, ensuring it's a directory
+    if (outputRowCount >= 0 && commonColumns.nonEmpty) {
       println(s"Writing results to $outputPath ...")
-      outputDF.write.mode("overwrite").parquet(outputPath)
+      outputDF.write.mode("overwrite").parquet(s"$outputPath/")
       println(s"Results successfully written to: $outputPath")
     } else {
-      println("No rows found in the comparison. Writing an empty file with schema.")
+      println("No common columns or rows found. Writing an empty file with schema.")
       // Write an empty DataFrame with the schema of the common columns
       val emptyDF = spark.createDataFrame(spark.sparkContext.emptyRDD[org.apache.spark.sql.Row], outputDF.schema)
-      emptyDF.write.mode("overwrite").parquet(outputPath)
+      emptyDF.write.mode("overwrite").parquet(s"$outputPath/")
       println(s"Empty schema written to: $outputPath")
     }
 
