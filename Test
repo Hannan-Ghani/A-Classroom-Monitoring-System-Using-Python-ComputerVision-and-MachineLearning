@@ -14,24 +14,35 @@ object RuleBasedProcessing {
     val glueContext: GlueContext = new GlueContext(sc)
     val spark = glueContext.getSparkSession
 
-    // Parse arguments (configPath and outputPath from job parameters)
-    val args = GlueArgParser.getResolvedOptions(sysArgs, Seq("configPath", "outputPath", "sourcePath", "targetPath", "JOB_NAME").toArray)
+    // Parse arguments (configPath from job parameters)
+    val args = GlueArgParser.getResolvedOptions(sysArgs, Seq("configPath", "JOB_NAME").toArray)
     Job.init(args("JOB_NAME"), glueContext, args.asJava)
 
-    // Load the paths from job parameters
+    // Load the config file from S3
     val configPath = args("configPath")
-    val sourcePath = args("sourcePath")
-    val targetPath = args("targetPath")
-    val outputPath = args("outputPath")
+    val configLines = spark.read.textFile(configPath).collect()
 
-    // Read the rules from the text file
-    val rules = spark.read.textFile(configPath).collect()
+    // Extract source, target, and output paths from the config file
+    val sourcePath = configLines.find(_.startsWith("sourcePath")).map(_.split(":")(1).trim).getOrElse("")
+    val targetPath = configLines.find(_.startsWith("targetPath")).map(_.split(":")(1).trim).getOrElse("")
+    val outputPath = configLines.find(_.startsWith("outputPath")).map(_.split(":")(1).trim).getOrElse("")
 
-    // Parse the rules into a Map for easy access
-    val ruleMap = rules.map { line =>
+    // Check if all required paths are provided
+    if (sourcePath.isEmpty || targetPath.isEmpty || outputPath.isEmpty) {
+      throw new IllegalArgumentException(s"One or more paths are missing in the config file. Found sourcePath: $sourcePath, targetPath: $targetPath, outputPath: $outputPath.")
+    }
+
+    // Parse the column comparison rules (lines after the paths)
+    val ruleLines = configLines.filterNot(line => line.startsWith("sourcePath") || line.startsWith("targetPath") || line.startsWith("outputPath"))
+    val ruleMap = ruleLines.map { line =>
       val Array(sourceColumn, targetColumn) = line.split(":")
       sourceColumn -> targetColumn
     }.toMap
+
+    println("Parsed Paths:")
+    println(s"Source Path: $sourcePath")
+    println(s"Target Path: $targetPath")
+    println(s"Output Path: $outputPath")
 
     println("Parsed Rules:")
     ruleMap.foreach(println)
