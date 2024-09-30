@@ -55,15 +55,20 @@ object GlueApp {
       // Load the configuration file (rules) as JSON using defined schema
       val configDF = spark.read.schema(configSchema).json(s"$configPath")
 
-      // Filter out corrupt records
+      // Filter out and log corrupt records
       val corruptRecords = configDF.filter(col("_corrupt_record").isNotNull)
       if (corruptRecords.count() > 0) {
         println("Warning: Found corrupt records in the config file!")
-        corruptRecords.show(false)
+        corruptRecords.show(false)  // Print corrupt records to logs
       }
 
-      // Filter out valid records
+      // Filter only valid records for further processing
       val validConfigDF = configDF.filter(col("_corrupt_record").isNull)
+
+      // If no valid records found, log the issue and proceed with empty output
+      if (validConfigDF.isEmpty) {
+        println("No valid configuration records found after filtering corrupt data.")
+      }
 
       // Process valid configuration data
       val configData = validConfigDF.collect().map(row => {
@@ -74,7 +79,7 @@ object GlueApp {
           )
         })
         Map("rules" -> rules)
-      }).headOption.getOrElse(throw new Exception("Configuration data is missing or invalid."))
+      }).headOption.getOrElse(Map("rules" -> List[Map[String, String]]()))  // Handle missing or invalid config
 
       // Create a sequence to store matching columns for output parquet
       var matchingColumns = Seq[String]()
