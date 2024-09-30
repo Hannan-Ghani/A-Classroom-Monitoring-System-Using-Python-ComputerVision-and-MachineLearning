@@ -1,4 +1,95 @@
-TRANSACTION_ID:transactionId
-TRANSACTION_TYPE:transactionType
-ACCOUNT_ID:aAccountId
-NARRATIVE:narrative
+import com.amazonaws.services.glue.GlueContext
+import com.amazonaws.services.glue.util.Job
+import com.amazonaws.services.glue.util.GlueArgParser
+import org.apache.spark.sql.{DataFrame, Row}
+import org.apache.spark.sql.functions._
+import org.apache.spark.SparkContext
+import org.apache.spark.sql.types.{StructField, StructType, StringType}
+// Import for Scala 2.12 and Glue 4.0
+import scala.collection.JavaConverters._
+
+object RuleBasedProcessing {
+  def main(sysArgs: Array[String]): Unit = {
+    // Initialize GlueContext and SparkContext
+    val sc: SparkContext = new SparkContext()
+    val glueContext: GlueContext = new GlueContext(sc)
+    val spark = glueContext.getSparkSession
+
+    // Parse arguments (configPath and outputPath from job parameters)
+    val args = GlueArgParser.getResolvedOptions(sysArgs, Seq("configPath", "outputPath", "sourcePath", "targetPath", "JOB_NAME").toArray)
+    Job.init(args("JOB_NAME"), glueContext, args.asJava)  // Use asJava after importing scala.collection.JavaConverters._
+
+    // Load the paths from job parameters
+    val configPath = args("configPath")  // Path to the text file with rules
+    val sourcePath = args("sourcePath")  // Source file
+    val targetPath = args("targetPath")  // Target file
+    val outputPath = args("outputPath")  // Output path for results
+
+    // Read the rules from the text file
+    val rules = spark.read.textFile(configPath).collect()
+
+    // Parse the rules into a Map for easy access
+    val ruleMap = rules.map { line =>
+      val Array(sourceColumn, targetColumn) = line.split(":")
+      sourceColumn -> targetColumn
+    }.toMap
+
+    println("Parsed Rules:")
+    ruleMap.foreach(println)
+
+    // Load source and target DataFrames
+    val sourceDF = spark.read.parquet(sourcePath)
+    val targetDF = spark.read.parquet(targetPath)
+
+    // Initialize an empty DataFrame to store differences or matched columns
+    var diffDF: DataFrame = spark.createDataFrame(spark.sparkContext.emptyRDD[Row], sourceDF.schema)
+
+    // Iterate over the rules and compare the columns that are present in both source and target
+    ruleMap.foreach { case (sourceColumn, targetColumn) =>
+      if (sourceDF.columns.contains(sourceColumn) && targetDF.columns.contains(targetColumn)) {
+        println(s"Comparing $sourceColumn in source with $targetColumn in target...")
+
+        val sourceColData = sourceDF.select(sourceColumn).withColumnRenamed(sourceColumn, "column_value").as("source")
+        val targetColData = targetDF.select(targetColumn).withColumnRenamed(targetColumn, "column_value").as("target")
+
+        // Find any differences between source and target columns
+        val diff = sourceColData.except(targetColData)
+
+        if (diff.count() > 0) {
+          println(s"Differences found in column: $sourceColumn -> $targetColumn")
+          diff.show(false)
+        } else {
+          println(s"No differences found in column: $sourceColumn -> $targetColumn")
+        }
+
+        // Append differences to the diffDF (only keep the differences)
+        diffDF = diffDF.union(diff)
+      } else {
+        println(s"Either $sourceColumn or $targetColumn is missing, but the output will include present columns.")
+      }
+    }
+
+    // If no differences are found, create an empty DataFrame with matching column names
+    if (diffDF.isEmpty) {
+      println("No differences found between source and target data. Producing empty output with matching columns.")
+
+      // Get the matching columns for both source and target
+      val matchingColumns = ruleMap.filter { case (sourceCol, targetCol) =>
+        sourceDF.columns.contains(sourceCol) && targetDF.columns.contains(targetCol)
+      }.map(_._2).toSeq
+
+      // Create an empty DataFrame with these matching columns
+      val emptySchema = StructType(matchingColumns.map(c => StructField(c, StringType, nullable = true)))
+      val emptyDF = spark.createDataFrame(spark.sparkContext.emptyRDD[Row], emptySchema)
+
+      // Write the empty DataFrame with matching columns to the output path
+      emptyDF.write.mode("overwrite").parquet(outputPath + "/no_differences_found")
+    } else {
+      // Write the differences DataFrame to the output path
+      diffDF.write.mode("overwrite").parquet(outputPath + "/differences_found")
+    }
+
+    // Commit the job
+    Job.commit()
+  }
+}
