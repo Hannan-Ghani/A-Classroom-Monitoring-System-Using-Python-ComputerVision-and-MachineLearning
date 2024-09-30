@@ -22,10 +22,20 @@ object RuleBasedProcessing {
     val configPath = args("configPath")
     val configLines = spark.read.textFile(configPath).collect()
 
+    // Helper function to extract paths (removes quotes if present)
+    def extractPath(line: String): String = {
+      val value = line.split("=")(1).trim
+      if (value.startsWith("\"") && value.endsWith("\"")) {
+        value.substring(1, value.length - 1) // Remove quotes
+      } else {
+        value
+      }
+    }
+
     // Extract source, target, and output paths from the config file
-    val sourcePath = configLines.find(_.startsWith("sourcePath")).map(_.split(":")(1).trim).getOrElse("")
-    val targetPath = configLines.find(_.startsWith("targetPath")).map(_.split(":")(1).trim).getOrElse("")
-    val outputPath = configLines.find(_.startsWith("outputPath")).map(_.split(":")(1).trim).getOrElse("")
+    val sourcePath = configLines.find(_.startsWith("sourcePath")).map(extractPath).getOrElse("")
+    val targetPath = configLines.find(_.startsWith("targetPath")).map(extractPath).getOrElse("")
+    val outputPath = configLines.find(_.startsWith("outputPath")).map(extractPath).getOrElse("")
 
     // Check if all required paths are provided
     if (sourcePath.isEmpty || targetPath.isEmpty || outputPath.isEmpty) {
@@ -34,10 +44,24 @@ object RuleBasedProcessing {
 
     // Parse the custom column comparison rules (lines after the paths)
     val ruleLines = configLines.filterNot(line => line.startsWith("sourcePath") || line.startsWith("targetPath") || line.startsWith("outputPath"))
-    val customRuleMap = ruleLines.map { line =>
-      val Array(sourceColumn, targetColumn) = line.split(":")
-      sourceColumn -> targetColumn
-    }.toMap
+
+    // Initialize an empty map for custom rules
+    var customRuleMap: Map[String, String] = Map()
+
+    // Process each rule line and handle any potential errors
+    ruleLines.foreach { line =>
+      // Skip empty lines or lines without "="
+      if (line.contains("=")) {
+        val splitLine = line.split("=")
+        if (splitLine.length == 2) {
+          val sourceColumn = splitLine(0).trim
+          val targetColumn = splitLine(1).trim
+          customRuleMap += (sourceColumn -> targetColumn)
+        } else {
+          println(s"Warning: Skipping malformed line in config: $line")
+        }
+      }
+    }
 
     println("Parsed Paths:")
     println(s"Source Path: $sourcePath")
