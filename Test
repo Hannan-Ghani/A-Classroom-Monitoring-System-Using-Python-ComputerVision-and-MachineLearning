@@ -40,8 +40,13 @@ object RuleBasedProcessing {
     val sourceDF = spark.read.parquet(sourcePath)
     val targetDF = spark.read.parquet(targetPath)
 
-    // Create an empty DataFrame for the result
-    var resultDF: DataFrame = spark.createDataFrame(spark.sparkContext.emptyRDD[Row], StructType(Seq.empty[StructField]))
+    // Initialize result DataFrame with the correct schema
+    var resultDF: DataFrame = spark.createDataFrame(spark.sparkContext.emptyRDD[Row], StructType(
+      Seq(
+        StructField("source_value", StringType, nullable = true),
+        StructField("target_value", StringType, nullable = true)
+      )
+    ))
 
     // Iterate over the rules and compare the columns that are present in both source and target
     ruleMap.foreach { case (sourceColumn, targetColumn) =>
@@ -67,7 +72,7 @@ object RuleBasedProcessing {
       }
     }
 
-    // If there are no differences, produce an empty DataFrame with the matching columns
+    // If no differences are found, produce an empty DataFrame with the matching columns
     if (resultDF.isEmpty) {
       println("No differences found between source and target data. Producing empty output with matching columns.")
 
