@@ -43,50 +43,33 @@ object GlueApp {
       println("Target data loaded successfully")
       targetDF.printSchema()  // Print schema for debugging
 
-      // Define schema for config JSON
-      val configSchema = StructType(List(
-        StructField("rules", ArrayType(StructType(List(
-          StructField("source_column", StringType, true),
-          StructField("target_column", StringType, true)
-        ))), true),
-        StructField("_corrupt_record", StringType, true)  // to handle corrupt records
-      ))
+      // Load the configuration file (rules) as JSON without using _corrupt_record
+      val configDF = spark.read.json(s"$configPath")
 
-      // Load the configuration file (rules) as JSON using defined schema
-      val configDF = spark.read.schema(configSchema).json(s"$configPath")
+      // Filter out rows where the required fields (source_column, target_column) are missing
+      val validConfigDF = configDF.filter(col("source_column").isNotNull && col("target_column").isNotNull)
 
-      // Filter out and log corrupt records
-      val corruptRecords = configDF.filter(col("_corrupt_record").isNotNull)
-      if (corruptRecords.count() > 0) {
-        println("Warning: Found corrupt records in the config file!")
-        corruptRecords.show(false)  // Print corrupt records to logs
+      // Log any invalid rows that don't contain source_column or target_column
+      val invalidConfigDF = configDF.filter(col("source_column").isNull || col("target_column").isNull)
+      if (invalidConfigDF.count() > 0) {
+        println("Warning: Found invalid records in the config file without source_column or target_column!")
+        invalidConfigDF.show(false)
       }
 
-      // Filter only valid records for further processing
-      val validConfigDF = configDF.filter(col("_corrupt_record").isNull)
-
-      // If no valid records found, log the issue and proceed with empty output
-      if (validConfigDF.isEmpty) {
-        println("No valid configuration records found after filtering corrupt data.")
-      }
-
-      // Process valid configuration data
+      // Collect the valid configuration data
       val configData = validConfigDF.collect().map(row => {
-        val rules = row.getAs[Seq[Row]]("rules").map(rule => {
-          Map(
-            "source_column" -> rule.getAs[String]("source_column"),
-            "target_column" -> rule.getAs[String]("target_column")
-          )
-        })
-        Map("rules" -> rules)
-      }).headOption.getOrElse(Map("rules" -> List[Map[String, String]]()))  // Handle missing or invalid config
+        Map(
+          "source_column" -> row.getAs[String]("source_column"),
+          "target_column" -> row.getAs[String]("target_column")
+        )
+      }).toList
 
       // Create a sequence to store matching columns for output parquet
       var matchingColumns = Seq[String]()
 
       var differencesFound = false
 
-      for (rule <- configData("rules").asInstanceOf[List[Map[String, Any]]]) {
+      for (rule <- configData) {
         val sourceCol = rule("source_column").toString
         val targetCol = rule("target_column").toString
 
