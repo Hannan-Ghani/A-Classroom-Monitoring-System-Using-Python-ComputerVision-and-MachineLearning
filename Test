@@ -3,7 +3,8 @@ import com.amazonaws.services.glue.util.GlueArgParser
 import com.amazonaws.services.glue.util.Job
 import org.apache.spark.SparkContext
 import org.apache.spark.sql.functions._
-import org.apache.spark.sql.{DataFrame, SaveMode, SparkSession}
+import org.apache.spark.sql.{Row, SaveMode, SparkSession}
+import org.apache.spark.sql.types._
 import scala.collection.JavaConverters._
 
 object GlueApp {
@@ -42,13 +43,31 @@ object GlueApp {
       println("Target data loaded successfully")
       targetDF.printSchema()  // Print schema for debugging
 
-      // Load the configuration file (rules) as JSON
-      val configDF = spark.read.json(s"$configPath")
-      println("Config data loaded successfully")
+      // Define schema for config JSON
+      val configSchema = StructType(List(
+        StructField("rules", ArrayType(StructType(List(
+          StructField("source_column", StringType, true),
+          StructField("target_column", StringType, true)
+        ))), true),
+        StructField("_corrupt_record", StringType, true)  // to handle corrupt records
+      ))
 
-      // Convert config JSON to a map for rule processing
-      val configData = configDF.collect().map(row => {
-        val rules = row.getAs[Seq[org.apache.spark.sql.Row]]("rules").map(rule => {
+      // Load the configuration file (rules) as JSON using defined schema
+      val configDF = spark.read.schema(configSchema).json(s"$configPath")
+
+      // Filter out corrupt records
+      val corruptRecords = configDF.filter(col("_corrupt_record").isNotNull)
+      if (corruptRecords.count() > 0) {
+        println("Warning: Found corrupt records in the config file!")
+        corruptRecords.show(false)
+      }
+
+      // Filter out valid records
+      val validConfigDF = configDF.filter(col("_corrupt_record").isNull)
+
+      // Process valid configuration data
+      val configData = validConfigDF.collect().map(row => {
+        val rules = row.getAs[Seq[Row]]("rules").map(rule => {
           Map(
             "source_column" -> rule.getAs[String]("source_column"),
             "target_column" -> rule.getAs[String]("target_column")
