@@ -5,7 +5,6 @@ import org.apache.spark.sql.{DataFrame, Row}
 import org.apache.spark.sql.functions._
 import org.apache.spark.SparkContext
 import org.apache.spark.sql.types.{StructField, StructType, StringType}
-// Import for Scala 2.12 and Glue 4.0
 import scala.collection.JavaConverters._
 
 object RuleBasedProcessing {
@@ -17,13 +16,13 @@ object RuleBasedProcessing {
 
     // Parse arguments (configPath and outputPath from job parameters)
     val args = GlueArgParser.getResolvedOptions(sysArgs, Seq("configPath", "outputPath", "sourcePath", "targetPath", "JOB_NAME").toArray)
-    Job.init(args("JOB_NAME"), glueContext, args.asJava)  // Use asJava after importing scala.collection.JavaConverters._
+    Job.init(args("JOB_NAME"), glueContext, args.asJava)
 
     // Load the paths from job parameters
-    val configPath = args("configPath")  // Path to the text file with rules
-    val sourcePath = args("sourcePath")  // Source file
-    val targetPath = args("targetPath")  // Target file
-    val outputPath = args("outputPath")  // Output path for results
+    val configPath = args("configPath")
+    val sourcePath = args("sourcePath")
+    val targetPath = args("targetPath")
+    val outputPath = args("outputPath")
 
     // Read the rules from the text file
     val rules = spark.read.textFile(configPath).collect()
@@ -41,8 +40,9 @@ object RuleBasedProcessing {
     val sourceDF = spark.read.parquet(sourcePath)
     val targetDF = spark.read.parquet(targetPath)
 
-    // Initialize an empty DataFrame to store differences or matched columns
-    var diffDF: DataFrame = spark.createDataFrame(spark.sparkContext.emptyRDD[Row], sourceDF.schema)
+    // Initialize an empty DataFrame with a single column for differences
+    val emptySchema = StructType(Array(StructField("column_value", StringType, nullable = true)))
+    var diffDF: DataFrame = spark.createDataFrame(spark.sparkContext.emptyRDD[Row], emptySchema)
 
     // Iterate over the rules and compare the columns that are present in both source and target
     ruleMap.foreach { case (sourceColumn, targetColumn) =>
@@ -65,7 +65,7 @@ object RuleBasedProcessing {
         // Append differences to the diffDF (only keep the differences)
         diffDF = diffDF.union(diff)
       } else {
-        println(s"Either $sourceColumn or $targetColumn is missing, but the output will include present columns.")
+        println(s"Skipping comparison for columns: $sourceColumn (source) and $targetColumn (target) as one or both are missing.")
       }
     }
 
