@@ -32,9 +32,9 @@ object RuleBasedProcessing {
       throw new IllegalArgumentException(s"One or more paths are missing in the config file. Found sourcePath: $sourcePath, targetPath: $targetPath, outputPath: $outputPath.")
     }
 
-    // Parse the column comparison rules (lines after the paths)
+    // Parse the custom column comparison rules (lines after the paths)
     val ruleLines = configLines.filterNot(line => line.startsWith("sourcePath") || line.startsWith("targetPath") || line.startsWith("outputPath"))
-    val ruleMap = ruleLines.map { line =>
+    val customRuleMap = ruleLines.map { line =>
       val Array(sourceColumn, targetColumn) = line.split(":")
       sourceColumn -> targetColumn
     }.toMap
@@ -44,12 +44,21 @@ object RuleBasedProcessing {
     println(s"Target Path: $targetPath")
     println(s"Output Path: $outputPath")
 
-    println("Parsed Rules:")
-    ruleMap.foreach(println)
+    println("Parsed Custom Rules:")
+    customRuleMap.foreach(println)
 
     // Load source and target DataFrames
     val sourceDF = spark.read.parquet(sourcePath)
     val targetDF = spark.read.parquet(targetPath)
+
+    // Automatically find columns with the same name in both DataFrames
+    val matchingColumns = sourceDF.columns.intersect(targetDF.columns).map(c => c -> c).toMap
+
+    println("Automatically Detected Matching Columns:")
+    matchingColumns.foreach(println)
+
+    // Combine custom rules with automatically detected matching columns
+    val allRules = customRuleMap ++ matchingColumns
 
     // Initialize result DataFrame with the correct schema
     var resultDF: DataFrame = spark.createDataFrame(spark.sparkContext.emptyRDD[Row], StructType(
@@ -59,8 +68,8 @@ object RuleBasedProcessing {
       )
     ))
 
-    // Iterate over the rules and compare the columns that are present in both source and target
-    ruleMap.foreach { case (sourceColumn, targetColumn) =>
+    // Iterate over all the rules and compare the columns that are present in both source and target
+    allRules.foreach { case (sourceColumn, targetColumn) =>
       if (sourceDF.columns.contains(sourceColumn) && targetDF.columns.contains(targetColumn)) {
         println(s"Comparing $sourceColumn in source with $targetColumn in target...")
 
@@ -88,7 +97,7 @@ object RuleBasedProcessing {
       println("No differences found between source and target data. Producing empty output with matching columns.")
 
       // Get the matching columns for both source and target
-      val matchingColumns = ruleMap.filter { case (sourceCol, targetCol) =>
+      val matchingColumns = allRules.filter { case (sourceCol, targetCol) =>
         sourceDF.columns.contains(sourceCol) && targetDF.columns.contains(targetCol)
       }.map(_._2).toSeq
 
