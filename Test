@@ -1,92 +1,133 @@
-{
-  "rules": [
-    {
-      "source_column": "TRANSACTION_ID",
-      "target_column": "transactionId"
-    },
-    {
-      "source_column": "TRANSACTION_TYPE",
-      "target_column": "transactionType"
-    },
-    {
-      "source_column": "ACCOUNT_ID",
-      "target_column": "aAccountId"
-    },
-    {
-      "source_column": "COUNTERPARTY_ID",
-      "target_column": "bAccountId"
-    },
-    {
-      "source_column": "ACCOUNT_KEY",
-      "target_column": "aAccountKey"
-    },
-    {
-      "source_column": "COUNTERPARTY_PRODUCT_KEY",
-      "target_column": "bAccountKey"
-    },
-    {
-      "source_column": "CUSTOMER_KEY",
-      "target_column": "aCustomerId"
-    },
-    {
-      "source_column": "COUNTERPARTY_CUSTOMER_KEY",
-      "target_column": "bCustomerId"
-    },
-    {
-      "source_column": "BRANCH_KEY",
-      "target_column": "aBranchUniqueId"
-    },
-    {
-      "source_column": "TRANSACTION_ROUTING_NUMBER",
-      "target_column": "aSortCode"
-    },
-    {
-      "source_column": "TRANSACTION_ROUTING_NUMBER",
-      "target_column": "bSortCode"
-    },
-    {
-      "source_column": "NARRATIVE",
-      "target_column": "narrative"
-    },
-    {
-      "source_column": "SHORTNARRATIVE",
-      "target_column": "narrativeShort"
-    },
-    {
-      "source_column": "TRANSACTION_CODE",
-      "target_column": "transactionCode"
-    },
-    {
-      "source_column": "TRANSACTION_CODE_DESC",
-      "target_column": "transactionCodeDescription"
-    },
-    {
-      "source_column": "SOURCE_TRANSACTION_ID",
-      "target_column": "sourceTransactionId"
-    },
-    {
-      "source_column": "TRANSACTION_DATE",
-      "target_column": "transactionDate"
-    },
-    {
-      "source_column": "ORIGINAL_AMOUNT",
-      "target_column": "amountLocal"
-    },
-    {
-      "source_column": "TRANSACTION_COUNTRY",
-      "target_column": "transactionCountry"
-    },
-    {
-      "source_column": "TRANSACTION_LOCATION",
-      "target_column": "transactionLocation"
-    },
-    {
-      "source_column": "SCREENING_SYSTEM",
-      "target_column": "sourceSystem"
-    },
-    {
-      "source_column": "EFF_START_DATE",
-      "target_column": "effStartDate"
+import com.amazonaws.services.glue.GlueContext
+import com.amazonaws.services.glue.util.GlueArgParser
+import com.amazonaws.services.glue.util.Job
+import org.apache.spark.SparkContext
+import org.apache.spark.sql.functions._
+import org.apache.spark.sql.{Row, SaveMode, SparkSession}
+import scala.collection.JavaConverters._
+
+object GlueApp {
+  def main(sysArgs: Array[String]): Unit = {
+    // Initialize GlueContext and SparkSession
+    val sc: SparkContext = new SparkContext()
+    val glueContext: GlueContext = new GlueContext(sc)
+    val spark: SparkSession = glueContext.getSparkSession
+
+    // Disable case sensitivity (optional, in case of case mismatches between columns)
+    spark.conf.set("spark.sql.caseSensitive", "false")
+
+    // Parse arguments (sourcePath, targetPath, outputPath, configPath)
+    val args = GlueArgParser.getResolvedOptions(sysArgs, Seq("sourcePath", "targetPath", "outputPath", "configPath", "JOB_NAME").toArray)
+    Job.init(args("JOB_NAME"), glueContext, args.asJava)
+
+    // Paths
+    val sourcePath = args("sourcePath")
+    val targetPath = args("targetPath")
+    val outputPath = args("outputPath")
+    val configPath = args("configPath")
+
+    // Log the paths
+    println(s"Source Path: $sourcePath")
+    println(s"Target Path: $targetPath")
+    println(s"Config Path: $configPath")
+    println(s"Output Path: $outputPath")
+
+    try {
+      // Load source and target parquet files
+      val sourceDF = spark.read.parquet(s"$sourcePath")
+      println("Source data loaded successfully")
+      sourceDF.printSchema()  // Print schema for debugging
+
+      val targetDF = spark.read.parquet(s"$targetPath")
+      println("Target data loaded successfully")
+      targetDF.printSchema()  // Print schema for debugging
+
+      // Load the configuration file (rules) as JSON
+      val configDF = spark.read.json(s"$configPath")
+
+      // Print the schema of the JSON config file to inspect the actual structure
+      println("Config JSON schema:")
+      configDF.printSchema()
+
+      // Show a sample of the data to inspect the content
+      println("Config JSON sample data:")
+      configDF.show(false)
+
+      // Filter out rows where the required fields (source_column, target_column) are missing
+      val validConfigDF = configDF.filter(col("source_column").isNotNull && col("target_column").isNotNull)
+
+      // Log any invalid rows that don't contain source_column or target_column
+      val invalidConfigDF = configDF.filter(col("source_column").isNull || col("target_column").isNull)
+      if (invalidConfigDF.count() > 0) {
+        println("Warning: Found invalid records in the config file without source_column or target_column!")
+        invalidConfigDF.show(false)
+      }
+
+      // Collect the valid configuration data
+      val configData = validConfigDF.collect().map(row => {
+        Map(
+          "source_column" -> row.getAs[String]("source_column"),
+          "target_column" -> row.getAs[String]("target_column")
+        )
+      }).toList
+
+      // Create a sequence to store matching columns for output parquet
+      var matchingColumns = Seq[String]()
+
+      var differencesFound = false
+
+      // Iterate through each rule in the config and compare source and target columns
+      for (rule <- configData) {
+        val sourceCol = rule("source_column").toString
+        val targetCol = rule("target_column").toString
+
+        // Check if both the source and target DataFrames have the specified columns
+        if (sourceDF.columns.contains(sourceCol) && targetDF.columns.contains(targetCol)) {
+          // Add matching columns to the list
+          matchingColumns = matchingColumns :+ targetCol
+
+          // Compare the source and target columns
+          val sourceColData = sourceDF.select(sourceCol).as("source")
+          val targetColData = targetDF.select(targetCol).as("target")
+
+          // Find any differences between source and target for this column
+          val diff = sourceColData.except(targetColData)
+          
+          if (diff.count() > 0) {
+            println(s"Differences found in column: $sourceCol -> $targetCol")
+            diff.show(false)
+            differencesFound = true
+          }
+        } else {
+          println(s"Either $sourceCol in source or $targetCol in target is missing, skipping comparison.")
+        }
+      }
+
+      // Generate the output DataFrame for columns that were successfully matched
+      val emptyRows = spark.createDataFrame(
+        spark.sparkContext.parallelize(Seq.empty[Row]), 
+        targetDF.schema
+      )
+
+      // If no differences are found, create an empty DataFrame with the matching column names
+      if (!differencesFound) {
+        val emptyDF = emptyRows.select(matchingColumns.map(col): _*)
+        println("No differences found between source and target data.")
+        emptyDF.write.format("parquet").mode(SaveMode.Overwrite).save(s"$outputPath/no_differences_found")
+      } else {
+        println("Differences found, no empty confirmation file created.")
+      }
+
+    } catch {
+      case e: NullPointerException =>
+        println("NullPointerException occurred: " + e.getMessage)
+        throw e  // rethrow to ensure Glue captures it
+      case e: Exception =>
+        println("An error occurred: " + e.getMessage)
+        throw e
     }
-  ]
+
+    // Commit the job
+    Job.commit()
+  }
 }
