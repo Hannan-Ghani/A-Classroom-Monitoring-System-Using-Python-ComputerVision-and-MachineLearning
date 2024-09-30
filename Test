@@ -1,29 +1,49 @@
+import org.apache.spark.sql.{SaveMode, SparkSession}
 import org.apache.spark.sql.functions._
-import org.apache.spark.sql.SparkSession
 
-object CheckJsonFile {
+object FixJsonFile {
   def main(args: Array[String]): Unit = {
-    val spark = SparkSession.builder().appName("Check JSON File").getOrCreate()
+    val spark = SparkSession.builder().appName("Fix JSON File").getOrCreate()
 
-    // Replace with your actual JSON config path
+    // Replace with your actual JSON config path and output path for the cleaned file
     val configPath = "s3://your-bucket/config/rules.json"
+    val outputPath = "s3://your-bucket/config/cleaned_rules.json"
 
     // Load the JSON config file
     val configDF = spark.read.json(configPath)
 
     // Print the schema of the JSON file to inspect structure
-    println("Config JSON Schema:")
+    println("Original Config JSON Schema:")
     configDF.printSchema()
 
     // Show the content of the JSON file to check for malformed entries
-    println("Config JSON Data:")
+    println("Original Config JSON Data:")
     configDF.show(false)
 
-    // Optionally filter out and display corrupt records (if any)
+    // Filter out and log corrupt records (if any)
     val corruptRecords = configDF.filter(col("_corrupt_record").isNotNull)
     if (corruptRecords.count() > 0) {
       println("Warning: Found corrupt records in the config file!")
       corruptRecords.show(false)
+    }
+
+    // Keep only valid records, i.e., those without _corrupt_record
+    val validConfigDF = configDF.filter(col("_corrupt_record").isNull)
+
+    if (validConfigDF.count() > 0) {
+      println("Found valid records, reformatting JSON...")
+
+      // Show valid records for debugging
+      validConfigDF.show(false)
+
+      // Write valid records back as cleaned JSON
+      validConfigDF.write
+        .mode(SaveMode.Overwrite) // Overwrite the existing file
+        .json(outputPath)
+
+      println(s"Cleaned JSON data saved to $outputPath")
+    } else {
+      println("No valid records found in the config file.")
     }
   }
 }
