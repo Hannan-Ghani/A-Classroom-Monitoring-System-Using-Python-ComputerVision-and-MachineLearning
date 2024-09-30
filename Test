@@ -3,7 +3,7 @@ import com.amazonaws.services.glue.util.GlueArgParser
 import com.amazonaws.services.glue.util.Job
 import org.apache.spark.SparkContext
 import org.apache.spark.sql.functions._
-import org.apache.spark.sql.{SaveMode, SparkSession}
+import org.apache.spark.sql.{DataFrame, SaveMode, SparkSession}
 import scala.collection.JavaConverters._
 
 object GlueApp {
@@ -12,6 +12,9 @@ object GlueApp {
     val sc: SparkContext = new SparkContext()
     val glueContext: GlueContext = new GlueContext(sc)
     val spark: SparkSession = glueContext.getSparkSession
+
+    // Disable case sensitivity (optional, in case of case mismatches between columns)
+    spark.conf.set("spark.sql.caseSensitive", "false")
 
     // Parse arguments
     val args = GlueArgParser.getResolvedOptions(sysArgs, Seq("sourcePath", "targetPath", "outputPath", "configPath", "JOB_NAME").toArray)
@@ -29,14 +32,15 @@ object GlueApp {
     println(s"Config Path: $configPath")
     println(s"Output Path: $outputPath")
 
-    // Load source, target, and config data
     try {
       // Load source and target parquet files
-      val transactionSource = spark.read.parquet(s"$sourcePath")
+      val sourceDF = spark.read.parquet(s"$sourcePath")
       println("Source data loaded successfully")
-      
-      val target = spark.read.parquet(s"$targetPath")
+      sourceDF.printSchema()  // Print schema for debugging
+
+      val targetDF = spark.read.parquet(s"$targetPath")
       println("Target data loaded successfully")
+      targetDF.printSchema()  // Print schema for debugging
 
       // Load the configuration file (rules) as JSON
       val configDF = spark.read.json(s"$configPath")
@@ -47,51 +51,57 @@ object GlueApp {
         val rules = row.getAs[Seq[org.apache.spark.sql.Row]]("rules").map(rule => {
           Map(
             "source_column" -> rule.getAs[String]("source_column"),
-            "target_column" -> rule.getAs[String]("target_column"),
-            "transformation" -> rule.getAs[String]("transformation"),
-            "type" -> rule.getAs[String]("type")
+            "target_column" -> rule.getAs[String]("target_column")
           )
         })
         Map("rules" -> rules)
       }).headOption.getOrElse(throw new Exception("Configuration data is missing or invalid."))
 
-      // Apply transformations based on config data
-      var transformedSourceDF = transactionSource
+      // Create a sequence to store matching columns for output parquet
+      var matchingColumns = Seq[String]()
+
+      var differencesFound = false
 
       for (rule <- configData("rules").asInstanceOf[List[Map[String, Any]]]) {
         val sourceCol = rule("source_column").toString
         val targetCol = rule("target_column").toString
 
-        rule("transformation").toString match {
-          case "copy" =>
-            transformedSourceDF = transformedSourceDF.withColumn(targetCol, col(sourceCol))
+        // Check if both the source and target DataFrames have the specified columns
+        if (sourceDF.columns.contains(sourceCol) && targetDF.columns.contains(targetCol)) {
+          // Add matching columns to the list
+          matchingColumns = matchingColumns :+ targetCol
 
-          case "cast" if rule("type") == "double" =>
-            transformedSourceDF = transformedSourceDF.withColumn(targetCol, col(sourceCol).cast("double"))
+          // Compare the source and target columns
+          val sourceColData = sourceDF.select(sourceCol).as("source")
+          val targetColData = targetDF.select(targetCol).as("target")
 
-          case "concat" =>
-            val additionalCol = rule.get("additional_source_column").map(_.toString).getOrElse("")
-            val separator = rule.get("separator").map(_.toString).getOrElse("")
-            transformedSourceDF = transformedSourceDF.withColumn(targetCol, concat_ws(separator, col(sourceCol), col(additionalCol)))
-
-          case "conditional" =>
-            val conditionField = rule("condition").asInstanceOf[Map[String, String]]("field")
-            val conditionValue = rule("condition").asInstanceOf[Map[String, String]]("value")
-            val elseValue = rule("condition").asInstanceOf[Map[String, String]]("else_value")
-            transformedSourceDF = transformedSourceDF.withColumn(targetCol, when(col(conditionField) === conditionValue, col(sourceCol)).otherwise(col(elseValue)))
+          // Find any differences between source and target for this column
+          val diff = sourceColData.except(targetColData)
+          
+          if (diff.count() > 0) {
+            println(s"Differences found in column: $sourceCol -> $targetCol")
+            diff.show(false)
+            differencesFound = true
+          }
+        } else {
+          println(s"Either $sourceCol in source or $targetCol in target is missing, skipping comparison.")
         }
       }
 
-      // Select columns to compare (example: transactionId and narrative)
-      val sourceColumns = transformedSourceDF.select("transactionId", "narrative").as("source")
-      val targetColumns = target.select("transactionId", "narrative").as("target")
+      // Generate the output DataFrame for columns that were successfully matched
+      val emptyRows = spark.createDataFrame(
+        spark.sparkContext.parallelize(Seq.empty[Row]), 
+        targetDF.schema
+      )
 
-      // Compare source and target data and limit to 10 differences
-      val dataDifference = sourceColumns.exceptAll(targetColumns).limit(10)
-
-      // Write the output to the specified output path
-      dataDifference.write.format("parquet").mode(SaveMode.Overwrite).save(s"$outputPath")
-      println(s"Data written to: $outputPath")
+      // If no differences are found, create an empty DataFrame with the matching column names
+      if (!differencesFound) {
+        val emptyDF = emptyRows.select(matchingColumns.map(col): _*)
+        println("No differences found between source and target data.")
+        emptyDF.write.format("parquet").mode(SaveMode.Overwrite).save(s"$outputPath/no_differences_found")
+      } else {
+        println("Differences found, no empty confirmation file created.")
+      }
 
     } catch {
       case e: NullPointerException =>
