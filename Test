@@ -33,52 +33,96 @@ object CleanseCaseClass {
     val inputTargetPath = configMap("inputTargetPath")
     val outputCombinedExceptPath = configMap("outputCombinedExceptPath")
 
+    // =======================
+    // PART 1: Narrative Validation
+    // =======================
+
     // Step 1: Read the transaction source Parquet file from the inputSourcePath in the config file
     val transactionSource: DataFrame = sparkSession.read.parquet(inputSourcePath)
       .filter($"transaction_date" > "2023-01-01" && $"transaction_date" < "2023-01-31")
 
-    // Step 2: Read the case class DataFrame from the inputTargetPath in the config file
-    val caseClass: DataFrame = sparkSession.read.parquet(inputTargetPath)
+    // Clean the narrative field in source: Replace "**" and "***" with null values
+    val source_Narrative = transactionSource.withColumn(
+      "NARRATIVE", 
+      when(trim($"NARRATIVE") === "**", null)
+        .when(trim($"NARRATIVE") === "***", null)
+        .otherwise($"NARRATIVE")
+    ).select($"TRANSACTION_ID", $"NARRATIVE")
 
-    // Step 3: Direct column validation between source and target
-    val source = transactionSource.select(
-      $"TRANSACTION_ID",
-      $"TRANSACTION_TYPE",
-      $"TRANSACTION_TYPE_DESC",
-      $"SHORTNARRATIVE", 
-      $"TRANSACTION_CODE",
-      $"TRANSACTION_CODE_DESC",
-      $"SOURCE_TRANSACTION_ID", 
-      $"ORIGINAL_CURRENCY_CODE",
-      $"TRANSACTION_COUNTRY",
-      $"TRANSACTION_LOCATION", 
-      $"screening_system"
-    )
+    // Select the corresponding fields from the target DataFrame (caseClass)
+    val target_Narrative = caseClass.select($"transactionId", $"narrative")
 
+    // Compare source to target (Narrative validation)
+    source_Narrative.exceptAll(target_Narrative).show(2, false)
+
+    // Compare target to source (Narrative validation)
+    target_Narrative.exceptAll(source_Narrative).show(2, false)
+
+    // =======================
+    // PART 2: Null Value Validation
+    // =======================
+
+    // Selecting 41 fields from the target DataFrame (caseClass) for null value validation
     val target = caseClass.select(
-      $"transactionId",
-      $"transactionType", 
-      $"transactionTypeDescription", 
-      $"narrativeShort",
-      $"transactionCode",
-      $"transactionCodeDescription", 
-      $"sourceTransactionId",
-      $"currencyLocal",
-      $"transactionCountry",
-      $"transactionLocation",
-      $"sourceSystem"
-    )
+      // Fields for "a" entity (banking information for entity A)
+      $"aBic",                   // BIC code for entity A's bank
+      $"aIban",                  // IBAN for entity A's bank
+      $"aBank",                  // Bank name for entity A
+      $"aBankCountry",           // Country of entity A's bank
+      $"aBankCountryIso3",       // ISO 3 code for the country of entity A's bank
+      $"aAddress",               // Address of entity A's bank
+      $"aParsedAddress",         // Parsed address of entity A's bank
+      $"aName",                  // Name of entity A
 
-    // Step 4: Combine the differences using exceptAll for direct column validation
-    val combined_exceptions = source.exceptAll(target).union(target.exceptAll(source))
+      // Fields for "b" entity (banking information for entity B)
+      $"bBranchUniqueId",        // Unique branch ID for entity B's bank
+      $"bBic",                   // BIC code for entity B's bank
+      $"bIban",                  // IBAN for entity B's bank
+      $"bBank",                  // Bank name for entity B
+      $"bBankCountry",           // Country of entity B's bank
+      $"bBankCountryIso3",       // ISO 3 code for the country of entity B's bank
+      $"bAddress",               // Address of entity B's bank
+      $"bParsedAddress",         // Parsed address of entity B's bank
+      $"bName",                  // Name of entity B
 
-    // Display the combined differences (Direct column validation using exceptAll)
-    combined_exceptions.show(2, false)
+      // Counterparty bank information for both A and B
+      $"aCounterpartyBankBic",   // Counterparty bank BIC for entity A
+      $"aCounterpartyBankName",  // Counterparty bank name for entity A
+      $"aCounterpartyBankCountry", // Country of counterparty bank for entity A
+      $"aCounterpartyBankCountryIso3", // ISO 3 code for country of entity A's counterparty bank
 
-    // Step 5: Write the combined result to S3 as a Parquet file (using path from the config file)
-    combined_exceptions.write.mode("overwrite").parquet(outputCombinedExceptPath)
+      $"bCounterpartyBankBic",   // Counterparty bank BIC for entity B
+      $"bCounterpartyBankName",  // Counterparty bank name for entity B
+      $"bCounterpartyBankCountry", // Country of counterparty bank for entity B
+      $"bCounterpartyBankCountryIso3", // ISO 3 code for country of entity B's counterparty bank
 
-    // Commit the Glue job
+      // Interbank information (used for intermediary banks)
+      $"interBankBic",           // BIC code for intermediary bank
+      $"interBankName",          // Name of intermediary bank
+      $"interBankCountry",       // Country of intermediary bank
+      $"interBankCountryIso3",   // ISO 3 code for the country of the intermediary bank
+
+      // Miscellaneous fields
+      $"reference",              // Transaction reference number
+      $"additionalReference",    // Additional reference related to the transaction
+      $"format",                 // Format of the transaction (e.g., SWIFT, etc.)
+      $"crossborder",            // Cross-border transaction flag
+      $"charges",                // Charges applied for the transaction
+      $"sanctionsStatus",        // Sanctions status related to the transaction
+      $"paymentsStatus",         // Status of the payment (e.g., pending, completed)
+
+      // Account information and transaction details
+      $"aAccountNumberCleansed", // Cleaned account number for entity A
+      $"amountUsd",              // Amount of the transaction in USD
+      $"aAccountOpenDate",       // Account open date for entity A
+      $"bAccountOpenDate",       // Account open date for entity B
+
+      // Aggregated transaction direction (e.g., A -> B)
+      $"aggregatedTransactionDirectionATeB"
+    ).distinct() // Removing any duplicates
+     .show(2, false) // Displaying the first 2 rows
+     
+    // Commit the Glue job to mark it as successfully completed
     Job.commit()
   }
 }
