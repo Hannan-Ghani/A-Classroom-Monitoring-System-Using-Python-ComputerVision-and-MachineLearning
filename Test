@@ -41,6 +41,9 @@ object CleanseCaseClass {
     val transactionSource: DataFrame = sparkSession.read.parquet(inputSourcePath)
       .filter($"transaction_date" > "2023-01-01" && $"transaction_date" < "2023-01-31")
 
+    // Step 2: Read the case class DataFrame from the inputTargetPath in the config file
+    val caseClass: DataFrame = sparkSession.read.parquet(inputTargetPath)
+
     // Clean the narrative field in source: Replace "**" and "***" with null values
     val source_Narrative = transactionSource.withColumn(
       "NARRATIVE", 
