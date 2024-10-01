@@ -28,30 +28,16 @@ val configMap = configDF.collect().map { row =>
 // Extract input and output paths from the config file
 val inputSourcePath = configMap("inputSourcePath")
 val inputTargetPath = configMap("inputTargetPath")
-val outputSourceExceptPath = configMap("outputSourceExceptPath")
-val outputTargetExceptPath = configMap("outputTargetExceptPath")
+val outputCombinedExceptPath = configMap("outputCombinedExceptPath")
 
 // Step 1: Read the transaction source Parquet file from the inputSourcePath in the config file
 val transactionSource: DataFrame = sparkSession.read.parquet(inputSourcePath)
   .filter($"transaction_date" > "2023-01-01" && $"transaction_date" < "2023-01-31")
 
-// Count the number of rows in the filtered DataFrame
-val transactionCount = transactionSource.count()
-println(s"Number of transactions: $transactionCount")
-
-// Inspect the schema of the transactionSource DataFrame
-transactionSource.printSchema()
-
-// Find the minimum transaction date
-transactionSource.select(min($"transaction_date")).show(false)
-
-// Find the maximum transaction date
-transactionSource.select(max($"transaction_date")).show(false)
-
 // Step 2: Read the case class DataFrame from the inputTargetPath in the config file
 val caseClass: DataFrame = sparkSession.read.parquet(inputTargetPath)
 
-// Select relevant columns from the transactionSource DataFrame
+// Step 3: Direct column validation between source and target
 val source = transactionSource.select(
   $"TRANSACTION_ID",
   $"TRANSACTION_TYPE",
@@ -66,7 +52,6 @@ val source = transactionSource.select(
   $"screening_system"
 )
 
-// Select relevant columns from the caseClass DataFrame
 val target = caseClass.select(
   $"transactionId",
   $"transactionType", 
@@ -81,19 +66,14 @@ val target = caseClass.select(
   $"sourceSystem"
 )
 
-// Step 3: Compare the source and target DataFrames using 'except' to find differences
-val source_except = source.except(target)
-val target_except = target.except(source)
+// Step 4: Combine the differences using exceptAll for direct column validation
+val combined_exceptions = source.exceptAll(target).union(target.exceptAll(source))
 
-// Display the rows that are in source but not in target
-source_except.show(2, false)
+// Display the combined differences (Direct column validation using exceptAll)
+combined_exceptions.show(2, false)
 
-// Display the rows that are in target but not in source
-target_except.show(2, false)
-
-// Step 4: Write the result to S3 as Parquet files (using paths from the config file)
-source_except.write.mode("overwrite").parquet(outputSourceExceptPath)
-target_except.write.mode("overwrite").parquet(outputTargetExceptPath)
+// Step 5: Write the combined result to S3 as a Parquet file (using path from the config file)
+combined_exceptions.write.mode("overwrite").parquet(outputCombinedExceptPath)
 
 // Commit the Glue job
 Job.commit()
