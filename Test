@@ -1,142 +1,78 @@
-import com.amazonaws.services.glue.GlueContext
-import com.amazonaws.services.glue.util.Job
-import com.amazonaws.services.glue.util.GlueArgParser
-import org.apache.spark.sql.{DataFrame, Row}
-import org.apache.spark.sql.functions._
-import org.apache.spark.SparkContext
-import org.apache.spark.sql.types.{StructField, StructType, StringType}
-import scala.collection.JavaConverters._
+sourcePath="s3://your-bucket/source_file.parquet"
+targetPath="s3://your-bucket/target_file.parquet"
+outputPath="s3://your-bucket/output/differences"
 
-object RuleBasedProcessing {
-  def main(sysArgs: Array[String]): Unit = {
-    // Initialize GlueContext and SparkContext
-    val sc: SparkContext = new SparkContext()
-    val glueContext: GlueContext = new GlueContext(sc)
-    val spark = glueContext.getSparkSession
-
-    // Parse arguments (configPath from job parameters)
-    val args = GlueArgParser.getResolvedOptions(sysArgs, Seq("configPath", "JOB_NAME").toArray)
-    Job.init(args("JOB_NAME"), glueContext, args.asJava)
-
-    // Load the config file from S3
-    val configPath = args("configPath")
-    val configLines = spark.read.textFile(configPath).collect()
-
-    // Helper function to extract paths (removes quotes if present)
-    def extractPath(line: String): String = {
-      val value = line.split("=")(1).trim
-      if (value.startsWith("\"") && value.endsWith("\"")) {
-        value.substring(1, value.length - 1) // Remove quotes
-      } else {
-        value
-      }
-    }
-
-    // Extract source, target, and output paths from the config file
-    val sourcePath = configLines.find(_.startsWith("sourcePath")).map(extractPath).getOrElse("")
-    val targetPath = configLines.find(_.startsWith("targetPath")).map(extractPath).getOrElse("")
-    val outputPath = configLines.find(_.startsWith("outputPath")).map(extractPath).getOrElse("")
-
-    // Check if all required paths are provided
-    if (sourcePath.isEmpty || targetPath.isEmpty || outputPath.isEmpty) {
-      throw new IllegalArgumentException(s"One or more paths are missing in the config file. Found sourcePath: $sourcePath, targetPath: $targetPath, outputPath: $outputPath.")
-    }
-
-    // Parse the custom column comparison rules (lines after the paths)
-    val ruleLines = configLines.filterNot(line => line.startsWith("sourcePath") || line.startsWith("targetPath") || line.startsWith("outputPath"))
-
-    // Initialize an empty map for custom rules
-    var customRuleMap: Map[String, String] = Map()
-
-    // Process each rule line and handle any potential errors
-    ruleLines.foreach { line =>
-      // Skip empty lines or lines without "="
-      if (line.contains("=")) {
-        val splitLine = line.split("=")
-        if (splitLine.length == 2) {
-          val sourceColumn = splitLine(0).trim
-          val targetColumn = splitLine(1).trim
-          customRuleMap += (sourceColumn -> targetColumn)
-        } else {
-          println(s"Warning: Skipping malformed line in config: $line")
-        }
-      }
-    }
-
-    println("Parsed Paths:")
-    println(s"Source Path: $sourcePath")
-    println(s"Target Path: $targetPath")
-    println(s"Output Path: $outputPath")
-
-    println("Parsed Custom Rules:")
-    customRuleMap.foreach(println)
-
-    // Load source and target DataFrames
-    val sourceDF = spark.read.parquet(sourcePath)
-    val targetDF = spark.read.parquet(targetPath)
-
-    // Automatically find columns with the same name in both DataFrames
-    val matchingColumns = sourceDF.columns.intersect(targetDF.columns).map(c => c -> c).toMap
-
-    println("Automatically Detected Matching Columns:")
-    matchingColumns.foreach(println)
-
-    // Combine custom rules with automatically detected matching columns
-    val allRules = customRuleMap ++ matchingColumns
-
-    // Initialize result DataFrame with the correct schema
-    var resultDF: DataFrame = spark.createDataFrame(spark.sparkContext.emptyRDD[Row], StructType(
-      Seq(
-        StructField("source_value", StringType, nullable = true),
-        StructField("target_value", StringType, nullable = true)
-      )
-    ))
-
-    // Iterate over all the rules and compare the columns that are present in both source and target
-    allRules.foreach { case (sourceColumn, targetColumn) =>
-      if (sourceDF.columns.contains(sourceColumn) && targetDF.columns.contains(targetColumn)) {
-        println(s"Comparing $sourceColumn in source with $targetColumn in target...")
-
-        // Select the relevant columns from source and target
-        val sourceColData = sourceDF.select(sourceColumn).withColumnRenamed(sourceColumn, "source_value")
-        val targetColData = targetDF.select(targetColumn).withColumnRenamed(targetColumn, "target_value")
-
-        // Combine source and target data for comparison
-        val combinedDF = sourceColData.join(targetColData, sourceColData("source_value") === targetColData("target_value"), "full_outer")
-          .withColumn("difference", when(col("source_value") =!= col("target_value"), lit("DIFFERENT")).otherwise(lit("MATCH")))
-
-        // Filter only the rows where differences exist
-        val diffDF = combinedDF.filter("difference = 'DIFFERENT'")
-          .select(col("source_value").alias(sourceColumn), col("target_value").alias(targetColumn))
-
-        // Union with the result DataFrame (accumulate differences)
-        resultDF = resultDF.union(diffDF)
-      } else {
-        println(s"Skipping comparison for $sourceColumn (source) and $targetColumn (target) because one or both columns are missing.")
-      }
-    }
-
-    // If no differences are found, produce an empty DataFrame with the matching columns
-    if (resultDF.isEmpty) {
-      println("No differences found between source and target data. Producing empty output with matching columns.")
-
-      // Get the matching columns for both source and target
-      val matchingColumns = allRules.filter { case (sourceCol, targetCol) =>
-        sourceDF.columns.contains(sourceCol) && targetDF.columns.contains(targetCol)
-      }.map(_._2).toSeq
-
-      // Create an empty DataFrame with these matching columns
-      val emptySchema = StructType(matchingColumns.map(c => StructField(c, StringType, nullable = true)))
-      val emptyDF = spark.createDataFrame(spark.sparkContext.emptyRDD[Row], emptySchema)
-
-      // Write the empty DataFrame with matching columns to the output path
-      emptyDF.write.mode("overwrite").parquet(outputPath + "/no_differences_found")
-    } else {
-      // Write the result DataFrame with differences to the output path
-      resultDF.write.mode("overwrite").parquet(outputPath + "/differences_found")
-    }
-
-    // Commit the job
-    Job.commit()
-  }
-}
+transactionId=transactionId
+transactionUniqueId=transactionUniqueId
+transactionType=transactionType
+transactionClass=transactionClass
+transactionTypeDescription=transactionTypeDescription
+aAccountId=aAccountId
+aAccountNumber=aAccountNumber
+aAccountUniqueId=aAccountUniqueId
+aAccountType=aAccountType
+aCustomerId=aCustomerId
+aBranchUniqueId=aBranchUniqueId
+aSortCode=aSortCode
+aAccountOpenDate=aAccountOpenDate
+aBic=aBic
+aIban=aIban
+aBank=aBank
+aBankCountry=aBankCountry
+aBankCountryIso3=aBankCountryIso3
+aAddress=aAddress
+aParsedAddress=aParsedAddress
+aName=aName
+bAccountId=bAccountId
+bAccountNumber=bAccountNumber
+bAccountUniqueId=bAccountUniqueId
+bAccountType=bAccountType
+bCustomerId=bCustomerId
+bBranchUniqueId=bBranchUniqueId
+bSortCode=bSortCode
+bAccountOpenDate=bAccountOpenDate
+bBank=bBank
+bBankCountry=bBankCountry
+bBankCountryIso3=bBankCountryIso3
+bAddress=bAddress
+bParsedAddress=bParsedAddress
+bName=bName
+narrative=narrative
+narrativeShort=narrativeShort
+transactionCode=transactionCode
+transactionCodeDescription=transactionCodeDescription
+sourceTransactionId=sourceTransactionId
+transactionDate=transactionDate
+amountLocal=amountLocal
+currencyLocal=currencyLocal
+aCounterpartyBankBic=aCounterpartyBankBic
+amountUsd=amountUsd
+amountGbp=amountGbp
+transactionCountry=transactionCountry
+transactionCountryIso3=transactionCountryIso3
+transactionLocation=transactionLocation
+aCounterpartyBankName=aCounterpartyBankName
+aCounterpartyBankCountry=aCounterpartyBankCountry
+aCounterpartyBankCountryIso3=aCounterpartyBankCountryIso3
+bCounterpartyBankCountry=bCounterpartyBankCountry
+bCounterpartyBankCountryIso3=bCounterpartyBankCountryIso3
+interBankBic=interBankBic
+interBankName=interBankName
+bCounterpartyBankBic=bCounterpartyBankBic
+bCounterpartyBankName=bCounterpartyBankName
+reference=reference
+additionalReference=additionalReference
+format=format
+interBankCountry=interBankCountry
+interBankCountryIso3=interBankCountryIso3
+crossborder=crossborder
+charges=charges
+sanctionsStatus=sanctionsStatus
+paymentsStatus=paymentsStatus
+aggregatedTransactionId=aggregatedTransactionId
+sourceSystem=sourceSystem
+aggregatedTransactionDocumentType=aggregatedTransactionDocumentType
+aggregatedTransactionDirectionAToB=aggregatedTransactionDirectionAToB
+runHash=runHash
+Accountid=aAccountId
+bBic=bBank
