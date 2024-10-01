@@ -5,6 +5,7 @@ import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.DataFrame
 import com.amazonaws.services.glue.util.GlueArgParser
 import org.apache.spark.sql.functions._
+import org.apache.log4j.Logger
 
 object CleanseCaseClass {
 
@@ -14,6 +15,9 @@ object CleanseCaseClass {
     val glueContext: GlueContext = new GlueContext(spark)
     val sparkSession: SparkSession = glueContext.getSparkSession
     import sparkSession.implicits._
+
+    // Logger setup
+    val logger: Logger = Logger.getLogger(getClass.getName)
 
     // Get the S3 config path from Glue job parameters
     val args = GlueArgParser.getResolvedOptions(sysArgs, Seq("s3ConfigPath").toArray)
@@ -44,6 +48,41 @@ object CleanseCaseClass {
     // Step 2: Read the case class DataFrame from the inputTargetPath in the config file
     val caseClass: DataFrame = sparkSession.read.parquet(inputTargetPath)
 
+    // Define the columns you expect to compare
+    val expectedColumns = Seq(
+      "aBic", "aIban", "aBank", "aBankCountry", "aBankCountryIso3", "aAddress", "aParsedAddress", "aName",
+      "bBranchUniqueId", "bBic", "bIban", "bBank", "bBankCountry", "bBankCountryIso3", "bAddress", "bParsedAddress", "bName",
+      "aCounterpartyBankBic", "aCounterpartyBankName", "aCounterpartyBankCountry", "aCounterpartyBankCountryIso3",
+      "bCounterpartyBankBic", "bCounterpartyBankName", "bCounterpartyBankCountry", "bCounterpartyBankCountryIso3",
+      "interBankBic", "interBankName", "interBankCountry", "interBankCountryIso3",
+      "reference", "additionalReference", "format", "crossborder", "charges", "sanctionsStatus", "paymentsStatus",
+      "aAccountNumber", "amountUsd", "aAccountOpenDate", "bAccountOpenDate", "aggregatedTransactionDirectionATeB"
+    )
+
+    // Get the list of columns in the caseClass DataFrame
+    val existingColumns = caseClass.columns.toSet
+
+    // Find which columns are missing
+    val missingColumns = expectedColumns.filterNot(existingColumns.contains)
+
+    // Log missing columns
+    if (missingColumns.nonEmpty) {
+      logger.warn(s"Missing columns: ${missingColumns.mkString(", ")}")
+    }
+
+    // Filter out missing columns and select only existing columns
+    val validColumns = expectedColumns.filter(existingColumns.contains)
+
+    // Select the existing columns from the DataFrame for comparison
+    val target = caseClass.select(validColumns.map(col): _*).distinct()
+
+    // Show the valid target data
+    target.show(2, false)
+
+    // =======================
+    // PART 2: Narrative Validation (Example of Comparison)
+    // =======================
+
     // Clean the narrative field in source: Replace "**" and "***" with null values
     val source_Narrative = transactionSource.withColumn(
       "NARRATIVE", 
@@ -61,70 +100,6 @@ object CleanseCaseClass {
     // Compare target to source (Narrative validation)
     target_Narrative.exceptAll(source_Narrative).show(2, false)
 
-    // =======================
-    // PART 2: Null Value Validation
-    // =======================
-
-    // Selecting 41 fields from the target DataFrame (caseClass) for null value validation
-    val target = caseClass.select(
-      // Fields for "a" entity (banking information for entity A)
-      $"aBic",                   // BIC code for entity A's bank
-      $"aIban",                  // IBAN for entity A's bank
-      $"aBank",                  // Bank name for entity A
-      $"aBankCountry",           // Country of entity A's bank
-      $"aBankCountryIso3",       // ISO 3 code for the country of entity A's bank
-      $"aAddress",               // Address of entity A's bank
-      $"aParsedAddress",         // Parsed address of entity A's bank
-      $"aName",                  // Name of entity A
-
-      // Fields for "b" entity (banking information for entity B)
-      $"bBranchUniqueId",        // Unique branch ID for entity B's bank
-      $"bBic",                   // BIC code for entity B's bank
-      $"bIban",                  // IBAN for entity B's bank
-      $"bBank",                  // Bank name for entity B
-      $"bBankCountry",           // Country of entity B's bank
-      $"bBankCountryIso3",       // ISO 3 code for the country of entity B's bank
-      $"bAddress",               // Address of entity B's bank
-      $"bParsedAddress",         // Parsed address of entity B's bank
-      $"bName",                  // Name of entity B
-
-      // Counterparty bank information for both A and B
-      $"aCounterpartyBankBic",   // Counterparty bank BIC for entity A
-      $"aCounterpartyBankName",  // Counterparty bank name for entity A
-      $"aCounterpartyBankCountry", // Country of counterparty bank for entity A
-      $"aCounterpartyBankCountryIso3", // ISO 3 code for country of entity A's counterparty bank
-
-      $"bCounterpartyBankBic",   // Counterparty bank BIC for entity B
-      $"bCounterpartyBankName",  // Counterparty bank name for entity B
-      $"bCounterpartyBankCountry", // Country of counterparty bank for entity B
-      $"bCounterpartyBankCountryIso3", // ISO 3 code for country of entity B's counterparty bank
-
-      // Interbank information (used for intermediary banks)
-      $"interBankBic",           // BIC code for intermediary bank
-      $"interBankName",          // Name of intermediary bank
-      $"interBankCountry",       // Country of intermediary bank
-      $"interBankCountryIso3",   // ISO 3 code for the country of the intermediary bank
-
-      // Miscellaneous fields
-      $"reference",              // Transaction reference number
-      $"additionalReference",    // Additional reference related to the transaction
-      $"format",                 // Format of the transaction (e.g., SWIFT, etc.)
-      $"crossborder",            // Cross-border transaction flag
-      $"charges",                // Charges applied for the transaction
-      $"sanctionsStatus",        // Sanctions status related to the transaction
-      $"paymentsStatus",         // Status of the payment (e.g., pending, completed)
-
-      // Account information and transaction details
-      $"aAccountNumberCleansed", // Cleaned account number for entity A
-      $"amountUsd",              // Amount of the transaction in USD
-      $"aAccountOpenDate",       // Account open date for entity A
-      $"bAccountOpenDate",       // Account open date for entity B
-
-      // Aggregated transaction direction (e.g., A -> B)
-      $"aggregatedTransactionDirectionATeB"
-    ).distinct() // Removing any duplicates
-     .show(2, false) // Displaying the first 2 rows
-     
     // Commit the Glue job to mark it as successfully completed
     Job.commit()
   }
