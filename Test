@@ -6,74 +6,79 @@ import org.apache.spark.sql.DataFrame
 import com.amazonaws.services.glue.util.GlueArgParser
 import org.apache.spark.sql.functions._
 
-// Initialize Glue and Spark context
-val spark: SparkContext = new SparkContext()
-val glueContext: GlueContext = new GlueContext(spark)
-val sparkSession: SparkSession = glueContext.getSparkSession
-import sparkSession.implicits._
+object CleanseCaseClass {
 
-// Get the S3 config path from Glue job parameters
-val args = GlueArgParser.getResolvedOptions(sysArgs, Seq("s3ConfigPath").toArray)
-val s3ConfigPath = args("s3ConfigPath")
+  def main(sysArgs: Array[String]): Unit = {
+    // Initialize Glue and Spark context
+    val spark: SparkContext = new SparkContext()
+    val glueContext: GlueContext = new GlueContext(spark)
+    val sparkSession: SparkSession = glueContext.getSparkSession
+    import sparkSession.implicits._
 
-// Read the configuration file from S3
-val configDF = sparkSession.read.text(s3ConfigPath)
+    // Get the S3 config path from Glue job parameters
+    val args = GlueArgParser.getResolvedOptions(sysArgs, Seq("s3ConfigPath").toArray)
+    val s3ConfigPath = args("s3ConfigPath")
 
-// Convert the config DataFrame into a Map of key-value pairs
-val configMap = configDF.collect().map { row =>
-  val split = row.getString(0).split("=")
-  (split(0), split(1))
-}.toMap
+    // Read the configuration file from S3
+    val configDF = sparkSession.read.text(s3ConfigPath)
 
-// Extract input and output paths from the config file
-val inputSourcePath = configMap("inputSourcePath")
-val inputTargetPath = configMap("inputTargetPath")
-val outputCombinedExceptPath = configMap("outputCombinedExceptPath")
+    // Convert the config DataFrame into a Map of key-value pairs
+    val configMap = configDF.collect().map { row =>
+      val split = row.getString(0).split("=")
+      (split(0), split(1))
+    }.toMap
 
-// Step 1: Read the transaction source Parquet file from the inputSourcePath in the config file
-val transactionSource: DataFrame = sparkSession.read.parquet(inputSourcePath)
-  .filter($"transaction_date" > "2023-01-01" && $"transaction_date" < "2023-01-31")
+    // Extract input and output paths from the config file
+    val inputSourcePath = configMap("inputSourcePath")
+    val inputTargetPath = configMap("inputTargetPath")
+    val outputCombinedExceptPath = configMap("outputCombinedExceptPath")
 
-// Step 2: Read the case class DataFrame from the inputTargetPath in the config file
-val caseClass: DataFrame = sparkSession.read.parquet(inputTargetPath)
+    // Step 1: Read the transaction source Parquet file from the inputSourcePath in the config file
+    val transactionSource: DataFrame = sparkSession.read.parquet(inputSourcePath)
+      .filter($"transaction_date" > "2023-01-01" && $"transaction_date" < "2023-01-31")
 
-// Step 3: Direct column validation between source and target
-val source = transactionSource.select(
-  $"TRANSACTION_ID",
-  $"TRANSACTION_TYPE",
-  $"TRANSACTION_TYPE_DESC",
-  $"SHORTNARRATIVE", 
-  $"TRANSACTION_CODE",
-  $"TRANSACTION_CODE_DESC",
-  $"SOURCE_TRANSACTION_ID", 
-  $"ORIGINAL_CURRENCY_CODE",
-  $"TRANSACTION_COUNTRY",
-  $"TRANSACTION_LOCATION", 
-  $"screening_system"
-)
+    // Step 2: Read the case class DataFrame from the inputTargetPath in the config file
+    val caseClass: DataFrame = sparkSession.read.parquet(inputTargetPath)
 
-val target = caseClass.select(
-  $"transactionId",
-  $"transactionType", 
-  $"transactionTypeDescription", 
-  $"narrativeShort",
-  $"transactionCode",
-  $"transactionCodeDescription", 
-  $"sourceTransactionId",
-  $"currencyLocal",
-  $"transactionCountry",
-  $"transactionLocation",
-  $"sourceSystem"
-)
+    // Step 3: Direct column validation between source and target
+    val source = transactionSource.select(
+      $"TRANSACTION_ID",
+      $"TRANSACTION_TYPE",
+      $"TRANSACTION_TYPE_DESC",
+      $"SHORTNARRATIVE", 
+      $"TRANSACTION_CODE",
+      $"TRANSACTION_CODE_DESC",
+      $"SOURCE_TRANSACTION_ID", 
+      $"ORIGINAL_CURRENCY_CODE",
+      $"TRANSACTION_COUNTRY",
+      $"TRANSACTION_LOCATION", 
+      $"screening_system"
+    )
 
-// Step 4: Combine the differences using exceptAll for direct column validation
-val combined_exceptions = source.exceptAll(target).union(target.exceptAll(source))
+    val target = caseClass.select(
+      $"transactionId",
+      $"transactionType", 
+      $"transactionTypeDescription", 
+      $"narrativeShort",
+      $"transactionCode",
+      $"transactionCodeDescription", 
+      $"sourceTransactionId",
+      $"currencyLocal",
+      $"transactionCountry",
+      $"transactionLocation",
+      $"sourceSystem"
+    )
 
-// Display the combined differences (Direct column validation using exceptAll)
-combined_exceptions.show(2, false)
+    // Step 4: Combine the differences using exceptAll for direct column validation
+    val combined_exceptions = source.exceptAll(target).union(target.exceptAll(source))
 
-// Step 5: Write the combined result to S3 as a Parquet file (using path from the config file)
-combined_exceptions.write.mode("overwrite").parquet(outputCombinedExceptPath)
+    // Display the combined differences (Direct column validation using exceptAll)
+    combined_exceptions.show(2, false)
 
-// Commit the Glue job
-Job.commit()
+    // Step 5: Write the combined result to S3 as a Parquet file (using path from the config file)
+    combined_exceptions.write.mode("overwrite").parquet(outputCombinedExceptPath)
+
+    // Commit the Glue job
+    Job.commit()
+  }
+}
