@@ -17,7 +17,7 @@ object CleanseCaseClass {
     import sparkSession.implicits._
 
     // Logger setup
-    val logger: Logger = Logger.getLogger(this.getClass.getName)  // Updated to avoid ambiguity
+    val logger: Logger = Logger.getLogger("CleanseCaseClassLogger")  // Changed to avoid getClass ambiguity
 
     // Get the S3 config path from Glue job parameters
     val args = GlueArgParser.getResolvedOptions(sysArgs, Seq("s3ConfigPath").toArray)
