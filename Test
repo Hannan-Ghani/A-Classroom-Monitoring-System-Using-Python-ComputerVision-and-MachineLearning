@@ -17,7 +17,7 @@ object CleanseCaseClass {
     import sparkSession.implicits._
 
     // Logger setup
-    val logger: Logger = Logger.getLogger("CleanseCaseClassLogger")  // Changed to avoid getClass ambiguity
+    val logger: Logger = Logger.getLogger("CleanseCaseClassLogger")
 
     // Get the S3 config path from Glue job parameters
     val args = GlueArgParser.getResolvedOptions(sysArgs, Seq("s3ConfigPath").toArray)
@@ -38,7 +38,7 @@ object CleanseCaseClass {
     val outputCombinedExceptPath = configMap("outputCombinedExceptPath")
 
     // =======================
-    // PART 1: Narrative Validation
+    // PART 1: Read Source and Target Data
     // =======================
 
     // Step 1: Read the transaction source Parquet file from the inputSourcePath in the config file
@@ -48,8 +48,13 @@ object CleanseCaseClass {
     // Step 2: Read the case class DataFrame from the inputTargetPath in the config file
     val caseClass: DataFrame = sparkSession.read.parquet(inputTargetPath)
 
-    // Define the columns you expect to compare
+    // =======================
+    // PART 2: Combine Narrative and Null Value Columns for Validation
+    // =======================
+
+    // Define all columns to compare (including narrative and other columns for null value validation)
     val expectedColumns = Seq(
+      "TRANSACTION_ID", "NARRATIVE", // Narrative columns
       "aBic", "aIban", "aBank", "aBankCountry", "aBankCountryIso3", "aAddress", "aParsedAddress", "aName",
       "bBranchUniqueId", "bBic", "bIban", "bBank", "bBankCountry", "bBankCountryIso3", "bAddress", "bParsedAddress", "bName",
       "aCounterpartyBankBic", "aCounterpartyBankName", "aCounterpartyBankCountry", "aCounterpartyBankCountryIso3",
@@ -62,7 +67,7 @@ object CleanseCaseClass {
     // Get the list of columns in the caseClass DataFrame
     val existingColumns = caseClass.columns.toSet
 
-    // Find which columns are missing
+    // Find which columns are missing in target
     val missingColumns = expectedColumns.filterNot(existingColumns.contains)
 
     // Log missing columns
@@ -70,35 +75,32 @@ object CleanseCaseClass {
       logger.warn(s"Missing columns: ${missingColumns.mkString(", ")}")
     }
 
-    // Filter out missing columns and select only existing columns
+    // Filter out missing columns and select only existing columns for comparison
     val validColumns = expectedColumns.filter(existingColumns.contains)
 
-    // Select the existing columns from the DataFrame for comparison
-    val target = caseClass.select(validColumns.map(col): _*).distinct()
-
-    // Show the valid target data
-    target.show(2, false)
-
     // =======================
-    // PART 2: Narrative Validation (Example of Comparison)
+    // PART 3: Perform Source-to-Target and Target-to-Source Validation for All Columns
     // =======================
 
-    // Clean the narrative field in source: Replace "**" and "***" with null values
-    val source_Narrative = transactionSource.withColumn(
-      "NARRATIVE", 
-      when(trim($"NARRATIVE") === "**", null)
-        .when(trim($"NARRATIVE") === "***", null)
-        .otherwise($"NARRATIVE")
-    ).select($"TRANSACTION_ID", $"NARRATIVE")
+    // Select valid columns from both source and target
+    val sourceData = transactionSource.select(validColumns.map(col): _*)
+    val targetData = caseClass.select(validColumns.map(col): _*)
 
-    // Select the corresponding fields from the target DataFrame (caseClass)
-    val target_Narrative = caseClass.select($"transactionId", $"narrative")
+    // Perform source-to-target validation using exceptAll
+    val source_to_target_diff = sourceData.exceptAll(targetData)
 
-    // Compare source to target (Narrative validation)
-    source_Narrative.exceptAll(target_Narrative).show(2, false)
+    // Perform target-to-source validation using exceptAll
+    val target_to_source_diff = targetData.exceptAll(sourceData)
 
-    // Compare target to source (Narrative validation)
-    target_Narrative.exceptAll(source_Narrative).show(2, false)
+    // =======================
+    // PART 4: Combine the Results and Write to S3
+    // =======================
+
+    // Combine the differences from both source-to-target and target-to-source
+    val combined_results = source_to_target_diff.union(target_to_source_diff)
+
+    // Write the combined results to S3 as a Parquet file
+    combined_results.write.mode("overwrite").parquet(outputCombinedExceptPath)
 
     // Commit the Glue job to mark it as successfully completed
     Job.commit()
