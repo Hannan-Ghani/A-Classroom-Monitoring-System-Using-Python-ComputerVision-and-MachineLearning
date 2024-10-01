@@ -121,18 +121,28 @@ object RuleBasedProcessing {
     // If no differences are found, produce an empty DataFrame with the matching columns
     if (resultDF.isEmpty) {
       println("No differences found between source and target data. Producing empty output with matching columns.")
-
-      // Get the matching columns for both source and target
+      
+      // Check if there are any matching columns at all
       val matchingColumns = allRules.filter { case (sourceCol, targetCol) =>
         sourceDF.columns.contains(sourceCol) && targetDF.columns.contains(targetCol)
       }.map(_._2).toSeq
-
-      // Create an empty DataFrame with these matching columns
-      val emptySchema = StructType(matchingColumns.map(c => StructField(c, StringType, nullable = true)))
-      val emptyDF = spark.createDataFrame(spark.sparkContext.emptyRDD[Row], emptySchema)
-
-      // Write the empty DataFrame with matching columns to the output path
-      emptyDF.write.mode("overwrite").parquet(outputPath + "/no_differences_found")
+      
+      if (matchingColumns.nonEmpty) {
+        // Create an empty DataFrame with these matching columns
+        val emptySchema = StructType(matchingColumns.map(c => StructField(c, StringType, nullable = true)))
+        val emptyDF = spark.createDataFrame(spark.sparkContext.emptyRDD[Row], emptySchema)
+        
+        // Write the empty DataFrame with matching columns to the output path
+        emptyDF.write.mode("overwrite").parquet(outputPath + "/no_differences_found")
+      } else {
+        // No matching columns at all, so create an empty DataFrame with a placeholder column
+        val emptySchema = StructType(Seq(StructField("placeholder", StringType, nullable = true)))
+        val emptyDF = spark.createDataFrame(spark.sparkContext.emptyRDD[Row], emptySchema)
+        
+        // Write the empty placeholder DataFrame to indicate no columns matched
+        emptyDF.write.mode("overwrite").parquet(outputPath + "/no_matching_columns")
+      }
+      
     } else {
       // Write the result DataFrame with differences to the output path
       resultDF.write.mode("overwrite").parquet(outputPath + "/differences_found")
