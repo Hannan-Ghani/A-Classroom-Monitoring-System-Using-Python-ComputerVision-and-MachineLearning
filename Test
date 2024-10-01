@@ -1,154 +1,99 @@
 import com.amazonaws.services.glue.GlueContext
 import com.amazonaws.services.glue.util.Job
-import com.amazonaws.services.glue.util.GlueArgParser
-import org.apache.spark.sql.{DataFrame, Row}
-import org.apache.spark.sql.functions._
 import org.apache.spark.SparkContext
-import org.apache.spark.sql.types.{StructField, StructType, StringType}
-import scala.collection.JavaConverters._
+import org.apache.spark.sql.SparkSession
+import org.apache.spark.sql.DataFrame
+import com.amazonaws.services.glue.util.GlueArgParser
+import org.apache.spark.sql.functions._
 
-object RuleBasedProcessing {
-  def main(sysArgs: Array[String]): Unit = {
-    // Initialize GlueContext and SparkContext
-    val sc: SparkContext = new SparkContext()
-    val glueContext: GlueContext = new GlueContext(sc)
-    val spark = glueContext.getSparkSession
+// Initialize Glue and Spark context
+val spark: SparkContext = new SparkContext()
+val glueContext: GlueContext = new GlueContext(spark)
+val sparkSession: SparkSession = glueContext.getSparkSession
+import sparkSession.implicits._
 
-    // Parse arguments (configPath from job parameters)
-    val args = GlueArgParser.getResolvedOptions(sysArgs, Seq("configPath", "JOB_NAME").toArray)
-    Job.init(args("JOB_NAME"), glueContext, args.asJava)
+// Get the S3 config path from Glue job parameters
+val args = GlueArgParser.getResolvedOptions(sysArgs, Seq("s3ConfigPath").toArray)
+val s3ConfigPath = args("s3ConfigPath")
 
-    // Load the config file from S3
-    val configPath = args("configPath")
-    val configLines = spark.read.textFile(configPath).collect()
+// Read the configuration file from S3
+val configDF = sparkSession.read.text(s3ConfigPath)
 
-    // Helper function to extract paths (removes quotes if present)
-    def extractPath(line: String): String = {
-      val value = line.split("=")(1).trim
-      if (value.startsWith("\"") && value.endsWith("\"")) {
-        value.substring(1, value.length - 1) // Remove quotes
-      } else {
-        value
-      }
-    }
+// Convert the config DataFrame into a Map of key-value pairs
+val configMap = configDF.collect().map { row =>
+  val split = row.getString(0).split("=")
+  (split(0), split(1))
+}.toMap
 
-    // Extract source, target, and output paths from the config file
-    val sourcePath = configLines.find(_.startsWith("sourcePath")).map(extractPath).getOrElse("")
-    val targetPath = configLines.find(_.startsWith("targetPath")).map(extractPath).getOrElse("")
-    val outputPath = configLines.find(_.startsWith("outputPath")).map(extractPath).getOrElse("")
+// Extract input and output paths from the config file
+val inputSourcePath = configMap("inputSourcePath")
+val inputTargetPath = configMap("inputTargetPath")
+val outputSourceExceptPath = configMap("outputSourceExceptPath")
+val outputTargetExceptPath = configMap("outputTargetExceptPath")
 
-    // Check if all required paths are provided
-    if (sourcePath.isEmpty || targetPath.isEmpty || outputPath.isEmpty) {
-      throw new IllegalArgumentException(s"One or more paths are missing in the config file. Found sourcePath: $sourcePath, targetPath: $targetPath, outputPath: $outputPath.")
-    }
+// Step 1: Read the transaction source Parquet file from the inputSourcePath in the config file
+val transactionSource: DataFrame = sparkSession.read.parquet(inputSourcePath)
+  .filter($"transaction_date" > "2023-01-01" && $"transaction_date" < "2023-01-31")
 
-    // Parse the custom column comparison rules (lines after the paths)
-    val ruleLines = configLines.filterNot(line => line.startsWith("sourcePath") || line.startsWith("targetPath") || line.startsWith("outputPath"))
+// Count the number of rows in the filtered DataFrame
+val transactionCount = transactionSource.count()
+println(s"Number of transactions: $transactionCount")
 
-    // Initialize an empty map for custom rules
-    var customRuleMap: Map[String, String] = Map()
+// Inspect the schema of the transactionSource DataFrame
+transactionSource.printSchema()
 
-    // Process each rule line and handle any potential errors
-    ruleLines.foreach { line =>
-      // Skip empty lines or lines without "="
-      if (line.contains("=")) {
-        val splitLine = line.split("=")
-        if (splitLine.length == 2) {
-          val sourceColumn = splitLine(0).trim
-          val targetColumn = splitLine(1).trim
-          customRuleMap += (sourceColumn -> targetColumn)
-        } else {
-          println(s"Warning: Skipping malformed line in config: $line")
-        }
-      }
-    }
+// Find the minimum transaction date
+transactionSource.select(min($"transaction_date")).show(false)
 
-    println("Parsed Paths:")
-    println(s"Source Path: $sourcePath")
-    println(s"Target Path: $targetPath")
-    println(s"Output Path: $outputPath")
+// Find the maximum transaction date
+transactionSource.select(max($"transaction_date")).show(false)
 
-    println("Parsed Custom Rules:")
-    customRuleMap.foreach(println)
+// Step 2: Read the case class DataFrame from the inputTargetPath in the config file
+val caseClass: DataFrame = sparkSession.read.parquet(inputTargetPath)
 
-    // Load source and target DataFrames
-    val sourceDF = spark.read.parquet(sourcePath)
-    val targetDF = spark.read.parquet(targetPath)
+// Select relevant columns from the transactionSource DataFrame
+val source = transactionSource.select(
+  $"TRANSACTION_ID",
+  $"TRANSACTION_TYPE",
+  $"TRANSACTION_TYPE_DESC",
+  $"SHORTNARRATIVE", 
+  $"TRANSACTION_CODE",
+  $"TRANSACTION_CODE_DESC",
+  $"SOURCE_TRANSACTION_ID", 
+  $"ORIGINAL_CURRENCY_CODE",
+  $"TRANSACTION_COUNTRY",
+  $"TRANSACTION_LOCATION", 
+  $"screening_system"
+)
 
-    // Automatically find columns with the same name in both DataFrames
-    val matchingColumns = sourceDF.columns.intersect(targetDF.columns).map(c => c -> c).toMap
+// Select relevant columns from the caseClass DataFrame
+val target = caseClass.select(
+  $"transactionId",
+  $"transactionType", 
+  $"transactionTypeDescription", 
+  $"narrativeShort",
+  $"transactionCode",
+  $"transactionCodeDescription", 
+  $"sourceTransactionId",
+  $"currencyLocal",
+  $"transactionCountry",
+  $"transactionLocation",
+  $"sourceSystem"
+)
 
-    println("Automatically Detected Matching Columns:")
-    matchingColumns.foreach(println)
+// Step 3: Compare the source and target DataFrames using 'except' to find differences
+val source_except = source.except(target)
+val target_except = target.except(source)
 
-    // Combine custom rules with automatically detected matching columns
-    val allRules = customRuleMap ++ matchingColumns
+// Display the rows that are in source but not in target
+source_except.show(2, false)
 
-    // Initialize result DataFrame with the correct schema
-    var resultDF: DataFrame = spark.createDataFrame(spark.sparkContext.emptyRDD[Row], StructType(
-      Seq(
-        StructField("source_value", StringType, nullable = true),
-        StructField("target_value", StringType, nullable = true)
-      )
-    ))
+// Display the rows that are in target but not in source
+target_except.show(2, false)
 
-    // Iterate over all the rules and compare only the columns present in both source and target DataFrames and mentioned in the config
-    allRules.foreach { case (sourceColumn, targetColumn) =>
-      // Check if both the sourceColumn and targetColumn exist in their respective DataFrames
-      if (sourceDF.columns.contains(sourceColumn) && targetDF.columns.contains(targetColumn)) {
-        println(s"Comparing $sourceColumn in source with $targetColumn in target...")
+// Step 4: Write the result to S3 as Parquet files (using paths from the config file)
+source_except.write.mode("overwrite").parquet(outputSourceExceptPath)
+target_except.write.mode("overwrite").parquet(outputTargetExceptPath)
 
-        // Select the relevant columns from source and target
-        val sourceColData = sourceDF.select(sourceColumn).withColumnRenamed(sourceColumn, "source_value")
-        val targetColData = targetDF.select(targetColumn).withColumnRenamed(targetColumn, "target_value")
-
-        // Combine source and target data for comparison
-        val combinedDF = sourceColData.join(targetColData, sourceColData("source_value") === targetColData("target_value"), "full_outer")
-          .withColumn("difference", when(col("source_value") =!= col("target_value"), lit("DIFFERENT")).otherwise(lit("MATCH")))
-
-        // Filter only the rows where differences exist
-        val diffDF = combinedDF.filter("difference = 'DIFFERENT'")
-          .select(col("source_value").alias(sourceColumn), col("target_value").alias(targetColumn))
-
-        // Union with the result DataFrame (accumulate differences)
-        resultDF = resultDF.union(diffDF)
-      } else {
-        // Skip columns not found in either source or target
-        println(s"Skipping comparison for $sourceColumn (source) and $targetColumn (target) because one or both columns are missing.")
-      }
-    }
-
-    // If no differences are found, produce an empty DataFrame with the matching columns
-    if (resultDF.isEmpty) {
-      println("No differences found between source and target data. Producing empty output with matching columns.")
-      
-      // Check if there are any matching columns at all
-      val matchingColumns = allRules.filter { case (sourceCol, targetCol) =>
-        sourceDF.columns.contains(sourceCol) && targetDF.columns.contains(targetCol)
-      }.map(_._2).toSeq
-      
-      if (matchingColumns.nonEmpty) {
-        // Create an empty DataFrame with these matching columns
-        val emptySchema = StructType(matchingColumns.map(c => StructField(c, StringType, nullable = true)))
-        val emptyDF = spark.createDataFrame(spark.sparkContext.emptyRDD[Row], emptySchema)
-        
-        // Write the empty DataFrame with matching columns to the output path
-        emptyDF.write.mode("overwrite").parquet(outputPath + "/no_differences_found")
-      } else {
-        // No matching columns at all, so create an empty DataFrame with a placeholder column
-        val emptySchema = StructType(Seq(StructField("placeholder", StringType, nullable = true)))
-        val emptyDF = spark.createDataFrame(spark.sparkContext.emptyRDD[Row], emptySchema)
-        
-        // Write the empty placeholder DataFrame to indicate no columns matched
-        emptyDF.write.mode("overwrite").parquet(outputPath + "/no_matching_columns")
-      }
-      
-    } else {
-      // Write the result DataFrame with differences to the output path
-      resultDF.write.mode("overwrite").parquet(outputPath + "/differences_found")
-    }
-
-    // Commit the job
-    Job.commit()
-  }
-}
+// Commit the Glue job
+Job.commit()
