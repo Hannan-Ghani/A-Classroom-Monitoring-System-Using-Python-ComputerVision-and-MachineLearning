@@ -37,15 +37,22 @@ object CleanseCaseClass {
     val inputTargetPath = configMap("inputTargetPath")
     val outputBasePath = configMap("outputCombinedExceptPath") // Base path for output files
 
-    // Helper function to filter missing columns
-    def filterExistingColumns(df: DataFrame, columns: Seq[String]): Seq[String] = {
-      val existingColumns = df.columns.toSet
-      val validColumns = columns.filter(existingColumns.contains)
-      if (validColumns.size < columns.size) {
-        val missingColumns = columns.diff(validColumns)
-        logger.warn(s"Missing columns: ${missingColumns.mkString(", ")}")
+    // Helper function to filter out missing column pairs for comparison
+    def filterExistingColumnPairs(sourceColumns: Seq[String], targetColumns: Seq[String], sourceDF: DataFrame, targetDF: DataFrame): (Seq[String], Seq[String]) = {
+      val existingSourceColumns = sourceDF.columns.toSet
+      val existingTargetColumns = targetDF.columns.toSet
+      var filteredSourceColumns: Seq[String] = Seq()
+      var filteredTargetColumns: Seq[String] = Seq()
+
+      for ((sourceCol, targetCol) <- sourceColumns.zip(targetColumns)) {
+        if (existingSourceColumns.contains(sourceCol) && existingTargetColumns.contains(targetCol)) {
+          filteredSourceColumns = filteredSourceColumns :+ sourceCol
+          filteredTargetColumns = filteredTargetColumns :+ targetCol
+        } else {
+          logger.warn(s"Skipping comparison for columns: $sourceCol and $targetCol because one or both are missing.")
+        }
       }
-      validColumns
+      (filteredSourceColumns, filteredTargetColumns)
     }
 
     // =======================
@@ -62,7 +69,6 @@ object CleanseCaseClass {
     // =======================
     // PART 2: Narrative Validation using `exceptAll()`
     // =======================
-    // Clean the "NARRATIVE" column in the source by replacing empty strings or asterisks with null
     val source_Narrative = transactionSource.withColumn(
       "NARRATIVE", 
       when(trim($"NARRATIVE") === "", null)
@@ -70,15 +76,11 @@ object CleanseCaseClass {
         .otherwise($"NARRATIVE")
     ).select($"TRANSACTION_ID", $"NARRATIVE")
 
-    // Select the corresponding narrative columns from the target
     val target_Narrative = caseClass.select($"transactionid", $"narrative")
 
-    // Perform source-to-target validation using exceptAll
     val source_to_target_narrative_diff = source_Narrative.exceptAll(target_Narrative)
-    // Perform target-to-source validation using exceptAll
     val target_to_source_narrative_diff = target_Narrative.exceptAll(source_Narrative)
 
-    // Write separate Parquet files for source-to-target and target-to-source
     val narrative_output_path_source_to_target = s"${outputBasePath}/narrative_validation/source_to_target/"
     val narrative_output_path_target_to_source = s"${outputBasePath}/narrative_validation/target_to_source/"
 
@@ -98,13 +100,10 @@ object CleanseCaseClass {
       "aAccountOpenDate", "bAccountOpenDate", "aggregatedTransactionDirectionAToB"
     )
 
-    // Filter out missing columns from the target for null validation
-    val existingTargetNullColumns = filterExistingColumns(caseClass, targetNullColumns)
+    val existingTargetNullColumns = targetNullColumns.filter(col => caseClass.columns.contains(col))
 
-    // Select and use distinct() for target null validation columns
     val targetNullData = caseClass.select(existingTargetNullColumns.map(col): _*).distinct()
 
-    // Write null value validation to separate Parquet file
     val null_validation_output_path = s"${outputBasePath}/null_validation/"
     targetNullData.write.mode("overwrite").parquet(null_validation_output_path)
 
@@ -123,19 +122,14 @@ object CleanseCaseClass {
       "currencyLocal", "transactionCountry", "transactionLocation", "sourceSystem"
     )
 
-    val existingSourceDirectColumns = filterExistingColumns(transactionSource, sourceDirectColumns)
-    val existingTargetDirectColumns = filterExistingColumns(caseClass, targetDirectColumns)
+    val (existingSourceDirectColumns, existingTargetDirectColumns) = filterExistingColumnPairs(sourceDirectColumns, targetDirectColumns, transactionSource, caseClass)
 
-    // Select and filter columns for direct validation
     val sourceDirectData = transactionSource.select(existingSourceDirectColumns.map(col): _*)
     val targetDirectData = caseClass.select(existingTargetDirectColumns.map(col): _*)
 
-    // Perform source-to-target validation using exceptAll
     val direct_source_to_target_diff = sourceDirectData.exceptAll(targetDirectData)
-    // Perform target-to-source validation using exceptAll
     val direct_target_to_source_diff = targetDirectData.exceptAll(sourceDirectData)
 
-    // Write separate Parquet files for source-to-target and target-to-source
     val direct_output_path_source_to_target = s"${outputBasePath}/direct_column_validation/source_to_target/"
     val direct_output_path_target_to_source = s"${outputBasePath}/direct_column_validation/target_to_source/"
 
@@ -172,7 +166,9 @@ object CleanseCaseClass {
       .filter(
         $"aAccountNumberCleansed".isNotNull ||
         $"aSortCodeCleansed".isNotNull ||
-        $"bAccountNumberCleansed".isNotNull ||
+        $"bAccountNumberCleansed".is
+
+NotNull ||
         $"bSortCodeCleansed".isNotNull
       )
 
