@@ -49,7 +49,27 @@ object CleanseCaseClass {
     val caseClass: DataFrame = sparkSession.read.parquet(inputTargetPath)
 
     // =======================
-    // PART 2: Narrative Validation
+    // PART 2: Handling Missing Columns and Logging
+    // =======================
+
+    // Function to filter valid columns and log missing ones without breaking mapping
+    def filterValidColumns(sourceCols: Seq[String], targetCols: Seq[String], sourceDF: DataFrame, targetDF: DataFrame, description: String): Seq[(String, String)] = {
+      sourceCols.zip(targetCols).filter { case (sourceCol, targetCol) =>
+        val sourceHasCol = sourceDF.columns.contains(sourceCol)
+        val targetHasCol = targetDF.columns.contains(targetCol)
+
+        if (!sourceHasCol) {
+          logger.warn(s"Column '$sourceCol' is missing in source for $description. Skipping this column pair.")
+        }
+        if (!targetHasCol) {
+          logger.warn(s"Column '$targetCol' is missing in target for $description. Skipping this column pair.")
+        }
+        sourceHasCol && targetHasCol
+      }
+    }
+
+    // =======================
+    // PART 3: Narrative Validation
     // =======================
 
     // Clean the "NARRATIVE" column in the source by replacing empty strings or asterisks with null
@@ -70,57 +90,54 @@ object CleanseCaseClass {
     val target_to_source_narrative_diff = target_Narrative.exceptAll(source_Narrative)
 
     // =======================
-    // PART 3: Null Value Validation (Target Only)
+    // PART 4: Null Value Validation (Target Only)
     // =======================
     
     // Select the 41 columns from target for null validation
     val targetNullColumns = Seq( /* Placeholder for 41 target columns */ )
 
     // Select and use distinct() for target null validation columns
-    val targetNullData = caseClass.select(targetNullColumns.map(col): _*).distinct()
+    val validTargetNullColumns = targetNullColumns.filter(colName => {
+      if (!caseClass.columns.contains(colName)) {
+        logger.warn(s"Column '$colName' is missing in target data for null validation.")
+        false
+      } else {
+        true
+      }
+    })
+
+    val targetNullData = caseClass.select(validTargetNullColumns.map(col): _*).distinct()
 
     // =======================
-    // PART 4: Direct Column Validation
+    // PART 5: Direct Column Validation (Constant Mapping)
     // =======================
 
-    // Select source columns
-    val sourceDirectData = transactionSource.select(
-      $"TRANSACTION_ID",
-      $"TRANSACTION_TYPE",
-      $"TRANSACTION_TYPE_DESC",
-      $"SHORTNARRATIVE",
-      $"TRANSACTION_CODE",
-      $"TRANSACTION_CODE_DESC",
-      $"SOURCE_TRANSACTION_ID",
-      $"ORIGINAL_CURRENCY_CODE",
-      $"TRANSACTION_COUNTRY",
-      $"TRANSACTION_LOCATION",
-      $"screening_system"
+    // Define source and target columns for direct validation
+    val sourceDirectColumns = Seq(
+      "TRANSACTION_ID", "TRANSACTION_TYPE", "TRANSACTION_TYPE_DESC", "SHORTNARRATIVE",
+      "TRANSACTION_CODE", "TRANSACTION_CODE_DESC", "SOURCE_TRANSACTION_ID",
+      "ORIGINAL_CURRENCY_CODE", "TRANSACTION_COUNTRY", "TRANSACTION_LOCATION", "screening_system"
     )
 
-    // Select target columns
-    val targetDirectData = caseClass.select(
-      $"transactionId",
-      $"transactionType",
-      $"transactionTypeDescription",
-      $"narrativeShort",
-      $"transactionCode",
-      $"transactionCodeDescription",
-      $"sourceTransactionId",
-      $"currencyLocal",
-      $"transactionCountry",
-      $"transactionLocation",
-      $"sourceSystem"
+    val targetDirectColumns = Seq(
+      "transactionId", "transactionType", "transactionTypeDescription", "narrativeShort",
+      "transactionCode", "transactionCodeDescription", "sourceTransactionId",
+      "currencyLocal", "transactionCountry", "transactionLocation", "sourceSystem"
     )
+
+    // Filter out missing columns without breaking the original mapping
+    val validDirectColumns = filterValidColumns(sourceDirectColumns, targetDirectColumns, transactionSource, caseClass, "direct validation")
 
     // Perform source-to-target validation using exceptAll
+    val sourceDirectData = transactionSource.select(validDirectColumns.map { case (sourceCol, _) => col(sourceCol) }: _*)
+    val targetDirectData = caseClass.select(validDirectColumns.map { case (_, targetCol) => col(targetCol) }: _*)
     val direct_source_to_target_diff = sourceDirectData.exceptAll(targetDirectData)
 
     // Perform target-to-source validation using exceptAll
     val direct_target_to_source_diff = targetDirectData.exceptAll(sourceDirectData)
 
     // =======================
-    // PART 5: Combine Results and Write to S3
+    // PART 6: Combine Results and Write to S3
     // =======================
 
     // Combine all results
