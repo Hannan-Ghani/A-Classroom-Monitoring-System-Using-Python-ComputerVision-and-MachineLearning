@@ -136,4 +136,97 @@ object CleanseCaseClass {
     val (existingSourceDirectColumns, existingTargetDirectColumns) = filterExistingColumnPairs(sourceDirectColumns, targetDirectColumns, transactionSource, caseClass)
 
     val sourceDirectData = transactionSource.select(existingSourceDirectColumns.map(col): _*)
-    val targetDirectData = caseClass.select(existingTargetDirectColumns.map
+    val targetDirectData = caseClass.select(existingTargetDirectColumns.map(col): _*)
+
+    val direct_source_to_target_diff = sourceDirectData.exceptAll(targetDirectData)
+    val direct_target_to_source_diff = targetDirectData.exceptAll(sourceDirectData)
+
+    val direct_output_path_source_to_target = s"${outputBasePath}/direct_column_validation/source_to_target/"
+    val direct_output_path_target_to_source = s"${outputBasePath}/direct_column_validation/target_to_source/"
+
+    direct_source_to_target_diff.write.mode("overwrite").parquet(direct_output_path_source_to_target)
+    direct_target_to_source_diff.write.mode("overwrite").parquet(direct_output_path_target_to_source)
+
+    // =======================
+    // PART 5: transactionCountryIso3 Validation (with separate Parquet file)
+    // =======================
+    val mappingUDF = udf((input: String) => Map(
+      "AD" -> "AND", "AE" -> "ARE", "AF" -> "AFG", "AG" -> "ATG", "AI" -> "AIA"
+      // Add more mappings here if needed
+    ).getOrElse(input, input))
+
+    val sourceTransactionCountry = transactionSource.withColumn("transactionCountryIso3Mapped", mappingUDF($"TRANSACTION_COUNTRY"))
+    val targetTransactionCountry = caseClass.select($"transactionCountryIso3")
+
+    val transactionCountryIso3Validation = sourceTransactionCountry
+      .select($"transactionCountryIso3Mapped")
+      .exceptAll(targetTransactionCountry)
+
+    val transactionCountryIso3OutputPath = s"${outputBasePath}/transactionCountryIso3_validation/"
+    transactionCountryIso3Validation.write.mode("overwrite").parquet(transactionCountryIso3OutputPath)
+
+    // =======================
+    // PART 6: Combined Validation (accountNumberCleansed, sort codes, amountLocal, transactionUniqueId, etc.)
+    // =======================
+    val combinedValidationColumns = Seq(
+      "aAccountNumberCleansed", "aSortCodeCleansed", 
+      "bAccountNumberCleansed", "bSortCodeCleansed"
+    )
+
+    // Filter out any missing columns before performing the validation
+    val existingCombinedValidationColumns = filterExistingColumns(caseClass, combinedValidationColumns)
+
+    val combinedValidation = caseClass
+      .select(existingCombinedValidationColumns.map(col): _*)
+      .filter(
+        existingCombinedValidationColumns.map(c => col(c).isNotNull).reduce(_ || _)
+      )
+
+    val sourceAmountLocal = transactionSource.select($"TRANSACTION_ID", $"ORIGINAL_AMOUNT")
+    val targetAmountLocal = caseClass.select($"transactionId", $"amountLocal")
+    val amountLocalValidation = sourceAmountLocal.exceptAll(targetAmountLocal)
+
+    val sourceTransactionUniqueId = transactionSource
+      .withColumn("transactionUniqueId", concat(col("TRANSACTION_ID"), lit("//"), col("EFF_START_DATE")))
+      .select($"TRANSACTION_ID", $"transactionUniqueId")
+
+    val targetTransactionUniqueId = caseClass.select($"transactionId", $"transactionUniqueId")
+    val transactionUniqueIdValidation = sourceTransactionUniqueId.exceptAll(targetTransactionUniqueId)
+
+    val sourceAAccountNumber = caseClass
+      .withColumn(
+        "aAccountNumber",
+        when(substring($"aAccountId", 1, 5) isin ("UKUBA"), substring($"aAccountId", 9, 8))
+          .when(substring($"aAccountId", 1, 5) isin ("UKGTS"), substring($"aAccountId", 8, 9))
+          .otherwise(null)
+      )
+      .select($"transactionId", $"aAccountNumber")
+
+    val targetAAccountNumber = caseClass.select($"transactionId", $"aAccountNumber")
+    val aAccountNumberValidation = sourceAAccountNumber.exceptAll(targetAAccountNumber)
+
+    val sourceBAccountNumber = caseClass
+      .withColumn(
+        "bAccountNumber",
+        when(substring($"bAccountId", 1, 5) isin ("UKUBA"), substring($"bAccountId", 9, 8))
+          .when(substring($"bAccountId", 1, 5) isin ("UKGTS"), substring($"bAccountId", 8, 9))
+          .otherwise(null)
+      )
+      .select($"transactionId", $"bAccountNumber")
+
+    val targetBAccountNumber = caseClass.select($"transactionId", $"bAccountNumber")
+    val bAccountNumberValidation = sourceBAccountNumber.exceptAll(targetBAccountNumber)
+
+    val finalCombinedValidation = combinedValidation
+      .union(amountLocalValidation)
+      .union(transactionUniqueIdValidation)
+      .union(aAccountNumberValidation)
+      .union(bAccountNumberValidation)
+
+    val combinedValidationOutputPath = s"${outputBasePath}/combined_validation/"
+    finalCombinedValidation.write.mode("overwrite").parquet(combinedValidationOutputPath)
+
+    // Commit the Glue job to mark it as successfully completed
+    Job.commit()
+  }
+}
