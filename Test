@@ -37,6 +37,17 @@ object CleanseCaseClass {
     val inputTargetPath = configMap("inputTargetPath")
     val outputBasePath = configMap("outputCombinedExceptPath") // Base path for output files
 
+    // Helper function to filter missing columns
+    def filterExistingColumns(df: DataFrame, columns: Seq[String]): Seq[String] = {
+      val existingColumns = df.columns.toSet
+      val validColumns = columns.filter(existingColumns.contains)
+      if (validColumns.size < columns.size) {
+        val missingColumns = columns.diff(validColumns)
+        logger.warn(s"Missing columns: ${missingColumns.mkString(", ")}")
+      }
+      validColumns
+    }
+
     // =======================
     // PART 1: Read Source and Target Data
     // =======================
@@ -88,10 +99,7 @@ object CleanseCaseClass {
     )
 
     // Filter out missing columns from the target for null validation
-    val existingTargetNullColumns = targetNullColumns.filter(col => caseClass.columns.contains(col))
-    if (existingTargetNullColumns.size < targetNullColumns.size) {
-      logger.warn(s"Some columns were missing in target null validation: ${targetNullColumns.diff(existingTargetNullColumns)}")
-    }
+    val existingTargetNullColumns = filterExistingColumns(caseClass, targetNullColumns)
 
     // Select and use distinct() for target null validation columns
     val targetNullData = caseClass.select(existingTargetNullColumns.map(col): _*).distinct()
@@ -115,9 +123,12 @@ object CleanseCaseClass {
       "currencyLocal", "transactionCountry", "transactionLocation", "sourceSystem"
     )
 
-    // Perform source-to-target validation using exceptAll
-    val sourceDirectData = transactionSource.select(sourceDirectColumns.map(col): _*)
-    val targetDirectData = caseClass.select(targetDirectColumns.map(col): _*)
+    val existingSourceDirectColumns = filterExistingColumns(transactionSource, sourceDirectColumns)
+    val existingTargetDirectColumns = filterExistingColumns(caseClass, targetDirectColumns)
+
+    // Select and filter columns for direct validation
+    val sourceDirectData = transactionSource.select(existingSourceDirectColumns.map(col): _*)
+    val targetDirectData = caseClass.select(existingTargetDirectColumns.map(col): _*)
 
     // Perform source-to-target validation using exceptAll
     val direct_source_to_target_diff = sourceDirectData.exceptAll(targetDirectData)
