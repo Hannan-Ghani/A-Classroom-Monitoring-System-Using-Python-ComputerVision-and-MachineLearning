@@ -65,17 +65,15 @@ object CleanseCaseClass {
 
     // Perform source-to-target validation using exceptAll
     val source_to_target_narrative_diff = source_Narrative.exceptAll(target_Narrative)
-
     // Perform target-to-source validation using exceptAll
     val target_to_source_narrative_diff = target_Narrative.exceptAll(source_Narrative)
 
-    // Combine source and target columns side-by-side without renaming
-    val narrative_combined = source_to_target_narrative_diff.withColumn("target_narrative_diff", lit(null).cast("string"))
-      .unionByName(target_to_source_narrative_diff.withColumn("source_narrative_diff", lit(null).cast("string")))
+    // Write separate Parquet files for source-to-target and target-to-source
+    val narrative_output_path_source_to_target = s"${outputBasePath}/narrative_validation/source_to_target/"
+    val narrative_output_path_target_to_source = s"${outputBasePath}/narrative_validation/target_to_source/"
 
-    // Write narrative validation to separate Parquet file
-    val narrative_output_path = s"${outputBasePath}/narrative_validation/"
-    narrative_combined.write.mode("overwrite").parquet(narrative_output_path)
+    source_to_target_narrative_diff.write.mode("overwrite").parquet(narrative_output_path_source_to_target)
+    target_to_source_narrative_diff.write.mode("overwrite").parquet(narrative_output_path_target_to_source)
 
     // =======================
     // PART 3: Null Value Validation (Target Only)
@@ -114,17 +112,15 @@ object CleanseCaseClass {
 
     // Perform source-to-target validation using exceptAll
     val direct_source_to_target_diff = sourceDirectData.exceptAll(targetDirectData)
-
     // Perform target-to-source validation using exceptAll
     val direct_target_to_source_diff = targetDirectData.exceptAll(sourceDirectData)
 
-    // Combine source and target columns side-by-side without renaming
-    val direct_combined = direct_source_to_target_diff.withColumn("target_diff", lit(null).cast("string"))
-      .unionByName(direct_target_to_source_diff.withColumn("source_diff", lit(null).cast("string")))
+    // Write separate Parquet files for source-to-target and target-to-source
+    val direct_output_path_source_to_target = s"${outputBasePath}/direct_column_validation/source_to_target/"
+    val direct_output_path_target_to_source = s"${outputBasePath}/direct_column_validation/target_to_source/"
 
-    // Write direct column validation to separate Parquet file
-    val direct_validation_output_path = s"${outputBasePath}/direct_column_validation/"
-    direct_combined.write.mode("overwrite").parquet(direct_validation_output_path)
+    direct_source_to_target_diff.write.mode("overwrite").parquet(direct_output_path_source_to_target)
+    direct_target_to_source_diff.write.mode("overwrite").parquet(direct_output_path_target_to_source)
 
     // Commit the Glue job to mark it as successfully completed
     Job.commit()
