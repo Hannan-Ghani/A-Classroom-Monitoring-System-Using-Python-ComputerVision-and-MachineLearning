@@ -49,7 +49,7 @@ object CleanseCaseClass {
     val caseClass: DataFrame = sparkSession.read.parquet(inputTargetPath)
 
     // =======================
-    // PART 2: Narrative Validation
+    // PART 2: Narrative Validation using `exceptAll()`
     // =======================
 
     // Clean the "NARRATIVE" column in the source by replacing empty strings or asterisks with null
@@ -61,7 +61,7 @@ object CleanseCaseClass {
     ).select($"TRANSACTION_ID", $"NARRATIVE")
 
     // Select the corresponding narrative columns from the target
-    val target_Narrative = caseClass.select($"transactionId", $"narrative")
+    val target_Narrative = caseClass.select($"transactionid", $"narrative")
 
     // Perform source-to-target validation using exceptAll
     val source_to_target_narrative_diff = source_Narrative.exceptAll(target_Narrative)
@@ -69,10 +69,12 @@ object CleanseCaseClass {
     // Perform target-to-source validation using exceptAll
     val target_to_source_narrative_diff = target_Narrative.exceptAll(source_Narrative)
 
+    // Combine narrative validation results side-by-side
+    val narrative_combined = source_to_target_narrative_diff
+      .join(target_to_source_narrative_diff, Seq(), "outer")
+
     // Write narrative validation to separate Parquet file
     val narrative_output_path = s"${outputBasePath}/narrative_validation/"
-    val narrative_combined = source_to_target_narrative_diff.withColumnRenamed("NARRATIVE", "source_NARRATIVE")
-      .join(target_to_source_narrative_diff.withColumnRenamed("narrative", "target_NARRATIVE"), Seq("TRANSACTION_ID"), "outer")
     narrative_combined.write.mode("overwrite").parquet(narrative_output_path)
 
     // =======================
@@ -90,7 +92,7 @@ object CleanseCaseClass {
     targetNullData.write.mode("overwrite").parquet(null_validation_output_path)
 
     // =======================
-    // PART 4: Direct Column Validation
+    // PART 4: Direct Column Validation using `exceptAll()`
     // =======================
 
     // Define source and target columns for direct validation
@@ -116,10 +118,12 @@ object CleanseCaseClass {
     // Perform target-to-source validation using exceptAll
     val direct_target_to_source_diff = targetDirectData.exceptAll(sourceDirectData)
 
+    // Combine direct validation results side-by-side
+    val direct_combined = direct_source_to_target_diff
+      .join(direct_target_to_source_diff, Seq(), "outer")
+
     // Write direct column validation to separate Parquet file
     val direct_validation_output_path = s"${outputBasePath}/direct_column_validation/"
-    val direct_combined = direct_source_to_target_diff
-      .join(direct_target_to_source_diff, Seq("TRANSACTION_ID"), "outer")
     direct_combined.write.mode("overwrite").parquet(direct_validation_output_path)
 
     // Commit the Glue job to mark it as successfully completed
