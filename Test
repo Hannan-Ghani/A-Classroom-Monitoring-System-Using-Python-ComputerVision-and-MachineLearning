@@ -78,9 +78,17 @@ object CleanseCaseClass {
     // =======================
     // PART 3: Null Value Validation (Target Only)
     // =======================
-    
-    // Select the 41 columns from target for null validation
-    val targetNullColumns = Seq( /* Placeholder for 41 target columns */ )
+
+    // List of 41 columns for null validation (replace with actual column names)
+    val targetNullColumns = Seq(
+      "aBic", "aIban", "aBank", "aBankCountry", "aBankCountryIso3", "aAddress", "aParsedAddress", "aName", "bBranchUniqueId",
+      "bBic", "bIban", "bBank", "bBankCountry", "bBankCountryIso3", "bAddress", "bParsedAddress", "bName", 
+      "aCounterpartyBankBic", "CounterpartyBankName", "aCounterpartyBankCountry", "aCounterpartyBankCountryIso3",
+      "bCounterpartyBankBic", "bCounterpartyBankName", "bCounterpartyBankCountry", "bCounterpartyBankCountryIso3", 
+      "interBankBic", "interBankName", "interBankCountry", "interBankCountryIso3", "reference", "additionalReference", 
+      "format", "crossborder", "charges", "sanctionsStatus", "paymentsStatus", "aAccountNumberCleansed", "amountUsd",
+      "aAccountOpenDate", "bAccountOpenDate", "aggregatedTransactionDirectionAToB"
+    )
 
     // Select and use distinct() for target null validation columns
     val targetNullData = caseClass.select(targetNullColumns.map(col): _*).distinct()
