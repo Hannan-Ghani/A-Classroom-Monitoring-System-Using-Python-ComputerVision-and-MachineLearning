@@ -69,11 +69,9 @@ object CleanseCaseClass {
     // Perform target-to-source validation using exceptAll
     val target_to_source_narrative_diff = target_Narrative.exceptAll(source_Narrative)
 
-    // Combine source and target columns side-by-side without using join
-    val narrative_combined = source_to_target_narrative_diff.withColumnRenamed("NARRATIVE", "source_NARRATIVE")
-      .withColumn("target_NARRATIVE", lit(null).cast("string"))
-      .unionByName(target_to_source_narrative_diff.withColumnRenamed("narrative", "target_NARRATIVE")
-      .withColumn("source_NARRATIVE", lit(null).cast("string")))
+    // Combine source and target columns side-by-side without renaming
+    val narrative_combined = source_to_target_narrative_diff.withColumn("target_narrative_diff", lit(null).cast("string"))
+      .unionByName(target_to_source_narrative_diff.withColumn("source_narrative_diff", lit(null).cast("string")))
 
     // Write narrative validation to separate Parquet file
     val narrative_output_path = s"${outputBasePath}/narrative_validation/"
@@ -120,11 +118,9 @@ object CleanseCaseClass {
     // Perform target-to-source validation using exceptAll
     val direct_target_to_source_diff = targetDirectData.exceptAll(sourceDirectData)
 
-    // Combine source and target columns side-by-side without using join
-    val direct_combined = direct_source_to_target_diff.withColumnRenamed("TRANSACTION_ID", "source_TRANSACTION_ID")
-      .withColumn("target_TRANSACTION_ID", lit(null).cast("string"))
-      .unionByName(direct_target_to_source_diff.withColumnRenamed("transactionId", "target_TRANSACTION_ID")
-      .withColumn("source_TRANSACTION_ID", lit(null).cast("string")))
+    // Combine source and target columns side-by-side without renaming
+    val direct_combined = direct_source_to_target_diff.withColumn("target_diff", lit(null).cast("string"))
+      .unionByName(direct_target_to_source_diff.withColumn("source_diff", lit(null).cast("string")))
 
     // Write direct column validation to separate Parquet file
     val direct_validation_output_path = s"${outputBasePath}/direct_column_validation/"
