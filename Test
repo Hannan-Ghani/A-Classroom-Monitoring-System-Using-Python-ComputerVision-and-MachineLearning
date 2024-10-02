@@ -49,33 +49,108 @@ object CleanseCaseClass {
     val caseClass: DataFrame = sparkSession.read.parquet(inputTargetPath)
 
     // =======================
+    // PART 2: Narrative Validation using `exceptAll()`
+    // =======================
+    // Clean the "NARRATIVE" column in the source by replacing empty strings or asterisks with null
+    val source_Narrative = transactionSource.withColumn(
+      "NARRATIVE", 
+      when(trim($"NARRATIVE") === "", null)
+        .when(trim($"NARRATIVE") === "*", null)
+        .otherwise($"NARRATIVE")
+    ).select($"TRANSACTION_ID", $"NARRATIVE")
+
+    // Select the corresponding narrative columns from the target
+    val target_Narrative = caseClass.select($"transactionid", $"narrative")
+
+    // Perform source-to-target validation using exceptAll
+    val source_to_target_narrative_diff = source_Narrative.exceptAll(target_Narrative)
+    // Perform target-to-source validation using exceptAll
+    val target_to_source_narrative_diff = target_Narrative.exceptAll(source_Narrative)
+
+    // Write separate Parquet files for source-to-target and target-to-source
+    val narrative_output_path_source_to_target = s"${outputBasePath}/narrative_validation/source_to_target/"
+    val narrative_output_path_target_to_source = s"${outputBasePath}/narrative_validation/target_to_source/"
+
+    source_to_target_narrative_diff.write.mode("overwrite").parquet(narrative_output_path_source_to_target)
+    target_to_source_narrative_diff.write.mode("overwrite").parquet(narrative_output_path_target_to_source)
+
+    // =======================
+    // PART 3: Null Value Validation (Target Only)
+    // =======================
+    val targetNullColumns = Seq(
+      "aBic", "aIban", "aBank", "aBankCountry", "aBankCountryIso3", "aAddress", "aParsedAddress", "aName", "bBranchUniqueId",
+      "bBic", "bIban", "bBank", "bBankCountry", "bBankCountryIso3", "bAddress", "bParsedAddress", "bName", 
+      "aCounterpartyBankBic", "CounterpartyBankName", "aCounterpartyBankCountry", "aCounterpartyBankCountryIso3",
+      "bCounterpartyBankBic", "bCounterpartyBankName", "bCounterpartyBankCountry", "bCounterpartyBankCountryIso3", 
+      "interBankBic", "interBankName", "interBankCountry", "interBankCountryIso3", "reference", "additionalReference", 
+      "format", "crossborder", "charges", "sanctionsStatus", "paymentsStatus", "aAccountNumberCleansed", "amountUsd",
+      "aAccountOpenDate", "bAccountOpenDate", "aggregatedTransactionDirectionAToB"
+    )
+
+    // Filter out missing columns from the target for null validation
+    val existingTargetNullColumns = targetNullColumns.filter(col => caseClass.columns.contains(col))
+    if (existingTargetNullColumns.size < targetNullColumns.size) {
+      logger.warn(s"Some columns were missing in target null validation: ${targetNullColumns.diff(existingTargetNullColumns)}")
+    }
+
+    // Select and use distinct() for target null validation columns
+    val targetNullData = caseClass.select(existingTargetNullColumns.map(col): _*).distinct()
+
+    // Write null value validation to separate Parquet file
+    val null_validation_output_path = s"${outputBasePath}/null_validation/"
+    targetNullData.write.mode("overwrite").parquet(null_validation_output_path)
+
+    // =======================
+    // PART 4: Direct Column Validation using `exceptAll()`
+    // =======================
+    val sourceDirectColumns = Seq(
+      "TRANSACTION_ID", "TRANSACTION_TYPE", "TRANSACTION_TYPE_DESC", "SHORTNARRATIVE",
+      "TRANSACTION_CODE", "TRANSACTION_CODE_DESC", "SOURCE_TRANSACTION_ID",
+      "ORIGINAL_CURRENCY_CODE", "TRANSACTION_COUNTRY", "TRANSACTION_LOCATION", "screening_system"
+    )
+
+    val targetDirectColumns = Seq(
+      "transactionId", "transactionType", "transactionTypeDescription", "narrativeShort",
+      "transactionCode", "transactionCodeDescription", "sourceTransactionId",
+      "currencyLocal", "transactionCountry", "transactionLocation", "sourceSystem"
+    )
+
+    // Perform source-to-target validation using exceptAll
+    val sourceDirectData = transactionSource.select(sourceDirectColumns.map(col): _*)
+    val targetDirectData = caseClass.select(targetDirectColumns.map(col): _*)
+
+    // Perform source-to-target validation using exceptAll
+    val direct_source_to_target_diff = sourceDirectData.exceptAll(targetDirectData)
+    // Perform target-to-source validation using exceptAll
+    val direct_target_to_source_diff = targetDirectData.exceptAll(sourceDirectData)
+
+    // Write separate Parquet files for source-to-target and target-to-source
+    val direct_output_path_source_to_target = s"${outputBasePath}/direct_column_validation/source_to_target/"
+    val direct_output_path_target_to_source = s"${outputBasePath}/direct_column_validation/target_to_source/"
+
+    direct_source_to_target_diff.write.mode("overwrite").parquet(direct_output_path_source_to_target)
+    direct_target_to_source_diff.write.mode("overwrite").parquet(direct_output_path_target_to_source)
+
+    // =======================
     // transactionCountryIso3 Validation (with separate Parquet file)
     // =======================
-
-    // Define the mapping UDF for transactionCountryIso3
     val mappingUDF = udf((input: String) => Map(
       "AD" -> "AND", "AE" -> "ARE", "AF" -> "AFG", "AG" -> "ATG", "AI" -> "AIA"
-      // Add other mappings as needed
     ).getOrElse(input, input))
 
-    // Apply the UDF and perform the comparison
     val sourceTransactionCountry = transactionSource.withColumn("transactionCountryIso3Mapped", mappingUDF($"TRANSACTION_COUNTRY"))
     val targetTransactionCountry = caseClass.select($"transactionCountryIso3")
 
-    // Perform the validation using exceptAll
     val transactionCountryIso3Validation = sourceTransactionCountry
       .select($"transactionCountryIso3Mapped")
       .exceptAll(targetTransactionCountry)
 
-    // Write the validation result to a separate Parquet file
     val transactionCountryIso3OutputPath = s"${outputBasePath}/transactionCountryIso3_validation/"
     transactionCountryIso3Validation.write.mode("overwrite").parquet(transactionCountryIso3OutputPath)
 
     // =======================
     // New Combined Validation (accountNumberCleansed, sort codes, amountLocal, transactionUniqueId, etc.)
     // =======================
-
-    // Validation for aAccountNumberCleansed, aSortCodeCleansed, bAccountNumberCleansed, bSortCodeCleansed
     val combinedValidation = caseClass
       .select(
         $"aAccountNumberCleansed",
@@ -90,12 +165,10 @@ object CleanseCaseClass {
         $"bSortCodeCleansed".isNotNull
       )
 
-    // ====== amountLocal Validation ======
     val sourceAmountLocal = transactionSource.select($"TRANSACTION_ID", $"ORIGINAL_AMOUNT")
     val targetAmountLocal = caseClass.select($"transactionId", $"amountLocal")
     val amountLocalValidation = sourceAmountLocal.exceptAll(targetAmountLocal)
 
-    // ====== transactionUniqueId Validation ======
     val sourceTransactionUniqueId = transactionSource
       .withColumn("transactionUniqueId", concat(col("TRANSACTION_ID"), lit("//"), col("EFF_START_DATE")))
       .select($"TRANSACTION_ID", $"transactionUniqueId")
@@ -103,7 +176,6 @@ object CleanseCaseClass {
     val targetTransactionUniqueId = caseClass.select($"transactionId", $"transactionUniqueId")
     val transactionUniqueIdValidation = sourceTransactionUniqueId.exceptAll(targetTransactionUniqueId)
 
-    // ====== aAccountNumber Validation ======
     val sourceAAccountNumber = caseClass
       .withColumn(
         "aAccountNumber",
@@ -116,7 +188,6 @@ object CleanseCaseClass {
     val targetAAccountNumber = caseClass.select($"transactionId", $"aAccountNumber")
     val aAccountNumberValidation = sourceAAccountNumber.exceptAll(targetAAccountNumber)
 
-    // ====== bAccountNumber Validation ======
     val sourceBAccountNumber = caseClass
       .withColumn(
         "bAccountNumber",
@@ -129,21 +200,14 @@ object CleanseCaseClass {
     val targetBAccountNumber = caseClass.select($"transactionId", $"bAccountNumber")
     val bAccountNumberValidation = sourceBAccountNumber.exceptAll(targetBAccountNumber)
 
-    // Combine all validations into one DataFrame
     val finalCombinedValidation = combinedValidation
       .union(amountLocalValidation)
       .union(transactionUniqueIdValidation)
       .union(aAccountNumberValidation)
       .union(bAccountNumberValidation)
 
-    // Write the combined validation results to a single Parquet file
     val combinedValidationOutputPath = s"${outputBasePath}/combined_validation/"
     finalCombinedValidation.write.mode("overwrite").parquet(combinedValidationOutputPath)
-
-    // =======================
-    // Existing Validations (narrative, null, direct column, etc.)
-    // =======================
-    // (You can keep your existing code here for other validations)
 
     // Commit the Glue job to mark it as successfully completed
     Job.commit()
