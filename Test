@@ -37,6 +37,12 @@ object CleanseCaseClass {
     val inputTargetPath = configMap("inputTargetPath")
     val outputBasePath = configMap("outputCombinedExceptPath") // Base path for output files
 
+    // Helper function to filter out missing columns
+    def getExistingColumns(df: DataFrame, columns: Seq[String]): Seq[String] = {
+      val existingColumns = df.columns.toSet
+      columns.filter(col => existingColumns.contains(col))
+    }
+
     // =======================
     // PART 1: Read Source and Target Data
     // =======================
@@ -90,8 +96,14 @@ object CleanseCaseClass {
       "aAccountOpenDate", "bAccountOpenDate", "aggregatedTransactionDirectionAToB"
     )
 
+    // Filter out missing columns
+    val existingTargetNullColumns = getExistingColumns(caseClass, targetNullColumns)
+    if (existingTargetNullColumns.size < targetNullColumns.size) {
+      logger.warn(s"Some columns were missing in target null validation: ${targetNullColumns.diff(existingTargetNullColumns)}")
+    }
+
     // Select and use distinct() for target null validation columns
-    val targetNullData = caseClass.select(targetNullColumns.map(col): _*).distinct()
+    val targetNullData = caseClass.select(existingTargetNullColumns.map(col): _*).distinct()
 
     // Write null value validation to separate Parquet file
     val null_validation_output_path = s"${outputBasePath}/null_validation/"
@@ -114,9 +126,20 @@ object CleanseCaseClass {
       "currencyLocal", "transactionCountry", "transactionLocation", "sourceSystem"
     )
 
+    // Filter out missing columns for direct validation
+    val existingSourceDirectColumns = getExistingColumns(transactionSource, sourceDirectColumns)
+    val existingTargetDirectColumns = getExistingColumns(caseClass, targetDirectColumns)
+
+    if (existingSourceDirectColumns.size < sourceDirectColumns.size) {
+      logger.warn(s"Some columns were missing in source direct validation: ${sourceDirectColumns.diff(existingSourceDirectColumns)}")
+    }
+    if (existingTargetDirectColumns.size < targetDirectColumns.size) {
+      logger.warn(s"Some columns were missing in target direct validation: ${targetDirectColumns.diff(existingTargetDirectColumns)}")
+    }
+
     // Select and filter columns for direct validation
-    val sourceDirectData = transactionSource.select(sourceDirectColumns.map(col): _*)
-    val targetDirectData = caseClass.select(targetDirectColumns.map(col): _*)
+    val sourceDirectData = transactionSource.select(existingSourceDirectColumns.map(col): _*)
+    val targetDirectData = caseClass.select(existingTargetDirectColumns.map(col): _*)
 
     // Perform source-to-target validation using exceptAll
     val direct_source_to_target_diff = sourceDirectData.exceptAll(targetDirectData)
