@@ -37,10 +37,29 @@ object CleanseCaseClass {
     val inputTargetPath = configMap("inputTargetPath")
     val outputBasePath = configMap("outputCombinedExceptPath") // Base path for output files
 
-    // Helper function to filter out missing columns
-    def getExistingColumns(df: DataFrame, columns: Seq[String]): Seq[String] = {
-      val existingColumns = df.columns.toSet
-      columns.filter(col => existingColumns.contains(col))
+    // Helper function to filter out missing columns and remove both source and target column pairs
+    def getExistingColumnPairs(sourceColumns: Seq[String], targetColumns: Seq[String], sourceDF: DataFrame, targetDF: DataFrame): (Seq[String], Seq[String]) = {
+      val sourceColumnsSet = sourceDF.columns.toSet
+      val targetColumnsSet = targetDF.columns.toSet
+      var removedColumns: Seq[(String, String)] = Seq()
+
+      val filteredSourceColumns = sourceColumns.zip(targetColumns).flatMap {
+        case (sourceCol, targetCol) =>
+          if (sourceColumnsSet.contains(sourceCol) && targetColumnsSet.contains(targetCol)) {
+            Some((sourceCol, targetCol))
+          } else {
+            removedColumns = removedColumns :+ (sourceCol, targetCol)
+            None
+          }
+      }
+
+      // Log the removed column pairs
+      if (removedColumns.nonEmpty) {
+        logger.warn(s"Removed column pairs due to missing columns: ${removedColumns.mkString(", ")}")
+      }
+
+      // Return the filtered source and target column pairs as two separate lists
+      (filteredSourceColumns.map(_._1), filteredSourceColumns.map(_._2))
     }
 
     // =======================
@@ -96,8 +115,8 @@ object CleanseCaseClass {
       "aAccountOpenDate", "bAccountOpenDate", "aggregatedTransactionDirectionAToB"
     )
 
-    // Filter out missing columns
-    val existingTargetNullColumns = getExistingColumns(caseClass, targetNullColumns)
+    // Filter out missing columns from the target for null validation
+    val existingTargetNullColumns = targetNullColumns.filter(col => caseClass.columns.contains(col))
     if (existingTargetNullColumns.size < targetNullColumns.size) {
       logger.warn(s"Some columns were missing in target null validation: ${targetNullColumns.diff(existingTargetNullColumns)}")
     }
@@ -113,7 +132,7 @@ object CleanseCaseClass {
     // PART 4: Direct Column Validation using `exceptAll()`
     // =======================
 
-    // Define source and target columns for direct validation
+    // Define source and target columns for direct validation (with pairs)
     val sourceDirectColumns = Seq(
       "TRANSACTION_ID", "TRANSACTION_TYPE", "TRANSACTION_TYPE_DESC", "SHORTNARRATIVE",
       "TRANSACTION_CODE", "TRANSACTION_CODE_DESC", "SOURCE_TRANSACTION_ID",
@@ -126,16 +145,8 @@ object CleanseCaseClass {
       "currencyLocal", "transactionCountry", "transactionLocation", "sourceSystem"
     )
 
-    // Filter out missing columns for direct validation
-    val existingSourceDirectColumns = getExistingColumns(transactionSource, sourceDirectColumns)
-    val existingTargetDirectColumns = getExistingColumns(caseClass, targetDirectColumns)
-
-    if (existingSourceDirectColumns.size < sourceDirectColumns.size) {
-      logger.warn(s"Some columns were missing in source direct validation: ${sourceDirectColumns.diff(existingSourceDirectColumns)}")
-    }
-    if (existingTargetDirectColumns.size < targetDirectColumns.size) {
-      logger.warn(s"Some columns were missing in target direct validation: ${targetDirectColumns.diff(existingTargetDirectColumns)}")
-    }
+    // Filter out missing column pairs for direct validation
+    val (existingSourceDirectColumns, existingTargetDirectColumns) = getExistingColumnPairs(sourceDirectColumns, targetDirectColumns, transactionSource, caseClass)
 
     // Select and filter columns for direct validation
     val sourceDirectData = transactionSource.select(existingSourceDirectColumns.map(col): _*)
