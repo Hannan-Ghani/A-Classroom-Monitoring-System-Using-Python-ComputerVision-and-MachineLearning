@@ -69,13 +69,11 @@ object CleanseCaseClass {
     // Perform target-to-source validation using exceptAll
     val target_to_source_narrative_diff = target_Narrative.exceptAll(source_Narrative)
 
-    // Alias the columns to avoid duplicate names in the final output
-    val source_to_target_aliased = source_to_target_narrative_diff.withColumnRenamed("NARRATIVE", "source_NARRATIVE")
-    val target_to_source_aliased = target_to_source_narrative_diff.withColumnRenamed("narrative", "target_NARRATIVE")
-
-    // Combine narrative validation results side-by-side
-    val narrative_combined = source_to_target_aliased
-      .join(target_to_source_aliased, Seq("TRANSACTION_ID"), "outer")
+    // Combine source and target columns side-by-side without using join
+    val narrative_combined = source_to_target_narrative_diff.withColumnRenamed("NARRATIVE", "source_NARRATIVE")
+      .withColumn("target_NARRATIVE", lit(null).cast("string"))
+      .unionByName(target_to_source_narrative_diff.withColumnRenamed("narrative", "target_NARRATIVE")
+      .withColumn("source_NARRATIVE", lit(null).cast("string")))
 
     // Write narrative validation to separate Parquet file
     val narrative_output_path = s"${outputBasePath}/narrative_validation/"
@@ -122,13 +120,11 @@ object CleanseCaseClass {
     // Perform target-to-source validation using exceptAll
     val direct_target_to_source_diff = targetDirectData.exceptAll(sourceDirectData)
 
-    // Alias the columns to avoid duplicate names in the final output
-    val direct_source_to_target_aliased = direct_source_to_target_diff.withColumnRenamed("TRANSACTION_ID", "source_TRANSACTION_ID")
-    val direct_target_to_source_aliased = direct_target_to_source_diff.withColumnRenamed("transactionId", "target_TRANSACTION_ID")
-
-    // Combine direct validation results side-by-side
-    val direct_combined = direct_source_to_target_aliased
-      .join(direct_target_to_source_aliased, Seq("source_TRANSACTION_ID"), "outer")
+    // Combine source and target columns side-by-side without using join
+    val direct_combined = direct_source_to_target_diff.withColumnRenamed("TRANSACTION_ID", "source_TRANSACTION_ID")
+      .withColumn("target_TRANSACTION_ID", lit(null).cast("string"))
+      .unionByName(direct_target_to_source_diff.withColumnRenamed("transactionId", "target_TRANSACTION_ID")
+      .withColumn("source_TRANSACTION_ID", lit(null).cast("string")))
 
     // Write direct column validation to separate Parquet file
     val direct_validation_output_path = s"${outputBasePath}/direct_column_validation/"
