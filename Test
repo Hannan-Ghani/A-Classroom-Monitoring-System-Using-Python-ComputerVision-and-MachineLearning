@@ -19,20 +19,21 @@ object CleanseCaseClass {
 
     val logger: Logger = Logger.getLogger("CleanseCaseClass")
 
-    // Get the S3 config path from Glue job parameters
-    val args = GlueArgParser.getResolvedOptions(sysArgs, Seq("s3ConfigPath").toArray)
-    val s3ConfigPath = args("s3ConfigPath")
+    // Get the S3 path config and validation config paths from Glue job parameters
+    val args = GlueArgParser.getResolvedOptions(sysArgs, Seq("s3PathConfig", "s3ValidationConfig").toArray)
+    val s3PathConfig = args("s3PathConfig")
+    val s3ValidationConfig = args("s3ValidationConfig")
 
-    // Read the configuration file from S3 (assuming it is a text file)
-    val configFile = sparkSession.read.textFile(s3ConfigPath).collect()
+    // 1. Read and parse the Path Config file (S3)
+    val pathConfig = readPathConfig(sparkSession.read.textFile(s3PathConfig).collect())
 
-    // Parse the configuration file and create a map of validation types and columns
-    val configMap = parseConfig(configFile)
+    // 2. Read and parse the Validation Config file (S3)
+    val validationConfig = parseValidationConfig(sparkSession.read.textFile(s3ValidationConfig).collect())
 
-    // Extract input and output paths from the config map
-    val inputSourcePath = configMap.getOrElse("inputSourcePath", "")
-    val inputTargetPath = configMap.getOrElse("inputTargetPath", "")
-    val outputBasePath = configMap.getOrElse("outputCombinedExceptPath", "")
+    // Extract paths from the pathConfig map
+    val inputSourcePath = pathConfig.getOrElse("inputSourcePath", "")
+    val inputTargetPath = pathConfig.getOrElse("inputTargetPath", "")
+    val outputBasePath = pathConfig.getOrElse("outputBasePath", "")
 
     // =======================
     // PART 1: Read Source and Target Data
@@ -43,12 +44,11 @@ object CleanseCaseClass {
     // =======================
     // PART 2: Apply Validations Dynamically Based on Config
     // =======================
-
-    configMap.foreach { case (validationType, columns) =>
+    validationConfig.foreach { case (validationType, columns) =>
       validationType match {
         case "null" =>
           applyNullValidation(columns, caseClass, outputBasePath)
-        case "direct" =>
+        case "directValidation" =>
           applyDirectColumnValidation(columns, transactionSource, caseClass, outputBasePath)
         case "narrative" =>
           applyNarrativeValidation(columns, transactionSource, caseClass, outputBasePath)
@@ -65,8 +65,20 @@ object CleanseCaseClass {
     Job.commit()
   }
 
-  // Helper function to parse the config file and extract validation types and columns
-  def parseConfig(config: Array[String]): Map[String, String] = {
+  // =======================
+  // PART 3: Parsing Configurations
+  // =======================
+
+  // Function to parse the path configuration file (input/output paths)
+  def readPathConfig(config: Array[String]): Map[String, String] = {
+    config.filterNot(_.startsWith("#")).map { line =>
+      val Array(key, value) = line.split("=").map(_.trim)
+      key -> value
+    }.toMap
+  }
+
+  // Function to parse the validation configuration file
+  def parseValidationConfig(config: Array[String]): Map[String, String] = {
     config.filterNot(_.startsWith("#")).map { line =>
       val Array(validationType, columns) = line.split(":").map(_.trim)
       validationType -> columns
@@ -74,7 +86,7 @@ object CleanseCaseClass {
   }
 
   // =======================
-  // PART 3: Validation Functions
+  // PART 4: Validation Functions
   // =======================
 
   // Null Value Validation
@@ -168,12 +180,16 @@ object CleanseCaseClass {
     val countryIso3SourceToTargetDiff = sourceTransactionCountry.select($"transactionCountryIso3Mapped").exceptAll(targetTransactionCountry)
     val countryIso3TargetToSourceDiff = targetTransactionCountry.exceptAll(sourceTransactionCountry.select($"transactionCountryIso3Mapped"))
 
-    val countryIso3OutputPathSourceToTarget = s"${outputBasePath}/transactionCountryIso3_validation/source_to_target/"
-    val countryIso3OutputPathTargetToSource = s"${outputBasePath}/transactionCountryIso3_validation/target_to_source/"
+    val countryIso3OutputPathSourceToTarget = s"${outputBasePath}/transactionCountryISO3_validation/source_to_target/"
+    val countryIso3OutputPathTargetToSource = s"${outputBasePath}/transactionCountryISO3_validation/target_to_source/"
 
     countryIso3SourceToTargetDiff.write.mode("overwrite").parquet(countryIso3OutputPathSourceToTarget)
     countryIso3TargetToSourceDiff.write.mode("overwrite").parquet(countryIso3OutputPathTargetToSource)
   }
+
+  // =======================
+  // PART 5: Helper Functions
+  // =======================
 
   // Helper function to filter out missing columns
   def filterExistingColumns(df: DataFrame, columns: Seq[String]): Seq[String] = {
