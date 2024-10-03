@@ -148,124 +148,38 @@ object CleanseCaseClass {
     direct_target_to_source_diff.write.mode("overwrite").parquet(direct_output_path_target_to_source)
 
     // =======================
-    // PART 5: transactionCountryIso3 Validation (with separate Parquet file)
+    // PART 5: Combined Validation (accountNumberCleansed, sort codes, amountLocal, transactionUniqueId, etc.)
     // =======================
-    val mappingUDF = udf((input: String) => Map(
-      "AD" -> "AND", "AE" -> "ARE", "AF" -> "AFG", "AG" -> "ATG", "AI" -> "AIA"
-      // Add more mappings here if needed
-    ).getOrElse(input, input))
 
-    val sourceTransactionCountry = transactionSource.withColumn("transactionCountryIso3Mapped", mappingUDF($"TRANSACTION_COUNTRY"))
-    val targetTransactionCountry = caseClass.select($"transactionCountryIso3")
+    // aAccountNumberCleansed Validation
+    val aAccountNumberCleansedOutputPath = s"${outputBasePath}/aAccountNumberCleansed_validation/"
+    val nonEmptyAAccountNumberCleansedValidation = caseClass.select("aAccountNumberCleansed")
+    nonEmptyAAccountNumberCleansedValidation.write.mode("overwrite").parquet(aAccountNumberCleansedOutputPath)
 
-    val transactionCountryIso3Validation = sourceTransactionCountry
-      .select($"transactionCountryIso3Mapped")
-      .exceptAll(targetTransactionCountry)
+    // aSortCodeCleansed Validation
+    val aSortCodeCleansedOutputPath = s"${outputBasePath}/aSortCodeCleansed_validation/"
+    val nonEmptyASortCodeCleansedValidation = caseClass.select("aSortCodeCleansed")
+    nonEmptyASortCodeCleansedValidation.write.mode("overwrite").parquet(aSortCodeCleansedOutputPath)
 
-    val transactionCountryIso3OutputPath = s"${outputBasePath}/transactionCountryIso3_validation/"
-    transactionCountryIso3Validation.write.mode("overwrite").parquet(transactionCountryIso3OutputPath)
+    // bAccountNumberCleansed Validation
+    val bAccountNumberCleansedOutputPath = s"${outputBasePath}/bAccountNumberCleansed_validation/"
+    val nonEmptyBAccountNumberCleansedValidation = caseClass.select("bAccountNumberCleansed")
+    nonEmptyBAccountNumberCleansedValidation.write.mode("overwrite").parquet(bAccountNumberCleansedOutputPath)
 
-    // =======================
-    // PART 6: Combined Validation (accountNumberCleansed, sort codes, amountLocal, transactionUniqueId, etc.)
-    // =======================
-    val combinedValidationColumns = Seq(
-      "aAccountNumberCleansed", "aSortCodeCleansed", 
-      "bAccountNumberCleansed", "bSortCodeCleansed"
-    )
+    // bSortCodeCleansed Validation
+    val bSortCodeCleansedOutputPath = s"${outputBasePath}/bSortCodeCleansed_validation/"
+    val nonEmptyBSortCodeCleansedValidation = caseClass.select("bSortCodeCleansed")
+    nonEmptyBSortCodeCleansedValidation.write.mode("overwrite").parquet(bSortCodeCleansedOutputPath)
 
-    // Filter out any missing columns before performing the validation
-    val existingCombinedValidationColumns = filterExistingColumns(caseClass, combinedValidationColumns)
+    // amountLocal Validation
+    val amountLocalOutputPath = s"${outputBasePath}/amountLocal_validation/"
+    val nonEmptyAmountLocalValidation = caseClass.select("amountLocal")
+    nonEmptyAmountLocalValidation.write.mode("overwrite").parquet(amountLocalOutputPath)
 
-    // Only apply the filter if there are valid columns
-    val combinedValidation = if (existingCombinedValidationColumns.nonEmpty) {
-      val filterCondition = existingCombinedValidationColumns
-        .map(c => col(c).isNotNull)
-        .reduceOption(_ || _)
-        .getOrElse(lit(false))
-      
-      caseClass
-        .select(existingCombinedValidationColumns.map(col): _*)
-        .filter(filterCondition)
-    } else {
-      logger.warn("No valid columns found for combined validation")
-      sparkSession.emptyDataFrame
-    }
-
-    // Amount Local Validation
-    val nonEmptyAmountLocalValidation = if (caseClass.columns.contains("amountLocal") && !caseClass.isEmpty) {
-      val sourceAmountLocal = transactionSource.select($"TRANSACTION_ID", $"ORIGINAL_AMOUNT")
-      val targetAmountLocal = caseClass.select($"transactionId", $"amountLocal")
-      sourceAmountLocal.exceptAll(targetAmountLocal)
-    } else {
-      logger.warn("Skipping amountLocalValidation due to empty or missing columns.")
-      sparkSession.emptyDataFrame
-    }
-
-    // Transaction Unique ID Validation
-    val nonEmptyTransactionUniqueIdValidation = if (caseClass.columns.contains("transactionUniqueId") && !caseClass.isEmpty) {
-      val sourceTransactionUniqueId = transactionSource
-        .withColumn("transactionUniqueId", concat(col("TRANSACTION_ID"), lit("//"), col("EFF_START_DATE")))
-        .select($"TRANSACTION_ID", $"transactionUniqueId")
-      val targetTransactionUniqueId = caseClass.select($"transactionId", $"transactionUniqueId")
-      sourceTransactionUniqueId.exceptAll(targetTransactionUniqueId)
-    } else {
-      logger.warn("Skipping transactionUniqueIdValidation due to empty or missing columns.")
-      sparkSession.emptyDataFrame
-    }
-
-    // A Account Number Validation
-    val nonEmptyAAccountNumberValidation = if (caseClass.columns.contains("aAccountNumber") && !caseClass.isEmpty) {
-      val sourceAAccountNumber = caseClass
-        .withColumn(
-          "aAccountNumber",
-          when(substring($"aAccountId", 1, 5) isin ("UKUBA"), substring($"aAccountId", 9, 8))
-            .when(substring($"aAccountId", 1, 5) isin ("UKGTS"), substring($"aAccountId", 8, 9))
-            .otherwise(null)
-        )
-        .select($"transactionId", $"aAccountNumber")
-      val targetAAccountNumber = caseClass.select($"transactionId", $"aAccountNumber")
-      sourceAAccountNumber.exceptAll(targetAAccountNumber)
-    } else {
-      logger.warn("Skipping aAccountNumberValidation due to empty or missing columns.")
-      sparkSession.emptyDataFrame
-    }
-
-    // B Account Number Validation
-    val nonEmptyBAccountNumberValidation = if (caseClass.columns.contains("bAccountNumber") && !caseClass.isEmpty) {
-      val sourceBAccountNumber = caseClass
-        .withColumn(
-          "bAccountNumber",
-          when(substring($"bAccountId", 1, 5) isin ("UKUBA"), substring($"bAccountId", 9, 8))
-            .when(substring($"bAccountId", 1, 5) isin ("UKGTS"), substring($"bAccountId", 8, 9))
-            .otherwise(null)
-        )
-        .select($"transactionId", $"bAccountNumber")
-      val targetBAccountNumber = caseClass.select($"transactionId", $"bAccountNumber")
-      sourceBAccountNumber.exceptAll(targetBAccountNumber)
-    } else {
-      logger.warn("Skipping bAccountNumberValidation due to empty or missing columns.")
-      sparkSession.emptyDataFrame
-    }
-
-    // Union all valid DataFrames
-    val validationDataFrames = Seq(
-      combinedValidation,
-      nonEmptyAmountLocalValidation,
-      nonEmptyTransactionUniqueIdValidation,
-      nonEmptyAAccountNumberValidation,
-      nonEmptyBAccountNumberValidation
-    )
-
-    // Filter out empty DataFrames
-    val nonEmptyValidations = validationDataFrames.filter(df => df.columns.nonEmpty && !df.isEmpty)
-
-    if (nonEmptyValidations.nonEmpty) {
-      val finalCombinedValidation = nonEmptyValidations.reduce(_ union _)
-      val combinedValidationOutputPath = s"${outputBasePath}/combined_validation/"
-      finalCombinedValidation.write.mode("overwrite").parquet(combinedValidationOutputPath)
-    } else {
-      logger.warn("No valid non-empty DataFrames to union.")
-    }
+    // transactionUniqueId Validation
+    val transactionUniqueIdOutputPath = s"${outputBasePath}/transactionUniqueId_validation/"
+    val nonEmptyTransactionUniqueIdValidation = caseClass.select("transactionUniqueId")
+    nonEmptyTransactionUniqueIdValidation.write.mode("overwrite").parquet(transactionUniqueIdOutputPath)
 
     // Commit the Glue job to mark it as successfully completed
     Job.commit()
