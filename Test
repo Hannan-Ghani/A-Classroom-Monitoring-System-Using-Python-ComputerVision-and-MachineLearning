@@ -1,227 +1,68 @@
-import com.amazonaws.services.glue.GlueContext
-import com.amazonaws.services.glue.util.Job
-import org.apache.spark.SparkContext
-import org.apache.spark.sql.SparkSession
-import org.apache.spark.sql.DataFrame
-import com.amazonaws.services.glue.util.GlueArgParser
-import org.apache.spark.sql.functions._
-import org.apache.log4j.Logger
-import scala.io.Source
+// Direct Column Validation
+def applyDirectColumnValidation(columns: String, transactionSource: DataFrame, caseClass: DataFrame, outputBasePath: String): Unit = {
+  val Array(sourceCols, targetCols) = columns.split(";").map(_.trim)
+  
+  // Extract source and target columns separately
+  val sourceColumns = sourceCols.replace("columns_source=", "").split(",").map(_.trim)
+  val targetColumns = targetCols.replace("columns_target=", "").split(",").map(_.trim)
 
-object DynamicCaseClass {
+  // Filter existing columns to ensure only valid columns are used
+  val existingSourceColumns = filterExistingColumns(transactionSource, sourceColumns)
+  val existingTargetColumns = filterExistingColumns(caseClass, targetColumns)
 
-  def main(sysArgs: Array[String]): Unit = {
-    // Initialize Glue and Spark context
-    val spark: SparkContext = new SparkContext()
-    val glueContext: GlueContext = new GlueContext(spark)
-    
-    // Initialize SparkSession from GlueContext
-    val sparkSession: SparkSession = glueContext.getSparkSession
-    import sparkSession.implicits._
+  if (existingSourceColumns.isEmpty || existingTargetColumns.isEmpty) {
+    logger.warn(s"One or more columns are missing in source or target. Skipping validation for columns: $sourceCols -> $targetCols")
+  } else {
+    // Select the columns for source and target
+    val sourceDirectData = transactionSource.select(existingSourceColumns.map(col): _*)
+    val targetDirectData = caseClass.select(existingTargetColumns.map(col): _*)
 
-    val logger: Logger = Logger.getLogger("DynamicCaseClass")
+    // Apply exceptAll for comparison
+    val directSourceToTargetDiff = sourceDirectData.exceptAll(targetDirectData)
+    val directTargetToSourceDiff = targetDirectData.exceptAll(sourceDirectData)
 
-    // Get the S3 path config and validation config paths from Glue job parameters
-    val args = GlueArgParser.getResolvedOptions(sysArgs, Seq("s3PathConfig", "s3ValidationConfig").toArray)
-    val s3PathConfig = args("s3PathConfig")
-    val s3ValidationConfig = args("s3ValidationConfig")
+    // Write output to S3
+    val directOutputPathSourceToTarget = s"${outputBasePath}/direct_column_validation/source_to_target/"
+    val directOutputPathTargetToSource = s"${outputBasePath}/direct_column_validation/target_to_source/"
 
-    // 1. Read and parse the Path Config file (S3) with error handling
-    val pathConfig = readPathConfig(sparkSession.read.textFile(s3PathConfig).collect())
-
-    // 2. Read and parse the Validation Config file (S3) with error handling
-    val validationConfig = parseValidationConfig(sparkSession.read.textFile(s3ValidationConfig).collect())
-
-    // Extract paths from the pathConfig map
-    val inputSourcePath = pathConfig.getOrElse("inputSourcePath", "")
-    val inputTargetPath = pathConfig.getOrElse("inputTargetPath", "")
-    val outputBasePath = pathConfig.getOrElse("outputBasePath", "")
-
-    // Log the parsed configuration for debugging
-    validationConfig.foreach { case (key, value) =>
-      logger.info(s"Validation type: $key, Columns: $value")
-    }
-
-    // =======================
-    // PART 1: Read Source and Target Data
-    // =======================
-    val transactionSource: DataFrame = sparkSession.read.parquet(inputSourcePath)
-    val caseClass: DataFrame = sparkSession.read.parquet(inputTargetPath)
-
-    // =======================
-    // PART 2: Apply Validations Dynamically Based on Config
-    // =======================
-    validationConfig.foreach { case (validationType, columns) =>
-      validationType match {
-        case "null" =>
-          applyNullValidation(columns, caseClass, outputBasePath)
-        case "directValidation" =>
-          applyDirectColumnValidation(columns, transactionSource, caseClass, outputBasePath)
-        case "narrative" =>
-          applyNarrativeValidation(columns, transactionSource, caseClass, outputBasePath)
-        case "amountLocal" =>
-          applyAmountLocalValidation(columns, transactionSource, caseClass, outputBasePath)
-        case "transactionCountryISO3" =>
-          applyTransactionCountryISO3Validation(columns, transactionSource, caseClass, outputBasePath)
-        case _ => 
-          logger.warn(s"Unknown validation type: $validationType, skipping this validation.")
-      }
-    }
-
-    // Commit the Glue job to mark it as successfully completed
-    Job.commit()
-  }
-
-  // =======================
-  // PART 3: Parsing Configurations
-  // =======================
-
-  // Function to parse the path configuration file (input/output paths)
-  def readPathConfig(config: Array[String]): Map[String, String] = {
-    config.filterNot(_.startsWith("#")).flatMap { line =>
-      line.split("=").map(_.trim) match {
-        case Array(key, value) if key.nonEmpty && value.nonEmpty =>
-          Some(key -> value)
-        case _ =>
-          logger.warn(s"Invalid line in path config: $line")
-          None
-      }
-    }.toMap
-  }
-
-  // Function to parse the validation configuration file
-  def parseValidationConfig(config: Array[String]): Map[String, String] = {
-    config.filterNot(_.startsWith("#")).flatMap { line =>
-      line.split(":").map(_.trim) match {
-        case Array(validationType, columns) if validationType.nonEmpty && columns.nonEmpty =>
-          Some(validationType -> columns)
-        case _ =>
-          logger.warn(s"Invalid line in validation config: $line")
-          None
-      }
-    }.toMap
-  }
-
-  // =======================
-  // PART 4: Validation Functions (unchanged from before)
-  // =======================
-
-  // Null Value Validation
-  def applyNullValidation(columns: String, caseClass: DataFrame, outputBasePath: String): Unit = {
-    val colSeq = columns.replace("columns=", "").split(",").map(_.trim)
-    val nullColumns = filterExistingColumns(caseClass, colSeq)
-    if (nullColumns.isEmpty) {
-      logger.warn(s"No valid columns found for Null validation.")
-    } else {
-      val nullData = caseClass.select(nullColumns.map(col): _*).distinct()
-      val nullValidationOutputPath = s"${outputBasePath}/null_validation/"
-      nullData.write.mode("overwrite").parquet(nullValidationOutputPath)
-    }
-  }
-
-  // Direct Column Validation
-  def applyDirectColumnValidation(columns: String, transactionSource: DataFrame, caseClass: DataFrame, outputBasePath: String): Unit = {
-    val Array(sourceCols, targetCols) = columns.split("target=").map(_.trim)
-    val sourceColumns = sourceCols.replace("columns_source=", "").split(",").map(_.trim)
-    val targetColumns = targetCols.split(",").map(_.trim)
-
-    val existingSourceColumns = filterExistingColumns(transactionSource, sourceColumns)
-    val existingTargetColumns = filterExistingColumns(caseClass, targetColumns)
-
-    if (existingSourceColumns.isEmpty || existingTargetColumns.isEmpty) {
-      logger.warn(s"One or more columns are missing in source or target. Skipping validation for columns: $sourceCols -> $targetCols")
-    } else {
-      val sourceDirectData = transactionSource.select(existingSourceColumns.map(col): _*)
-      val targetDirectData = caseClass.select(existingTargetColumns.map(col): _*)
-
-      val directSourceToTargetDiff = sourceDirectData.exceptAll(targetDirectData)
-      val directTargetToSourceDiff = targetDirectData.exceptAll(sourceDirectData)
-
-      val directOutputPathSourceToTarget = s"${outputBasePath}/direct_column_validation/source_to_target/"
-      val directOutputPathTargetToSource = s"${outputBasePath}/direct_column_validation/target_to_source/"
-
-      directSourceToTargetDiff.write.mode("overwrite").parquet(directOutputPathSourceToTarget)
-      directTargetToSourceDiff.write.mode("overwrite").parquet(directOutputPathTargetToSource)
-    }
-  }
-
-  // Narrative Validation
-  def applyNarrativeValidation(columns: String, transactionSource: DataFrame, caseClass: DataFrame, outputBasePath: String): Unit = {
-    val Array(sourceNarrative, targetNarrative) = columns.split("target=").map(_.trim)
-    val sourceNarrativeCol = sourceNarrative.replace("source=", "").trim
-    val targetNarrativeCol = targetNarrative.trim
-
-    val sourceNarrativeData = transactionSource
-      .select(col("TRANSACTION_ID"), col(sourceNarrativeCol))
-    val targetNarrativeData = caseClass
-      .select(col("transactionid"), col(targetNarrativeCol))
-
-    val narrativeSourceToTargetDiff = sourceNarrativeData.exceptAll(targetNarrativeData)
-    val narrativeTargetToSourceDiff = targetNarrativeData.exceptAll(sourceNarrativeData)
-
-    val narrativeOutputPathSourceToTarget = s"${outputBasePath}/narrative_validation/source_to_target/"
-    val narrativeOutputPathTargetToSource = s"${outputBasePath}/narrative_validation/target_to_source/"
-
-    narrativeSourceToTargetDiff.write.mode("overwrite").parquet(narrativeOutputPathSourceToTarget)
-    narrativeTargetToSourceDiff.write.mode("overwrite").parquet(narrativeOutputPathTargetToSource)
-  }
-
-  // Amount Local Validation
-  def applyAmountLocalValidation(columns: String, transactionSource: DataFrame, caseClass: DataFrame, outputBasePath: String): Unit = {
-    val Array(sourceCol, targetCol) = columns.split("target=").map(_.trim)
-    val sourceAmountCol = sourceCol.replace("source=", "").trim
-    val targetAmountCol = targetCol.trim
-
-    val existingSourceColumns = filterExistingColumns(transactionSource, Seq(sourceAmountCol))
-    val existingTargetColumns = filterExistingColumns(caseClass, Seq(targetAmountCol))
-
-    if (existingSourceColumns.isEmpty || existingTargetColumns.isEmpty) {
-      logger.warn(s"One or more columns are missing for amountLocal validation. Skipping validation.")
-    } else {
-      val sourceAmountData = transactionSource.select(col("TRANSACTION_ID"), col(sourceAmountCol))
-      val targetAmountData = caseClass.select(col("transactionId"), col(targetAmountCol))
-
-      val amountLocalSourceToTargetDiff = sourceAmountData.exceptAll(targetAmountData)
-      val amountLocalTargetToSourceDiff = targetAmountData.exceptAll(sourceAmountData)
-
-      val amountLocalOutputPathSourceToTarget = s"${outputBasePath}/amountLocal_validation/source_to_target/"
-      val amountLocalOutputPathTargetToSource = s"${outputBasePath}/amountLocal_validation/target_to_source/"
-
-      amountLocalSourceToTargetDiff.write.mode("overwrite").parquet(amountLocalOutputPathSourceToTarget)
-      amountLocalTargetToSourceDiff.write.mode("overwrite").parquet(amountLocalOutputPathTargetToSource)
-    }
-  }
-
-  // Transaction Country ISO3 Validation
-  def applyTransactionCountryISO3Validation(columns: String, transactionSource: DataFrame, caseClass: DataFrame, outputBasePath: String): Unit = {
-    val Array(sourceCol, targetCol) = columns.split("target=").map(_.trim)
-    val sourceCountryCol = sourceCol.replace("source=", "").trim
-    val targetCountryCol = targetCol.trim
-
-    val mappingUDF = udf((input: String) => Map(
-      "AD" -> "AND", "AE" -> "ARE", "AF" -> "AFG", "AG" -> "ATG", "AI" -> "AIA"
-    ).getOrElse(input, input))
-
-    val sourceTransactionCountry = transactionSource.withColumn("transactionCountryIso3Mapped", mappingUDF(col(sourceCountryCol)))
-    val targetTransactionCountry = caseClass.select(col(targetCountryCol))
-
-    val countryIsoSourceToTargetDiff = sourceTransactionCountry.select(col("transactionCountryIso3Mapped")).exceptAll(targetTransactionCountry)
-    val countryIsoTargetToSourceDiff = targetTransactionCountry.exceptAll(sourceTransactionCountry.select(col("transactionCountryIso3Mapped")))
-
-    val countryIso3OutputPathSourceToTarget = s"${outputBasePath}/transactionCountryISO3_validation/source_to_target/"
-    val countryIso3OutputPathTargetToSource = s"${outputBasePath}/transactionCountryISO3_validation/target_to_source/"
-
-    countryIsoSourceToTargetDiff.write.mode("overwrite").parquet(countryIso3OutputPathSourceToTarget)
-    countryIsoTargetToSourceDiff.write.mode("overwrite").parquet(countryIso3OutputPathTargetToSource)
-  }
-
-  // =======================
-  // PART 5: Helper Functions
-  // =======================
-
-  // Helper function to filter out missing columns
-  def filterExistingColumns(df: DataFrame, columns: Seq[String]): Seq[String] = {
-    val existingColumns = df.columns.toSet
-    columns.filter(existingColumns.contains)
+    directSourceToTargetDiff.write.mode("overwrite").parquet(directOutputPathSourceToTarget)
+    directTargetToSourceDiff.write.mode("overwrite").parquet(directOutputPathTargetToSource)
   }
 }
+
+
+
+
+# Validation Configuration File
+
+# Null Value Validation
+null:columns=aBic,aIban,aBank,aBankCountry,aBankCountryIso3,aAddress,aParsedAddress,aName,bBranchUniqueId,bBic
+
+# Direct Column Validation
+# Specify source and target columns for direct validation
+directValidation:columns_source=TRANSACTION_ID,TRANSACTION_TYPE,TRANSACTION_CODE;columns_target=transactionId,transactionType,transactionCode
+
+# Narrative Validation
+narrative:source=NARRATIVE;target=narrative
+
+# Amount Local Validation
+amountLocal:source=ORIGINAL_AMOUNT;target=amountLocal
+
+# Transaction Country ISO3 Validation
+transactionCountryISO3:source=TRANSACTION_COUNTRY;target=transactionCountryIso3
+
+
+
+
+# This is the path configuration file
+# Specify input and output paths below
+
+# Source data path
+inputSourcePath=s3://your-bucket/input/source/
+
+# Target data path
+inputTargetPath=s3://your-bucket/input/target/
+
+# Output base path
+outputBasePath=s3://your-bucket/output/
+
