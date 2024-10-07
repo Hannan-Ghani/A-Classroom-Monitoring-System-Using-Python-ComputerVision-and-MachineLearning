@@ -1,28 +1,27 @@
-def applyNarrativeValidation(columns: String, transactionSource: DataFrame, caseClass: DataFrame, outputBasePath: String): Unit = {
-  // Correctly split source and target columns based on `;`
-  val Array(sourceNarrative, targetNarrative) = columns.split(";").map(_.trim) 
-  
-  // Remove `source=` and `target=` and trim any extra spaces
-  val sourceNarrativeCol = sourceNarrative.replace("source=", "").trim
-  val targetNarrativeCol = targetNarrative.replace("target=", "").trim
+def readPathConfig(config: Array[String]): Map[String, String] = {
+  logger.info(s"Config file contents: ${config.mkString("\n")}") // Log config for debugging
 
-  logger.info(s"Source narrative column: $sourceNarrativeCol")
-  logger.info(s"Target narrative column: $targetNarrativeCol")
+  config.filterNot(line => line.trim.isEmpty || line.trim.startsWith("#")).flatMap { line =>
+    val splitLine = line.split("=").map(_.trim) // Split the line by "="
+    if (splitLine.length == 2) {
+      Some(splitLine(0) -> splitLine(1)) // Expecting exactly two parts: key and value
+    } else {
+      logger.warn(s"Invalid line in path config: $line") // Log invalid lines
+      None
+    }
+  }.toMap
+}
 
-  // Select the columns for comparison
-  val sourceNarrativeData = transactionSource
-    .select(col("TRANSACTION_ID"), col(sourceNarrativeCol))
-  val targetNarrativeData = caseClass
-    .select(col("transactionid"), col(targetNarrativeCol))
+def parseValidationConfig(config: Array[String]): Map[String, String] = {
+  logger.info(s"Validation config contents: ${config.mkString("\n")}") // Log validation config
 
-  // Perform exceptAll comparison
-  val narrativeSourceToTargetDiff = sourceNarrativeData.exceptAll(targetNarrativeData)
-  val narrativeTargetToSourceDiff = targetNarrativeData.exceptAll(sourceNarrativeData)
-
-  // Write output to S3
-  val narrativeOutputPathSourceToTarget = s"${outputBasePath}/narrative_validation/source_to_target/"
-  val narrativeOutputPathTargetToSource = s"${outputBasePath}/narrative_validation/target_to_source/"
-
-  narrativeSourceToTargetDiff.write.mode("overwrite").parquet(narrativeOutputPathSourceToTarget)
-  narrativeTargetToSourceDiff.write.mode("overwrite").parquet(narrativeOutputPathTargetToSource)
+  config.filterNot(line => line.trim.isEmpty || line.trim.startsWith("#")).flatMap { line =>
+    val splitLine = line.split(":").map(_.trim) // Split the line by ":"
+    if (splitLine.length == 2) {
+      Some(splitLine(0) -> splitLine(1)) // Expecting exactly two parts: validationType and columns
+    } else {
+      logger.warn(s"Invalid line in validation config: $line") // Log invalid lines
+      None
+    }
+  }.toMap
 }
