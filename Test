@@ -1,27 +1,31 @@
-def readPathConfig(config: Array[String]): Map[String, String] = {
-  logger.info(s"Config file contents: ${config.mkString("\n")}") // Log config for debugging
+# Path Config File
 
-  config.filterNot(line => line.trim.isEmpty || line.trim.startsWith("#")).flatMap { line =>
-    val splitLine = line.split("=").map(_.trim) // Split the line by "="
-    if (splitLine.length == 2) {
-      Some(splitLine(0) -> splitLine(1)) // Expecting exactly two parts: key and value
-    } else {
-      logger.warn(s"Invalid line in path config: $line") // Log invalid lines
-      None
-    }
-  }.toMap
-}
+# Source data path
+inputSourcePath=s3://your-bucket/input/source/
 
-def parseValidationConfig(config: Array[String]): Map[String, String] = {
-  logger.info(s"Validation config contents: ${config.mkString("\n")}") // Log validation config
+# Target data path
+inputTargetPath=s3://your-bucket/input/target/
 
-  config.filterNot(line => line.trim.isEmpty || line.trim.startsWith("#")).flatMap { line =>
-    val splitLine = line.split(":").map(_.trim) // Split the line by ":"
-    if (splitLine.length == 2) {
-      Some(splitLine(0) -> splitLine(1)) // Expecting exactly two parts: validationType and columns
-    } else {
-      logger.warn(s"Invalid line in validation config: $line") // Log invalid lines
-      None
-    }
-  }.toMap
-}
+# Output base path
+outputBasePath=s3://your-bucket/output/
+
+# Validation Config File
+
+[null_validation]
+columns=aBic,aIban,aBank,aBankCountry
+
+[direct_column_validation]
+columns_source=TRANSACTION_ID,TRANSACTION_TYPE,TRANSACTION_CODE
+columns_target=transactionId,transactionType,transactionCode
+
+[narrative_validation]
+source_column=NARRATIVE
+target_column=narrative
+
+[amount_local_validation]
+source_column=ORIGINAL_AMOUNT
+target_column=amountLocal
+
+[transaction_country_iso3_validation]
+source_column=TRANSACTION_COUNTRY
+target_column=transactionCountryIso3
