@@ -1,39 +1,13 @@
-def readPathConfig(config: Array[String]): Map[String, String] = {
-  config.filterNot(line => line.trim.isEmpty || line.trim.startsWith("#")).flatMap { line =>
-    line.split("=").map(_.trim) match {
-      case Array(key, value) if key.nonEmpty && value.nonEmpty =>
-        Some(key -> value)
-      case _ =>
-        logger.warn(s"Invalid line in path config: $line")
-        None
-    }
-  }.toMap
+if (validationConfig.contains("null_validation")) {
+  // Extract the columns for null validation from the map
+  val nullColumns = validationConfig("null_validation")("columns")
+  applyNullValidation(nullColumns, caseClass, outputBasePath)
 }
 
 
-
-
-
-def parseValidationConfig(config: Array[String]): Map[String, Map[String, String]] = {
-  var currentSection: String = ""
-  var validationConfig: Map[String, Map[String, String]] = Map()
-
-  config.filterNot(line => line.trim.isEmpty || line.trim.startsWith("#")).foreach { line =>
-    if (line.startsWith("[") && line.endsWith("]")) {
-      // Section header (e.g., [null_validation])
-      currentSection = line.substring(1, line.length - 1).trim
-      validationConfig += (currentSection -> Map())
-    } else {
-      // Key-value pair inside the section
-      val keyValue = line.split("=").map(_.trim)
-      if (keyValue.length == 2 && currentSection.nonEmpty) {
-        val currentValues = validationConfig(currentSection)
-        validationConfig += (currentSection -> (currentValues + (keyValue(0) -> keyValue(1))))
-      } else {
-        logger.warn(s"Invalid line in validation config: $line")
-      }
-    }
-  }
-
-  validationConfig
+if (validationConfig.contains("direct_column_validation")) {
+  // Extract source and target columns for direct column validation
+  val sourceCols = validationConfig("direct_column_validation")("columns_source")
+  val targetCols = validationConfig("direct_column_validation")("columns_target")
+  applyDirectColumnValidation(sourceCols, targetCols, transactionSource, caseClass, outputBasePath)
 }
