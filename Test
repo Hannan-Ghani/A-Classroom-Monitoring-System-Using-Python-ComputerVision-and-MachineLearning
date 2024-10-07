@@ -1,13 +1,31 @@
+val validationConfig = parseValidationConfig(configFileContents)
+
 if (validationConfig.contains("null_validation")) {
-  // Extract the columns for null validation from the map
   val nullColumns = validationConfig("null_validation")("columns")
   applyNullValidation(nullColumns, caseClass, outputBasePath)
 }
 
-
 if (validationConfig.contains("direct_column_validation")) {
-  // Extract source and target columns for direct column validation
   val sourceCols = validationConfig("direct_column_validation")("columns_source")
   val targetCols = validationConfig("direct_column_validation")("columns_target")
   applyDirectColumnValidation(sourceCols, targetCols, transactionSource, caseClass, outputBasePath)
+}
+
+// Similar for other validations
+if (validationConfig.contains("narrative_validation")) {
+  val sourceNarrativeCol = validationConfig("narrative_validation")("source_column")
+  val targetNarrativeCol = validationConfig("narrative_validation")("target_column")
+  applyNarrativeValidation(sourceNarrativeCol, targetNarrativeCol, transactionSource, caseClass, outputBasePath)
+}
+
+if (validationConfig.contains("amount_local_validation")) {
+  val sourceAmountCol = validationConfig("amount_local_validation")("source_column")
+  val targetAmountCol = validationConfig("amount_local_validation")("target_column")
+  applyAmountLocalValidation(sourceAmountCol, targetAmountCol, transactionSource, caseClass, outputBasePath)
+}
+
+if (validationConfig.contains("transaction_country_iso3_validation")) {
+  val sourceCountryCol = validationConfig("transaction_country_iso3_validation")("source_column")
+  val targetCountryCol = validationConfig("transaction_country_iso3_validation")("target_column")
+  applyTransactionCountryISO3Validation(sourceCountryCol, targetCountryCol, transactionSource, caseClass, outputBasePath)
 }
