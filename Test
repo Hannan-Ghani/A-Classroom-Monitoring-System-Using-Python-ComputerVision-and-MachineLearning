@@ -133,22 +133,32 @@ object DynamicCaseClass {
     nullData.write.mode("overwrite").parquet(nullValidationOutputPath)
   }
 
-  // Direct Column Validation
+  // Direct Column Validation with missing columns handling
   def applyDirectColumnValidation(sourceCols: String, targetCols: String, transactionSource: DataFrame, caseClass: DataFrame, outputBasePath: String): Unit = {
     val sourceColumns = sourceCols.split(",").map(_.trim)
     val targetColumns = targetCols.split(",").map(_.trim)
 
-    val sourceDirectData = transactionSource.select(sourceColumns.map(col): _*)
-    val targetDirectData = caseClass.select(targetColumns.map(col): _*)
+    // Filter existing columns and skip missing ones
+    val (existingSourceColumns, existingTargetColumns) = filterExistingColumnPairs(sourceColumns, targetColumns, transactionSource, caseClass)
 
-    val directSourceToTargetDiff = sourceDirectData.exceptAll(targetDirectData)
-    val directTargetToSourceDiff = targetDirectData.exceptAll(sourceDirectData)
+    if (existingSourceColumns.isEmpty || existingTargetColumns.isEmpty) {
+      logger.warn(s"No valid columns left for comparison after filtering missing columns.")
+    } else {
+      // Select only the valid columns
+      val sourceDirectData = transactionSource.select(existingSourceColumns.map(col): _*)
+      val targetDirectData = caseClass.select(existingTargetColumns.map(col): _*)
 
-    val directOutputPathSourceToTarget = s"${outputBasePath}/direct_column_validation/source_to_target/"
-    val directOutputPathTargetToSource = s"${outputBasePath}/direct_column_validation/target_to_source/"
+      // Perform exceptAll for valid columns
+      val directSourceToTargetDiff = sourceDirectData.exceptAll(targetDirectData)
+      val directTargetToSourceDiff = targetDirectData.exceptAll(sourceDirectData)
 
-    directSourceToTargetDiff.write.mode("overwrite").parquet(directOutputPathSourceToTarget)
-    directTargetToSourceDiff.write.mode("overwrite").parquet(directOutputPathTargetToSource)
+      // Write output to S3
+      val directOutputPathSourceToTarget = s"${outputBasePath}/direct_column_validation/source_to_target/"
+      val directOutputPathTargetToSource = s"${outputBasePath}/direct_column_validation/target_to_source/"
+
+      directSourceToTargetDiff.write.mode("overwrite").parquet(directOutputPathSourceToTarget)
+      directTargetToSourceDiff.write.mode("overwrite").parquet(directOutputPathTargetToSource)
+    }
   }
 
   // Narrative Validation
@@ -203,7 +213,29 @@ object DynamicCaseClass {
   // =======================
   // Helper Functions
   // =======================
-  // Helper function to filter out missing columns
+
+  // Helper function to filter out missing columns in source and target
+  def filterExistingColumnPairs(sourceColumns: Seq[String], targetColumns: Seq[String], transactionSource: DataFrame, caseClass: DataFrame): (Seq[String], Seq[String]) = {
+    val existingSourceColumns = filterExistingColumns(transactionSource, sourceColumns)
+    val existingTargetColumns = filterExistingColumns(caseClass, targetColumns)
+
+    // Log any missing columns
+    sourceColumns.zip(targetColumns).foreach { case (sourceCol, targetCol) =>
+      if (!existingSourceColumns.contains(sourceCol) || !existingTargetColumns.contains(targetCol)) {
+        logger.warn(s"Skipping comparison for columns: $sourceCol and $targetCol because one or both are missing.")
+      }
+    }
+
+    // Filter out the missing columns from both lists
+    val validPairs = sourceColumns.zip(targetColumns).filter { case (sourceCol, targetCol) =>
+      existingSourceColumns.contains(sourceCol) && existingTargetColumns.contains(targetCol)
+    }
+
+    // Return the valid columns for both source and target
+    (validPairs.map(_._1), validPairs.map(_._2))
+  }
+
+  // Helper function to filter out missing columns in general
   def filterExistingColumns(df: DataFrame, columns: Seq[String]): Seq[String] = {
     val existingColumns = df.columns.toSet
     columns.filter(existingColumns.contains)
