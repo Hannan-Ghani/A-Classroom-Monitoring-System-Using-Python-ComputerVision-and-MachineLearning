@@ -1,68 +1,25 @@
-// Direct Column Validation
-def applyDirectColumnValidation(columns: String, transactionSource: DataFrame, caseClass: DataFrame, outputBasePath: String): Unit = {
-  val Array(sourceCols, targetCols) = columns.split(";").map(_.trim)
-  
-  // Extract source and target columns separately
-  val sourceColumns = sourceCols.replace("columns_source=", "").split(",").map(_.trim)
-  val targetColumns = targetCols.replace("columns_target=", "").split(",").map(_.trim)
-
-  // Filter existing columns to ensure only valid columns are used
-  val existingSourceColumns = filterExistingColumns(transactionSource, sourceColumns)
-  val existingTargetColumns = filterExistingColumns(caseClass, targetColumns)
-
-  if (existingSourceColumns.isEmpty || existingTargetColumns.isEmpty) {
-    logger.warn(s"One or more columns are missing in source or target. Skipping validation for columns: $sourceCols -> $targetCols")
-  } else {
-    // Select the columns for source and target
-    val sourceDirectData = transactionSource.select(existingSourceColumns.map(col): _*)
-    val targetDirectData = caseClass.select(existingTargetColumns.map(col): _*)
-
-    // Apply exceptAll for comparison
-    val directSourceToTargetDiff = sourceDirectData.exceptAll(targetDirectData)
-    val directTargetToSourceDiff = targetDirectData.exceptAll(sourceDirectData)
-
-    // Write output to S3
-    val directOutputPathSourceToTarget = s"${outputBasePath}/direct_column_validation/source_to_target/"
-    val directOutputPathTargetToSource = s"${outputBasePath}/direct_column_validation/target_to_source/"
-
-    directSourceToTargetDiff.write.mode("overwrite").parquet(directOutputPathSourceToTarget)
-    directTargetToSourceDiff.write.mode("overwrite").parquet(directOutputPathTargetToSource)
-  }
+def readPathConfig(config: Array[String]): Map[String, String] = {
+  config.filterNot(line => line.trim.isEmpty || line.trim.startsWith("#")).flatMap { line =>
+    val trimmedLine = line.trim // Trim the entire line
+    trimmedLine.split("=").map(_.trim) match { // Trim key and value
+      case Array(key, value) if key.nonEmpty && value.nonEmpty =>
+        Some(key -> value)
+      case _ =>
+        logger.warn(s"Invalid line in path config: $line")
+        None
+    }
+  }.toMap
 }
 
-
-
-
-# Validation Configuration File
-
-# Null Value Validation
-null:columns=aBic,aIban,aBank,aBankCountry,aBankCountryIso3,aAddress,aParsedAddress,aName,bBranchUniqueId,bBic
-
-# Direct Column Validation
-# Specify source and target columns for direct validation
-directValidation:columns_source=TRANSACTION_ID,TRANSACTION_TYPE,TRANSACTION_CODE;columns_target=transactionId,transactionType,transactionCode
-
-# Narrative Validation
-narrative:source=NARRATIVE;target=narrative
-
-# Amount Local Validation
-amountLocal:source=ORIGINAL_AMOUNT;target=amountLocal
-
-# Transaction Country ISO3 Validation
-transactionCountryISO3:source=TRANSACTION_COUNTRY;target=transactionCountryIso3
-
-
-
-
-# This is the path configuration file
-# Specify input and output paths below
-
-# Source data path
-inputSourcePath=s3://your-bucket/input/source/
-
-# Target data path
-inputTargetPath=s3://your-bucket/input/target/
-
-# Output base path
-outputBasePath=s3://your-bucket/output/
-
+def parseValidationConfig(config: Array[String]): Map[String, String] = {
+  config.filterNot(line => line.trim.isEmpty || line.trim.startsWith("#")).flatMap { line =>
+    val trimmedLine = line.trim // Trim the entire line
+    trimmedLine.split(":").map(_.trim) match { // Trim validation type and columns
+      case Array(validationType, columns) if validationType.nonEmpty && columns.nonEmpty =>
+        Some(validationType -> columns)
+      case _ =>
+        logger.warn(s"Invalid line in validation config: $line")
+        None
+    }
+  }.toMap
+}
