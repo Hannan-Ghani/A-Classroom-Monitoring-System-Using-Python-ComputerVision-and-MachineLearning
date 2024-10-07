@@ -1,31 +1,39 @@
-# Path Config File
+def readPathConfig(config: Array[String]): Map[String, String] = {
+  config.filterNot(line => line.trim.isEmpty || line.trim.startsWith("#")).flatMap { line =>
+    line.split("=").map(_.trim) match {
+      case Array(key, value) if key.nonEmpty && value.nonEmpty =>
+        Some(key -> value)
+      case _ =>
+        logger.warn(s"Invalid line in path config: $line")
+        None
+    }
+  }.toMap
+}
 
-# Source data path
-inputSourcePath=s3://your-bucket/input/source/
 
-# Target data path
-inputTargetPath=s3://your-bucket/input/target/
 
-# Output base path
-outputBasePath=s3://your-bucket/output/
 
-# Validation Config File
 
-[null_validation]
-columns=aBic,aIban,aBank,aBankCountry
+def parseValidationConfig(config: Array[String]): Map[String, Map[String, String]] = {
+  var currentSection: String = ""
+  var validationConfig: Map[String, Map[String, String]] = Map()
 
-[direct_column_validation]
-columns_source=TRANSACTION_ID,TRANSACTION_TYPE,TRANSACTION_CODE
-columns_target=transactionId,transactionType,transactionCode
+  config.filterNot(line => line.trim.isEmpty || line.trim.startsWith("#")).foreach { line =>
+    if (line.startsWith("[") && line.endsWith("]")) {
+      // Section header (e.g., [null_validation])
+      currentSection = line.substring(1, line.length - 1).trim
+      validationConfig += (currentSection -> Map())
+    } else {
+      // Key-value pair inside the section
+      val keyValue = line.split("=").map(_.trim)
+      if (keyValue.length == 2 && currentSection.nonEmpty) {
+        val currentValues = validationConfig(currentSection)
+        validationConfig += (currentSection -> (currentValues + (keyValue(0) -> keyValue(1))))
+      } else {
+        logger.warn(s"Invalid line in validation config: $line")
+      }
+    }
+  }
 
-[narrative_validation]
-source_column=NARRATIVE
-target_column=narrative
-
-[amount_local_validation]
-source_column=ORIGINAL_AMOUNT
-target_column=amountLocal
-
-[transaction_country_iso3_validation]
-source_column=TRANSACTION_COUNTRY
-target_column=transactionCountryIso3
+  validationConfig
+}
