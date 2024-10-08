@@ -1,7 +1,7 @@
 import com.amazonaws.services.glue.GlueContext
 import com.amazonaws.services.glue.util.Job
 import org.apache.spark.SparkContext
-import org.apache.spark.sql.{DataFrame, SparkSession}
+import org.apache.spark.sql.{DataFrame, SparkSession, Row}
 import org.apache.spark.sql.functions._
 import org.apache.log4j.Logger
 import com.amazonaws.services.glue.util.GlueArgParser
@@ -41,42 +41,54 @@ object DynamicCaseClass {
     val caseClass: DataFrame = spark.read.parquet(inputTargetPath)
 
     // =======================
-    // Apply Validations Dynamically
+    // Combine Results from all Validations
     // =======================
+
+    // Initialize an empty DataFrame for combining all validation results
+    var combinedResults: DataFrame = spark.createDataFrame(spark.sparkContext.emptyRDD[Row], caseClass.schema)
 
     // Null Validation
     if (validationConfig.contains("null_validation")) {
       val nullColumns = validationConfig("null_validation")("columns")
-      applyNullValidation(nullColumns, caseClass, outputBasePath)(spark)
+      val nullValidationResult = applyNullValidation(nullColumns, caseClass)(spark)
+      combinedResults = combinedResults.unionByName(nullValidationResult, allowMissingColumns = true)
     }
 
     // Direct Column Validation
     if (validationConfig.contains("direct_column_validation")) {
       val sourceCols = validationConfig("direct_column_validation")("columns_source")
       val targetCols = validationConfig("direct_column_validation")("columns_target")
-      applyDirectColumnValidation(sourceCols, targetCols, transactionSource, caseClass, outputBasePath)(spark)
+      val directValidationResult = applyDirectColumnValidation(sourceCols, targetCols, transactionSource, caseClass)(spark)
+      combinedResults = combinedResults.unionByName(directValidationResult, allowMissingColumns = true)
     }
 
     // Narrative Validation
     if (validationConfig.contains("narrative_validation")) {
       val sourceNarrativeCol = validationConfig("narrative_validation")("source_column")
       val targetNarrativeCol = validationConfig("narrative_validation")("target_column")
-      applyNarrativeValidation(sourceNarrativeCol, targetNarrativeCol, transactionSource, caseClass, outputBasePath)(spark)
+      val narrativeValidationResult = applyNarrativeValidation(sourceNarrativeCol, targetNarrativeCol, transactionSource, caseClass)(spark)
+      combinedResults = combinedResults.unionByName(narrativeValidationResult, allowMissingColumns = true)
     }
 
     // Amount Local Validation
     if (validationConfig.contains("amount_local_validation")) {
       val sourceAmountCol = validationConfig("amount_local_validation")("source_column")
       val targetAmountCol = validationConfig("amount_local_validation")("target_column")
-      applyAmountLocalValidation(sourceAmountCol, targetAmountCol, transactionSource, caseClass, outputBasePath)(spark)
+      val amountLocalValidationResult = applyAmountLocalValidation(sourceAmountCol, targetAmountCol, transactionSource, caseClass)(spark)
+      combinedResults = combinedResults.unionByName(amountLocalValidationResult, allowMissingColumns = true)
     }
 
     // Transaction Country ISO3 Validation
     if (validationConfig.contains("transaction_country_iso3_validation")) {
       val sourceCountryCol = validationConfig("transaction_country_iso3_validation")("source_column")
       val targetCountryCol = validationConfig("transaction_country_iso3_validation")("target_column")
-      applyTransactionCountryISO3Validation(sourceCountryCol, targetCountryCol, transactionSource, caseClass, outputBasePath)(spark)
+      val countryIsoValidationResult = applyTransactionCountryISO3Validation(sourceCountryCol, targetCountryCol, transactionSource, caseClass)(spark)
+      combinedResults = combinedResults.unionByName(countryIsoValidationResult, allowMissingColumns = true)
     }
+
+    // Write the combined result to S3 as a single Parquet file
+    val combinedOutputPath = s"${outputBasePath}/combined_validation_output/"
+    combinedResults.write.mode("overwrite").parquet(combinedOutputPath)
 
     // Commit the Glue job to mark it as completed
     Job.commit()
@@ -106,11 +118,9 @@ object DynamicCaseClass {
 
     config.filterNot(line => line.trim.isEmpty || line.trim.startsWith("#")).foreach { line =>
       if (line.startsWith("[") && line.endsWith("]")) {
-        // Section header (e.g., [null_validation])
         currentSection = line.substring(1, line.length - 1).trim
         validationConfig += (currentSection -> Map())
       } else {
-        // Key-value pair inside the section
         val keyValue = line.split("=").map(_.trim)
         if (keyValue.length == 2 && currentSection.nonEmpty) {
           val currentValues = validationConfig(currentSection)
@@ -129,17 +139,14 @@ object DynamicCaseClass {
   // =======================
 
   // Null Value Validation
-  def applyNullValidation(columns: String, caseClass: DataFrame, outputBasePath: String)(implicit spark: SparkSession): Unit = {
+  def applyNullValidation(columns: String, caseClass: DataFrame)(implicit spark: SparkSession): DataFrame = {
     import spark.implicits._
-
     val nullColumns = columns.split(",").map(_.trim).toSeq  // Convert Array to Seq
-    val nullData = caseClass.select(nullColumns.map(col): _*).distinct()
-    val nullValidationOutputPath = s"${outputBasePath}/null_validation/"
-    nullData.write.mode("overwrite").parquet(nullValidationOutputPath)
+    caseClass.select(nullColumns.map(col): _*).distinct().withColumn("ValidationType", lit("Null Validation"))
   }
 
   // Direct Column Validation with missing columns handling
-  def applyDirectColumnValidation(sourceCols: String, targetCols: String, transactionSource: DataFrame, caseClass: DataFrame, outputBasePath: String)(implicit spark: SparkSession): Unit = {
+  def applyDirectColumnValidation(sourceCols: String, targetCols: String, transactionSource: DataFrame, caseClass: DataFrame)(implicit spark: SparkSession): DataFrame = {
     import spark.implicits._
 
     val sourceColumns = sourceCols.split(",").map(_.trim).toSeq // Convert Array to Seq
@@ -149,6 +156,7 @@ object DynamicCaseClass {
 
     if (existingSourceColumns.isEmpty || existingTargetColumns.isEmpty) {
       logger.warn(s"No valid columns left for comparison after filtering missing columns.")
+      spark.createDataFrame(spark.sparkContext.emptyRDD[Row], caseClass.schema) // Return empty DataFrame if no columns are valid
     } else {
       val sourceDirectData = transactionSource.select(existingSourceColumns.map(col): _*)
       val targetDirectData = caseClass.select(existingTargetColumns.map(col): _*)
@@ -156,16 +164,13 @@ object DynamicCaseClass {
       val directSourceToTargetDiff = sourceDirectData.exceptAll(targetDirectData)
       val directTargetToSourceDiff = targetDirectData.exceptAll(sourceDirectData)
 
-      val directOutputPathSourceToTarget = s"${outputBasePath}/direct_column_validation/source_to_target/"
-      val directOutputPathTargetToSource = s"${outputBasePath}/direct_column_validation/target_to_source/"
-
-      directSourceToTargetDiff.write.mode("overwrite").parquet(directOutputPathSourceToTarget)
-      directTargetToSourceDiff.write.mode("overwrite").parquet(directOutputPathTargetToSource)
+      directSourceToTargetDiff.withColumn("ValidationType", lit("Direct Source-to-Target Validation"))
+        .unionByName(directTargetToSourceDiff.withColumn("ValidationType", lit("Direct Target-to-Source Validation")), allowMissingColumns = true)
     }
   }
 
   // Narrative Validation
-  def applyNarrativeValidation(sourceNarrativeCol: String, targetNarrativeCol: String, transactionSource: DataFrame, caseClass: DataFrame, outputBasePath: String)(implicit spark: SparkSession): Unit = {
+  def applyNarrativeValidation(sourceNarrativeCol: String, targetNarrativeCol: String, transactionSource: DataFrame, caseClass: DataFrame)(implicit spark: SparkSession): DataFrame = {
     import spark.implicits._
 
     val sourceNarrativeData = transactionSource.select(col("TRANSACTION_ID"), col(sourceNarrativeCol))
@@ -174,15 +179,12 @@ object DynamicCaseClass {
     val narrativeSourceToTargetDiff = sourceNarrativeData.exceptAll(targetNarrativeData)
     val narrativeTargetToSourceDiff = targetNarrativeData.exceptAll(sourceNarrativeData)
 
-    val narrativeOutputPathSourceToTarget = s"${outputBasePath}/narrative_validation/source_to_target/"
-    val narrativeOutputPathTargetToSource = s"${outputBasePath}/narrative_validation/target_to_source/"
-
-    narrativeSourceToTargetDiff.write.mode("overwrite").parquet(narrativeOutputPathSourceToTarget)
-    narrativeTargetToSourceDiff.write.mode("overwrite").parquet(narrativeOutputPathTargetToSource)
+    narrativeSourceToTargetDiff.withColumn("ValidationType", lit("Narrative Source-to-Target Validation"))
+      .unionByName(narrativeTargetToSourceDiff.withColumn("ValidationType", lit("Narrative Target-to-Source Validation")), allowMissingColumns = true)
   }
 
   // Amount Local Validation
-  def applyAmountLocalValidation(sourceAmountCol: String, targetAmountCol: String, transactionSource: DataFrame, caseClass: DataFrame, outputBasePath: String)(implicit spark: SparkSession): Unit = {
+  def applyAmountLocalValidation(sourceAmountCol: String, targetAmountCol: String, transactionSource: DataFrame, caseClass: DataFrame)(implicit spark: SparkSession): DataFrame = {
     import spark.implicits._
 
     val sourceAmountData = transactionSource.select(col("TRANSACTION_ID"), col(sourceAmountCol))
@@ -191,15 +193,12 @@ object DynamicCaseClass {
     val amountLocalSourceToTargetDiff = sourceAmountData.exceptAll(targetAmountData)
     val amountLocalTargetToSourceDiff = targetAmountData.exceptAll(sourceAmountData)
 
-    val amountLocalOutputPathSourceToTarget = s"${outputBasePath}/amountLocal_validation/source_to_target/"
-    val amountLocalOutputPathTargetToSource = s"${outputBasePath}/amountLocal_validation/target_to_source/"
-
-    amountLocalSourceToTargetDiff.write.mode("overwrite").parquet(amountLocalOutputPathSourceToTarget)
-    amountLocalTargetToSourceDiff.write.mode("overwrite").parquet(amountLocalOutputPathTargetToSource)
+    amountLocalSourceToTargetDiff.withColumn("ValidationType", lit("Amount Local Source-to-Target Validation"))
+      .unionByName(amountLocalTargetToSourceDiff.withColumn("ValidationType", lit("Amount Local Target-to-Source Validation")), allowMissingColumns = true)
   }
 
   // Transaction Country ISO3 Validation
-  def applyTransactionCountryISO3Validation(sourceCountryCol: String, targetCountryCol: String, transactionSource: DataFrame, caseClass: DataFrame, outputBasePath: String)(implicit spark: SparkSession): Unit = {
+  def applyTransactionCountryISO3Validation(sourceCountryCol: String, targetCountryCol: String, transactionSource: DataFrame, caseClass: DataFrame)(implicit spark: SparkSession): DataFrame = {
     import spark.implicits._
 
     val mappingUDF = udf((input: String) => Map(
@@ -212,11 +211,8 @@ object DynamicCaseClass {
     val countryIsoSourceToTargetDiff = sourceTransactionCountry.select(col("transactionCountryIso3Mapped")).exceptAll(targetTransactionCountry)
     val countryIsoTargetToSourceDiff = targetTransactionCountry.exceptAll(sourceTransactionCountry.select(col("transactionCountryIso3Mapped")))
 
-    val countryIso3OutputPathSourceToTarget = s"${outputBasePath}/transactionCountryISO3_validation/source_to_target/"
-    val countryIso3OutputPathTargetToSource = s"${outputBasePath}/transactionCountryISO3_validation/target_to_source/"
-
-    countryIsoSourceToTargetDiff.write.mode("overwrite").parquet(countryIso3OutputPathSourceToTarget)
-    countryIsoTargetToSourceDiff.write.mode("overwrite").parquet(countryIso3OutputPathTargetToSource)
+    countryIsoSourceToTargetDiff.withColumn("ValidationType", lit("Transaction Country ISO3 Source-to-Target Validation"))
+      .unionByName(countryIsoTargetToSourceDiff.withColumn("ValidationType", lit("Transaction Country ISO3 Target-to-Source Validation")), allowMissingColumns = true)
   }
 
   // =======================
@@ -240,7 +236,6 @@ object DynamicCaseClass {
       existingSourceColumns.contains(sourceCol) && existingTargetColumns.contains(targetCol)
     }
 
-    // Return the valid columns for both source and target
     (validPairs.map(_._1), validPairs.map(_._2))
   }
 
