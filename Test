@@ -1,53 +1,273 @@
-def applyNullValidation(columns: String, caseClass: DataFrame)(implicit spark: SparkSession): DataFrame = {
+import com.amazonaws.services.glue.GlueContext
+import com.amazonaws.services.glue.util.Job
+import org.apache.spark.SparkContext
+import org.apache.spark.sql.{DataFrame, SparkSession, Row}
+import org.apache.spark.sql.functions._
+import org.apache.log4j.Logger
+import com.amazonaws.services.glue.util.GlueArgParser
+
+object DynamicCaseClass {
+
+  // Initialize logger globally
+  val logger: Logger = Logger.getLogger(this.getClass.getName)
+
+  def main(sysArgs: Array[String]): Unit = {
+    // Initialize SparkSession
+    val spark: SparkSession = SparkSession.builder().getOrCreate()
+
+    val glueContext: GlueContext = new GlueContext(spark.sparkContext)
+
+    // Use spark.implicits instead of sparkSession.implicits
     import spark.implicits._
 
-    // Split the columns from config
-    val nullColumns = columns.split(",").map(_.trim).toSeq
+    // Get Glue job parameters for config paths
+    val args = GlueArgParser.getResolvedOptions(sysArgs, Seq("s3PathConfig", "s3ValidationConfig").toArray)
+    val s3PathConfig = args("s3PathConfig")
+    val s3ValidationConfig = args("s3ValidationConfig")
 
-    // Filter exact matching columns
-    val existingNullColumns = filterExistingColumns(caseClass, nullColumns)
+    // 1. Read and parse the Path Config file (S3)
+    val pathConfig = readPathConfig(spark.read.textFile(s3PathConfig).collect())
 
-    if (existingNullColumns.isEmpty) {
-        logger.warn("No valid columns for null validation.")
-        return spark.createDataFrame(spark.sparkContext.emptyRDD[Row], caseClass.schema) // Return empty DataFrame
+    // 2. Read and parse the Validation Config file (S3)
+    val validationConfig = parseValidationConfig(spark.read.textFile(s3ValidationConfig).collect())
+
+    // Extract paths from the pathConfig map
+    val inputSourcePath = pathConfig.getOrElse("inputSourcePath", "")
+    val inputTargetPath = pathConfig.getOrElse("inputTargetPath", "")
+    val outputBasePath = pathConfig.getOrElse("outputBasePath", "")
+
+    // Load source and target data
+    val transactionSource: DataFrame = spark.read.parquet(inputSourcePath)
+    val caseClass: DataFrame = spark.read.parquet(inputTargetPath)
+
+    // =======================
+    // Combine Results from all Validations
+    // =======================
+
+    // Initialize an empty DataFrame for combining all validation results
+    var combinedResults: DataFrame = spark.createDataFrame(spark.sparkContext.emptyRDD[Row], caseClass.schema)
+
+    // Null Validation
+    if (validationConfig.contains("null_validation")) {
+      val nullColumns = validationConfig("null_validation")("columns")
+      val nullValidationResult = applyNullValidation(nullColumns, caseClass)(spark)
+      combinedResults = combinedResults.unionByName(nullValidationResult, allowMissingColumns = true)
     }
 
-    // Select only the exact null columns
-    val nullData = caseClass.select(existingNullColumns.map(col): _*).distinct()
+    // Direct Column Validation
+    if (validationConfig.contains("direct_column_validation")) {
+      val sourceCols = validationConfig("direct_column_validation")("columns_source")
+      val targetCols = validationConfig("direct_column_validation")("columns_target")
+      val directValidationResult = applyDirectColumnValidation(sourceCols, targetCols, transactionSource, caseClass)(spark)
+      combinedResults = combinedResults.unionByName(directValidationResult, allowMissingColumns = true)
+    }
 
-    logger.info(s"Null Columns Selected: ${existingNullColumns.mkString(", ")}")
-    nullData.withColumn("ValidationType", lit("Null Validation"))
-}
+    // Narrative Validation
+    if (validationConfig.contains("narrative_validation")) {
+      val sourceNarrativeCol = validationConfig("narrative_validation")("source_column")
+      val targetNarrativeCol = validationConfig("narrative_validation")("target_column")
+      val narrativeValidationResult = applyNarrativeValidation(sourceNarrativeCol, targetNarrativeCol, transactionSource, caseClass)(spark)
+      combinedResults = combinedResults.unionByName(narrativeValidationResult, allowMissingColumns = true)
+    }
 
-def applyDirectColumnValidation(sourceCols: String, targetCols: String, transactionSource: DataFrame, caseClass: DataFrame)(implicit spark: SparkSession): DataFrame = {
+    // Amount Local Validation
+    if (validationConfig.contains("amount_local_validation")) {
+      val sourceAmountCol = validationConfig("amount_local_validation")("source_column")
+      val targetAmountCol = validationConfig("amount_local_validation")("target_column")
+      val amountLocalValidationResult = applyAmountLocalValidation(sourceAmountCol, targetAmountCol, transactionSource, caseClass)(spark)
+      combinedResults = combinedResults.unionByName(amountLocalValidationResult, allowMissingColumns = true)
+    }
+
+    // Transaction Country ISO3 Validation
+    if (validationConfig.contains("transaction_country_iso3_validation")) {
+      val sourceCountryCol = validationConfig("transaction_country_iso3_validation")("source_column")
+      val targetCountryCol = validationConfig("transaction_country_iso3_validation")("target_column")
+      val countryIsoValidationResult = applyTransactionCountryISO3Validation(sourceCountryCol, targetCountryCol, transactionSource, caseClass)(spark)
+      combinedResults = combinedResults.unionByName(countryIsoValidationResult, allowMissingColumns = true)
+    }
+
+    // Write the combined result to S3 as a single Parquet file
+    val combinedOutputPath = s"${outputBasePath}/combined_validation_output/"
+    combinedResults.write.mode("overwrite").parquet(combinedOutputPath)
+
+    // Commit the Glue job to mark it as completed
+    Job.commit()
+  }
+
+  // =======================
+  // Helper Functions for Config Parsing
+  // =======================
+
+  // Function to read and parse path configuration
+  def readPathConfig(config: Array[String]): Map[String, String] = {
+    config.filterNot(line => line.trim.isEmpty || line.trim.startsWith("#")).flatMap { line =>
+      line.split("=").map(_.trim) match {
+        case Array(key, value) if key.nonEmpty && value.nonEmpty =>
+          Some(key -> value)
+        case _ =>
+          logger.warn(s"Invalid line in path config: $line")
+          None
+      }
+    }.toMap
+  }
+
+  // Function to read and parse validation configuration
+  def parseValidationConfig(config: Array[String]): Map[String, Map[String, String]] = {
+    var currentSection: String = ""
+    var validationConfig: Map[String, Map[String, String]] = Map()
+
+    config.filterNot(line => line.trim.isEmpty || line.trim.startsWith("#")).foreach { line =>
+      if (line.startsWith("[") && line.endsWith("]")) {
+        currentSection = line.substring(1, line.length - 1).trim
+        validationConfig += (currentSection -> Map())
+      } else {
+        val keyValue = line.split("=").map(_.trim)
+        if (keyValue.length == 2 && currentSection.nonEmpty) {
+          val currentValues = validationConfig(currentSection)
+          validationConfig += (currentSection -> (currentValues + (keyValue(0) -> keyValue(1))))
+        } else {
+          logger.warn(s"Invalid line in validation config: $line")
+        }
+      }
+    }
+
+    validationConfig
+  }
+
+  // =======================
+  // Validation Functions
+  // =======================
+
+  // Null Value Validation
+  def applyNullValidation(columns: String, caseClass: DataFrame)(implicit spark: SparkSession): DataFrame = {
     import spark.implicits._
+    val nullColumns = columns.split(",").map(_.trim).toSeq
+    val filteredColumns = nullColumns.filter(col => caseClass.columns.contains(col)) // Strict filtering
+    caseClass.select(filteredColumns.map(col): _*).distinct().withColumn("ValidationType", lit("Null Validation"))
+  }
 
-    // Split the columns from config
+  // Direct Column Validation with missing columns handling and strict filtering
+  def applyDirectColumnValidation(sourceCols: String, targetCols: String, transactionSource: DataFrame, caseClass: DataFrame)(implicit spark: SparkSession): DataFrame = {
+    import spark.implicits._
     val sourceColumns = sourceCols.split(",").map(_.trim).toSeq
     val targetColumns = targetCols.split(",").map(_.trim).toSeq
 
-    // Filter exact matching columns
     val (existingSourceColumns, existingTargetColumns) = filterExistingColumnPairs(sourceColumns, targetColumns, transactionSource, caseClass)
 
     if (existingSourceColumns.isEmpty || existingTargetColumns.isEmpty) {
-        logger.warn("No valid columns left for direct column validation.")
-        return spark.createDataFrame(spark.sparkContext.emptyRDD[Row], caseClass.schema) // Return empty DataFrame
+      logger.warn(s"No valid columns left for comparison after filtering missing columns.")
+      spark.createDataFrame(spark.sparkContext.emptyRDD[Row], caseClass.schema) // Return empty DataFrame if no columns are valid
+    } else {
+      val sourceDirectData = transactionSource.select(existingSourceColumns.map(col): _*)
+      val targetDirectData = caseClass.select(existingTargetColumns.map(col): _*)
+
+      val directSourceToTargetDiff = sourceDirectData.exceptAll(targetDirectData)
+      val directTargetToSourceDiff = targetDirectData.exceptAll(sourceDirectData)
+
+      directSourceToTargetDiff.withColumn("ValidationType", lit("Direct Source-to-Target Validation"))
+        .unionByName(directTargetToSourceDiff.withColumn("ValidationType", lit("Direct Target-to-Source Validation")), allowMissingColumns = true)
+    }
+  }
+
+  // Narrative Validation with strict filtering
+  def applyNarrativeValidation(sourceNarrativeCol: String, targetNarrativeCol: String, transactionSource: DataFrame, caseClass: DataFrame)(implicit spark: SparkSession): DataFrame = {
+    import spark.implicits._
+
+    val filteredSourceCol = sourceNarrativeCol.split(",").map(_.trim).filter(transactionSource.columns.contains).headOption.getOrElse("")
+    val filteredTargetCol = targetNarrativeCol.split(",").map(_.trim).filter(caseClass.columns.contains).headOption.getOrElse("")
+
+    if (filteredSourceCol.isEmpty || filteredTargetCol.isEmpty) {
+      logger.warn(s"One or both narrative columns are missing. Skipping narrative validation.")
+      spark.createDataFrame(spark.sparkContext.emptyRDD[Row], caseClass.schema) // Return empty DataFrame if columns are missing
+    } else {
+      val sourceNarrativeData = transactionSource.select(col("TRANSACTION_ID"), col(filteredSourceCol))
+      val targetNarrativeData =
+
+ caseClass.select(col("transactionid"), col(filteredTargetCol))
+
+      val narrativeSourceToTargetDiff = sourceNarrativeData.exceptAll(targetNarrativeData)
+      val narrativeTargetToSourceDiff = targetNarrativeData.exceptAll(sourceNarrativeData)
+
+      narrativeSourceToTargetDiff.withColumn("ValidationType", lit("Narrative Source-to-Target Validation"))
+        .unionByName(narrativeTargetToSourceDiff.withColumn("ValidationType", lit("Narrative Target-to-Source Validation")), allowMissingColumns = true)
+    }
+  }
+
+  // Amount Local Validation with strict filtering
+  def applyAmountLocalValidation(sourceAmountCol: String, targetAmountCol: String, transactionSource: DataFrame, caseClass: DataFrame)(implicit spark: SparkSession): DataFrame = {
+    import spark.implicits._
+
+    val filteredSourceCol = sourceAmountCol.split(",").map(_.trim).filter(transactionSource.columns.contains).headOption.getOrElse("")
+    val filteredTargetCol = targetAmountCol.split(",").map(_.trim).filter(caseClass.columns.contains).headOption.getOrElse("")
+
+    if (filteredSourceCol.isEmpty || filteredTargetCol.isEmpty) {
+      logger.warn(s"One or both amount local columns are missing. Skipping amount local validation.")
+      spark.createDataFrame(spark.sparkContext.emptyRDD[Row], caseClass.schema) // Return empty DataFrame if columns are missing
+    } else {
+      val sourceAmountData = transactionSource.select(col("TRANSACTION_ID"), col(filteredSourceCol))
+      val targetAmountData = caseClass.select(col("transactionid"), col(filteredTargetCol))
+
+      val amountLocalSourceToTargetDiff = sourceAmountData.exceptAll(targetAmountData)
+      val amountLocalTargetToSourceDiff = targetAmountData.exceptAll(sourceAmountData)
+
+      amountLocalSourceToTargetDiff.withColumn("ValidationType", lit("Amount Local Source-to-Target Validation"))
+        .unionByName(amountLocalTargetToSourceDiff.withColumn("ValidationType", lit("Amount Local Target-to-Source Validation")), allowMissingColumns = true)
+    }
+  }
+
+  // Transaction Country ISO3 Validation with strict filtering
+  def applyTransactionCountryISO3Validation(sourceCountryCol: String, targetCountryCol: String, transactionSource: DataFrame, caseClass: DataFrame)(implicit spark: SparkSession): DataFrame = {
+    import spark.implicits._
+
+    val filteredSourceCol = sourceCountryCol.split(",").map(_.trim).filter(transactionSource.columns.contains).headOption.getOrElse("")
+    val filteredTargetCol = targetCountryCol.split(",").map(_.trim).filter(caseClass.columns.contains).headOption.getOrElse("")
+
+    if (filteredSourceCol.isEmpty || filteredTargetCol.isEmpty) {
+      logger.warn(s"One or both transaction country ISO3 columns are missing. Skipping transaction country ISO3 validation.")
+      spark.createDataFrame(spark.sparkContext.emptyRDD[Row], caseClass.schema) // Return empty DataFrame if columns are missing
+    } else {
+      val mappingUDF = udf((input: String) => Map(
+        "AD" -> "AND", "AE" -> "ARE", "AF" -> "AFG", "AG" -> "ATG", "AI" -> "AIA"
+      ).getOrElse(input, input))
+
+      val sourceTransactionCountry = transactionSource.withColumn("transactionCountryIso3Mapped", mappingUDF(col(filteredSourceCol)))
+      val targetTransactionCountry = caseClass.select(col(filteredTargetCol))
+
+      val countryIsoSourceToTargetDiff = sourceTransactionCountry.select(col("transactionCountryIso3Mapped")).exceptAll(targetTransactionCountry)
+      val countryIsoTargetToSourceDiff = targetTransactionCountry.exceptAll(sourceTransactionCountry.select(col("transactionCountryIso3Mapped")))
+
+      countryIsoSourceToTargetDiff.withColumn("ValidationType", lit("Transaction Country ISO3 Source-to-Target Validation"))
+        .unionByName(countryIsoTargetToSourceDiff.withColumn("ValidationType", lit("Transaction Country ISO3 Target-to-Source Validation")), allowMissingColumns = true)
+    }
+  }
+
+  // =======================
+  // Helper Functions
+  // =======================
+
+  // Helper function to filter out missing columns in source and target
+  def filterExistingColumnPairs(sourceColumns: Seq[String], targetColumns: Seq[String], transactionSource: DataFrame, caseClass: DataFrame): (Seq[String], Seq[String]) = {
+    val existingSourceColumns = filterExistingColumns(transactionSource, sourceColumns)
+    val existingTargetColumns = filterExistingColumns(caseClass, targetColumns)
+
+    // Log any missing columns
+    sourceColumns.zip(targetColumns).foreach { case (sourceCol, targetCol) =>
+      if (!existingSourceColumns.contains(sourceCol) || !existingTargetColumns.contains(targetCol)) {
+        logger.warn(s"Skipping comparison for columns: $sourceCol and $targetCol because one or both are missing.")
+      }
     }
 
-    // Select only the exact columns for validation
-    val sourceDirectData = transactionSource.select(existingSourceColumns.map(col): _*)
-    val targetDirectData = caseClass.select(existingTargetColumns.map(col): _*)
+    // Filter out the missing columns from both lists
+    val validPairs = sourceColumns.zip(targetColumns).filter { case (sourceCol, targetCol) =>
+      existingSourceColumns.contains(sourceCol) && existingTargetColumns.contains(targetCol)
+    }
 
-    logger.info(s"Source Columns Selected: ${existingSourceColumns.mkString(", ")}")
-    logger.info(s"Target Columns Selected: ${existingTargetColumns.mkString(", ")}")
+    (validPairs.map(_._1), validPairs.map(_._2))
+  }
 
-    // Perform validation
-    val directSourceToTargetDiff = sourceDirectData.exceptAll(targetDirectData)
-    val directTargetToSourceDiff = targetDirectData.exceptAll(sourceDirectData)
-
-    // Combine results
-    val combinedResult = directSourceToTargetDiff.withColumn("ValidationType", lit("Source-to-Target Validation"))
-      .unionByName(directTargetToSourceDiff.withColumn("ValidationType", lit("Target-to-Source Validation")), allowMissingColumns = true)
-
-    combinedResult
+  // Helper function to filter out missing columns in general
+  def filterExistingColumns(df: DataFrame, columns: Seq[String]): Seq[String] = {
+    val existingColumns = df.columns.toSet
+    columns.filter(existingColumns.contains)
+  }
 }
