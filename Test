@@ -4,6 +4,7 @@ def applyDirectColumnValidation(sourceCols: String, targetCols: String, transact
         logger.warn("TRANSACTION_ID is missing in either source or target. Skipping direct column validation.")
         return spark.createDataFrame(spark.sparkContext.emptyRDD[Row], caseClass.schema) // Return empty DataFrame
     }
+
     val sourceColumns = sourceCols.split(",").map(_.trim).toSeq
     val targetColumns = targetCols.split(",").map(_.trim).toSeq
 
@@ -19,7 +20,9 @@ def applyDirectColumnValidation(sourceCols: String, targetCols: String, transact
         val directSourceToTargetDiff = sourceDirectData.exceptAll(targetDirectData)
         val directTargetToSourceDiff = targetDirectData.exceptAll(sourceDirectData)
 
-        // Combine both results with proper labeling
+        logger.info(s"Source to Target Difference: ${directSourceToTargetDiff.count()} rows")
+        logger.info(s"Target to Source Difference: ${directTargetToSourceDiff.count()} rows")
+
         val combinedResult = directSourceToTargetDiff.withColumn("ValidationType", lit("Source-to-Target Validation"))
           .unionByName(directTargetToSourceDiff.withColumn("ValidationType", lit("Target-to-Source Validation")), allowMissingColumns = true)
 
@@ -33,10 +36,9 @@ def applyNullValidation(columns: String, caseClass: DataFrame)(implicit spark: S
         logger.warn("TRANSACTION_ID is missing. Skipping null validation.")
         return spark.createDataFrame(spark.sparkContext.emptyRDD[Row], caseClass.schema) // Return empty DataFrame
     }
-    val nullColumns = columns.split(",").map(_.trim).toSeq
 
-    // Filter only exact column matches
-    val exactNullColumns = nullColumns.filter(caseClass.columns.contains)
+    val nullColumns = columns.split(",").map(_.trim).toSeq
+    val exactNullColumns = nullColumns.filter(caseClass.columns.contains) // Filter for exact matches only
 
     if (exactNullColumns.isEmpty) {
         logger.warn("No exact column matches found for null validation.")
