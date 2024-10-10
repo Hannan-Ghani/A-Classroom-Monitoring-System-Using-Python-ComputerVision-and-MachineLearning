@@ -1,49 +1,53 @@
-def applyDirectColumnValidation(sourceCols: String, targetCols: String, transactionSource: DataFrame, caseClass: DataFrame)(implicit spark: SparkSession): DataFrame = {
+def applyNullValidation(columns: String, caseClass: DataFrame)(implicit spark: SparkSession): DataFrame = {
     import spark.implicits._
-    if (!transactionSource.columns.contains("TRANSACTION_ID") || !caseClass.columns.contains("TRANSACTION_ID")) {
-        logger.warn("TRANSACTION_ID is missing in either source or target. Skipping direct column validation.")
+
+    // Split the columns from config
+    val nullColumns = columns.split(",").map(_.trim).toSeq
+
+    // Filter exact matching columns
+    val existingNullColumns = filterExistingColumns(caseClass, nullColumns)
+
+    if (existingNullColumns.isEmpty) {
+        logger.warn("No valid columns for null validation.")
         return spark.createDataFrame(spark.sparkContext.emptyRDD[Row], caseClass.schema) // Return empty DataFrame
     }
 
+    // Select only the exact null columns
+    val nullData = caseClass.select(existingNullColumns.map(col): _*).distinct()
+
+    logger.info(s"Null Columns Selected: ${existingNullColumns.mkString(", ")}")
+    nullData.withColumn("ValidationType", lit("Null Validation"))
+}
+
+def applyDirectColumnValidation(sourceCols: String, targetCols: String, transactionSource: DataFrame, caseClass: DataFrame)(implicit spark: SparkSession): DataFrame = {
+    import spark.implicits._
+
+    // Split the columns from config
     val sourceColumns = sourceCols.split(",").map(_.trim).toSeq
     val targetColumns = targetCols.split(",").map(_.trim).toSeq
 
+    // Filter exact matching columns
     val (existingSourceColumns, existingTargetColumns) = filterExistingColumnPairs(sourceColumns, targetColumns, transactionSource, caseClass)
 
     if (existingSourceColumns.isEmpty || existingTargetColumns.isEmpty) {
-        logger.warn(s"No valid columns left for comparison after filtering missing columns.")
-        return spark.createDataFrame(spark.sparkContext.emptyRDD[Row], caseClass.schema) // Return empty DataFrame if no columns are valid
-    } else {
-        val sourceDirectData = transactionSource.select(existingSourceColumns.map(col): _*)
-        val targetDirectData = caseClass.select(existingTargetColumns.map(col): _*)
-
-        val directSourceToTargetDiff = sourceDirectData.exceptAll(targetDirectData)
-        val directTargetToSourceDiff = targetDirectData.exceptAll(sourceDirectData)
-
-        logger.info(s"Source to Target Difference: ${directSourceToTargetDiff.count()} rows")
-        logger.info(s"Target to Source Difference: ${directTargetToSourceDiff.count()} rows")
-
-        val combinedResult = directSourceToTargetDiff.withColumn("ValidationType", lit("Source-to-Target Validation"))
-          .unionByName(directTargetToSourceDiff.withColumn("ValidationType", lit("Target-to-Source Validation")), allowMissingColumns = true)
-
-        return combinedResult
-    }
-}
-
-def applyNullValidation(columns: String, caseClass: DataFrame)(implicit spark: SparkSession): DataFrame = {
-    import spark.implicits._
-    if (!caseClass.columns.contains("TRANSACTION_ID")) {
-        logger.warn("TRANSACTION_ID is missing. Skipping null validation.")
+        logger.warn("No valid columns left for direct column validation.")
         return spark.createDataFrame(spark.sparkContext.emptyRDD[Row], caseClass.schema) // Return empty DataFrame
     }
 
-    val nullColumns = columns.split(",").map(_.trim).toSeq
-    val exactNullColumns = nullColumns.filter(caseClass.columns.contains) // Filter for exact matches only
+    // Select only the exact columns for validation
+    val sourceDirectData = transactionSource.select(existingSourceColumns.map(col): _*)
+    val targetDirectData = caseClass.select(existingTargetColumns.map(col): _*)
 
-    if (exactNullColumns.isEmpty) {
-        logger.warn("No exact column matches found for null validation.")
-        return spark.createDataFrame(spark.sparkContext.emptyRDD[Row], caseClass.schema) // Return empty DataFrame
-    }
+    logger.info(s"Source Columns Selected: ${existingSourceColumns.mkString(", ")}")
+    logger.info(s"Target Columns Selected: ${existingTargetColumns.mkString(", ")}")
 
-    caseClass.select(exactNullColumns.map(col): _*).distinct().withColumn("ValidationType", lit("Null Validation"))
+    // Perform validation
+    val directSourceToTargetDiff = sourceDirectData.exceptAll(targetDirectData)
+    val directTargetToSourceDiff = targetDirectData.exceptAll(sourceDirectData)
+
+    // Combine results
+    val combinedResult = directSourceToTargetDiff.withColumn("ValidationType", lit("Source-to-Target Validation"))
+      .unionByName(directTargetToSourceDiff.withColumn("ValidationType", lit("Target-to-Source Validation")), allowMissingColumns = true)
+
+    combinedResult
 }
