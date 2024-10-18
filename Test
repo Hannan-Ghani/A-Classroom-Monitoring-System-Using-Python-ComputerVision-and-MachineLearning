@@ -1,0 +1,8 @@
+
+
+	•	CUSTOMER_PATH: 's3://136731789529-fis-raw-data/customer/20240129/raw/parquet/*.parquet'
+	•	PRODUCT_FORTENT_PATH: 's3://136731789529-fis-raw-data/ukl/product/20230719/raw/parquet/'
+	•	PRODUCT_CORE_PATH: 's3://136731789529-fis-raw-data/product/20240129/raw/parquet/*.parquet'
+	•	DOCUMENT_PATH: 's3://136731789529-fis-interim-data/customer/2024-02-01_12-09-00-078/DocumentDataModel/DocumentDataModel.parquet/'
+	•	OUTPUT_PATH: You can choose an output path, e.g., 's3://your-bucket/path/to/output/parquet/'
+
