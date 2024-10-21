@@ -90,71 +90,187 @@ def create_views():
 
 # Scenario 1: Source to Target Comparison (Direct Columns)
 def scenario_1():
-    src_fields1 = spark.sql("""
-        SELECT * 
-        FROM src_fields
-    """)
-    targ_fields1 = spark.sql("""
-        SELECT * 
-        FROM targ_fields
-    """)
+    src_fields1 = spark.sql("SELECT * FROM src_fields")
+    targ_fields1 = spark.sql("SELECT * FROM targ_fields")
     
-    # Specify the columns you want to compare in Scenario 1
-    columns = ['customerUniqueId', 'accountNumber', 'accountKey']  # Example columns
-
-    # Check for missing columns and log them
+    columns = ['customerUniqueId', 'accountNumber', 'accountKey']  # Columns for scenario 1
     valid_columns = check_columns_and_log(src_fields1, targ_fields1, columns, "Scenario 1")
-
-    # Only compare columns that are present in both DataFrames
+    
     src_to_tgt_diff = src_fields1.select(valid_columns).exceptAll(targ_fields1.select(valid_columns))
     tgt_to_src_diff = targ_fields1.select(valid_columns).exceptAll(src_fields1.select(valid_columns))
-
+    
     return src_to_tgt_diff.unionByName(tgt_to_src_diff)
 
 # Scenario 2: Customer Data with Cleansed Account Number
 def scenario_2():
-    src_fields2 = spark.sql("""
-        SELECT * 
-        FROM src_fields
-    """)
-    targ_fields2 = spark.sql("""
-        SELECT * 
-        FROM targ_fields
-    """)
+    src_fields2 = spark.sql("SELECT * FROM src_fields")
+    targ_fields2 = spark.sql("SELECT * FROM targ_fields")
 
-    # Specify columns to compare
-    columns = ['customerUniqueId', 'cleansedAccountNumber', 'accountNumber', 'accountKey']  # Example columns for scenario 2
-
-    # Check for missing columns and log them
+    columns = ['customerUniqueId', 'cleansedAccountNumber', 'accountNumber', 'accountKey']
     valid_columns = check_columns_and_log(src_fields2, targ_fields2, columns, "Scenario 2")
-
-    # Only compare columns that are present in both DataFrames
+    
     src_to_tgt_diff = src_fields2.select(valid_columns).exceptAll(targ_fields2.select(valid_columns))
     tgt_to_src_diff = targ_fields2.select(valid_columns).exceptAll(src_fields2.select(valid_columns))
-
+    
     return src_to_tgt_diff.unionByName(tgt_to_src_diff)
 
 # Scenario 3: Narrative and Transaction Country Comparison
 def scenario_3():
-    src_fields3 = spark.sql("""
-        SELECT * 
-        FROM src_fields
-    """)
-    targ_fields3 = spark.sql("""
-        SELECT * 
-        FROM targ_fields
-    """)
+    src_fields3 = spark.sql("SELECT * FROM src_fields")
+    targ_fields3 = spark.sql("SELECT * FROM targ_fields")
 
-    columns = ['customerUniqueId', 'country', 'currencyCode']  # Example columns for scenario 3
-
+    columns = ['customerUniqueId', 'country', 'currencyCode']
     valid_columns = check_columns_and_log(src_fields3, targ_fields3, columns, "Scenario 3")
-
+    
     src_to_tgt_diff = src_fields3.select(valid_columns).exceptAll(targ_fields3.select(valid_columns))
     tgt_to_src_diff = targ_fields3.select(valid_columns).exceptAll(src_fields3.select(valid_columns))
+    
+    return src_to_tgt_diff.unionByName(tgt_to_src_diff)
+
+# Scenario 4: Line of Business and Non-Operating Entity Comparison
+def scenario_4():
+    src_fields4 = spark.sql("SELECT * FROM src_fields")
+    targ_fields4 = spark.sql("SELECT * FROM targ_fields")
+
+    columns = ['customerUniqueId', 'lineOfBusiness', 'nonOperatingEntity']
+    valid_columns = check_columns_and_log(src_fields4, targ_fields4, columns, "Scenario 4")
+    
+    src_to_tgt_diff = src_fields4.select(valid_columns).exceptAll(targ_fields4.select(valid_columns))
+    tgt_to_src_diff = targ_fields4.select(valid_columns).exceptAll(src_fields4.select(valid_columns))
+    
+    return src_to_tgt_diff.unionByName(tgt_to_src_diff)
+
+# Scenario 5: Last Updated Date Comparison
+def scenario_5():
+    src_fields5 = spark.sql("SELECT * FROM src_fields")
+    targ_fields5 = spark.sql("SELECT * FROM targ_fields")
+
+    columns = ['customerUniqueId', 'lastUpdatedDate']
+    valid_columns = check_columns_and_log(src_fields5, targ_fields5, columns, "Scenario 5")
+    
+    src_to_tgt_diff = src_fields5.select(valid_columns).exceptAll(targ_fields5.select(valid_columns))
+    tgt_to_src_diff = targ_fields5.select(valid_columns).exceptAll(src_fields5.select(valid_columns))
+    
+    return src_to_tgt_diff.unionByName(tgt_to_src_diff)
+
+# Scenario 6: Maturity Date and Non-Operating Entity Comparison
+def scenario_6():
+    src_fields6 = spark.sql("SELECT * FROM src_fields")
+    targ_fields6 = spark.sql("SELECT * FROM targ_fields")
+
+    columns = ['customerUniqueId', 'maturityDate', 'nonOperatingEntity']
+    valid_columns = check_columns_and_log(src_fields6, targ_fields6, columns, "Scenario 6")
+    
+    src_to_tgt_diff = src_fields6.select(valid_columns).exceptAll(targ_fields6.select(valid_columns))
+    tgt_to_src_diff = targ_fields6.select(valid_columns).exceptAll(src_fields6.select(valid_columns))
+    
+    return src_to_tgt_diff.unionByName(tgt_to_src_diff)
+
+# Scenario 7: Legal Entity Comparison
+def scenario_7():
+    src_fields7 = spark.sql("SELECT * FROM src_fields")
+    targ_fields7 = spark.sql("SELECT * FROM targ_fields")
+
+    columns = ['customerUniqueId', 'legal_entity']
+    valid_columns = check_columns_and_log(src_fields7, targ_fields7, columns, "Scenario 7")
+    
+    src_to_tgt_diff = src_fields7.select(valid_columns).exceptAll(targ_fields7.select(valid_columns))
+    tgt_to_src_diff = targ_fields7.select(valid_columns).exceptAll(src_fields7.select(valid_columns))
+    
+    return src_to_tgt_diff.unionByName(tgt_to_src_diff)
+
+# Scenario 8: Credit Limit Comparison
+def scenario_8_credit_limit():
+    src_fields8 = spark.sql("""
+        WITH data5 AS (
+            SELECT DISTINCT customerUniqueId, 
+                            CASE WHEN credit_limit IS NULL THEN 0.0 ELSE credit_limit END as credit_limit
+            FROM src_fields
+        )
+        SELECT customerUniqueId, CAST(credit_limit as DOUBLE) as credit_limit 
+        FROM data5
+    """)
+    targ_fields8 = spark.sql("""
+        SELECT DISTINCT customerUniqueId, creditLimit 
+        FROM targ_fields
+    """)
+    
+    columns = ['customerUniqueId', 'credit_limit']
+    valid_columns = check_columns_and_log(src_fields8, targ_fields8, columns, "Scenario 8")
+
+    src_to_tgt_diff = src_fields8.select(valid_columns).exceptAll(targ_fields8.select(valid_columns))
+    tgt_to_src_diff = targ_fields8.select(valid_columns).exceptAll(src_fields8.select(valid_columns))
 
     return src_to_tgt_diff.unionByName(tgt_to_src_diff)
 
-# Other scenarios follow the same pattern...
+# Scenario 9: Joint Account Comparison
+def scenario_9_joint_account():
+    src_fields9 = spark.sql("""
+        SELECT customerUniqueId, 
+               CASE WHEN joint_account = '1' THEN 'true' 
+                    WHEN joint_account IS NULL THEN NULL 
+                    ELSE 'false' END as jointAccount 
+        FROM src_fields
+    """)
+    targ_fields9 = spark.sql("""
+        SELECT customerUniqueId, CAST(jointAccount AS STRING) as jointAccount 
+        FROM targ_fields
+    """)
+
+    columns = ['customerUniqueId', 'jointAccount']
+    valid_columns = check_columns_and_log(src_fields9, targ_fields9, columns, "Scenario 9")
+
+    src_to_tgt_diff = src_fields9.select(valid_columns).exceptAll(targ_fields9.select(valid_columns))
+    tgt_to_src_diff = targ_fields9.select(valid_columns).exceptAll(src_fields9.select(valid_columns))
+
+    return src_to_tgt_diff.unionByName(tgt_to_src_diff)
+
+# Scenario 10: Sensitive Industry Comparison
+def scenario_10_sensitive_industry():
+    src_fields10 = spark.sql("""
+        SELECT DISTINCT customerUniqueId, 
+                        CASE WHEN sensitive_industry = 'N' THEN 'false' 
+                             ELSE 'true' END as sensitiveIndustry 
+        FROM src_fields
+    """)
+    targ_fields10 = spark.sql("""
+        SELECT customerUniqueId, CAST(sensitiveIndustry AS STRING) as sensitiveIndustry 
+        FROM targ_fields
+    """)
+
+    columns = ['customerUniqueId', 'sensitiveIndustry']
+    valid_columns = check_columns_and_log(src_fields10, targ_fields10, columns, "Scenario 10")
+
+    src_to_tgt_diff = src_fields10.select(valid_columns).exceptAll(targ_fields10.select(valid_columns))
+    tgt_to_src_diff = targ_fields10.select(valid_columns).exceptAll(src_fields10.select(valid_columns))
+
+    return src_to_tgt_diff.unionByName(tgt_to_src_diff)
+
+# Scenario 11: Cold Account Comparison
+def scenario_11_cold_account():
+    src_fields11 = spark.sql("""
+        WITH data4 AS (
+            SELECT customerUniqueId, account_id, 
+                   CASE WHEN (cold_account = 'N' OR cold_account IS NULL) THEN 'false' ELSE 'true' END as cold_account 
+            FROM src_fields
+        )
+        SELECT customerUniqueId, account_id, MAX(cold_account) as coldAccount 
+        FROM data4 
+        GROUP BY customerUniqueId, account_id
+    """)
+    
+    targ_fields11 = spark.sql("""
+        SELECT customerUniqueId, accountNumber, CAST(coldAccount AS STRING) as coldAccount 
+        FROM targ_fields
+    """)
+
+    columns = ['customerUniqueId', 'coldAccount']
+    valid_columns = check_columns_and_log(src_fields11, targ_fields11, columns, "Scenario 11")
+
+    src_to_tgt_diff = src_fields11.select(valid_columns).exceptAll(targ_fields11.select(valid_columns))
+    tgt_to_src_diff = targ_fields11.select(valid_columns).exceptAll(src_fields11.select(valid_columns))
+
+    return src_to_tgt_diff.unionByName(tgt_to_src_diff)
 
 # Combine all scenarios
 def combine_scenarios():
@@ -172,12 +288,26 @@ def combine_scenarios():
     comparison_1 = scenario_1()
     comparison_2 = scenario_2()
     comparison_3 = scenario_3()
-    # Add other scenarios...
+    comparison_4 = scenario_4()
+    comparison_5 = scenario_5()
+    comparison_6 = scenario_6()
+    comparison_7 = scenario_7()
+    comparison_8 = scenario_8_credit_limit()
+    comparison_9 = scenario_9_joint_account()
+    comparison_10 = scenario_10_sensitive_industry()
+    comparison_11 = scenario_11_cold_account()
 
     # Combine all scenario comparisons
     combined_comparisons = comparison_1.unionByName(comparison_2)\
-        .unionByName(comparison_3)
-        # Add other comparisons...
+        .unionByName(comparison_3)\
+        .unionByName(comparison_4)\
+        .unionByName(comparison_5)\
+        .unionByName(comparison_6)\
+        .unionByName(comparison_7)\
+        .unionByName(comparison_8)\
+        .unionByName(comparison_9)\
+        .unionByName(comparison_10)\
+        .unionByName(comparison_11)
     
     # Write the combined result to Parquet
     combined_comparisons.write.mode("overwrite").parquet(args['OUTPUT_PATH'])
