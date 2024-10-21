@@ -1,0 +1,278 @@
+import sys
+from pyspark.context import SparkContext
+from awsglue.context import GlueContext
+from awsglue.job import Job
+from awsglue.utils import getResolvedOptions
+from pyspark.sql.functions import col, regexp_replace, when, explode
+
+# Initialize Glue job and Spark context
+args = getResolvedOptions(sys.argv, ['JOB_NAME', 'CUSTOMER_PATH', 'PRODUCT_FORTENT_PATH', 'PRODUCT_CORE_PATH', 'DOCUMENT_PATH', 'OUTPUT_PATH'])
+sc = SparkContext()
+glueContext = GlueContext(sc)
+spark = glueContext.spark_session
+job = Job(glueContext)
+job.init(args['JOB_NAME'], args)
+
+# Read customer data
+def read_customer_data():
+    a_cus = spark.read.parquet(args['CUSTOMER_PATH'])\
+        .filter("NUM_OF_ACCOUNT >= 0 and (SOURCE_COUNTRY <> 'ZA' Or SOURCE_COUNTRY IS NULL) and customer_key is not null and customer_key not in('', '***', 'TTMAMC-**', 'TMEMA-**', 'TMUK1-**', 'MUK2-**', 'Not Available')")\
+        .withColumn('customerUniqueId', regexp_replace(col('customer_key'), '^-', ''))
+    a_cus.createOrReplaceTempView('a_cus')
+    a_cus.cache()
+    return a_cus
+
+# Read product data
+def read_product_data():
+    Prod_fortent = spark.read.parquet(args['PRODUCT_FORTENT_PATH'])
+    Prod_fortent.createOrReplaceTempView('Prod_fortent')
+    Prod_fortent.cache()
+
+    Prod_core = spark.read.parquet(args['PRODUCT_CORE_PATH'])
+    Prod_core.createOrReplaceTempView('Prod_core')
+    Prod_core.cache()
+
+    # Union operation
+    prodJoin = Prod_core.unionByName(Prod_fortent)
+    prodJoin.createOrReplaceTempView('prodJoin')
+    return prodJoin
+
+# Scenario 1: Source to Target Comparison (Direct Columns)
+def scenario_1():
+    src_fields1 = spark.sql("""
+        SELECT * 
+        FROM src_fields
+    """)
+    targ_fields1 = spark.sql("""
+        SELECT * 
+        FROM targ_fields
+    """)
+    
+    src_to_tgt_diff = src_fields1.exceptAll(targ_fields1)
+    tgt_to_src_diff = targ_fields1.exceptAll(src_fields1)
+    
+    return src_to_tgt_diff.unionByName(tgt_to_src_diff)
+
+# Scenario 2: Customer Data with Cleansed Account Number
+def scenario_2():
+    src_fields2 = spark.sql("""
+        SELECT customerUniqueId, null as cleansedAccountNumber, accountNumber, 
+               accountKey, CASE WHEN companyId = '*' THEN null ELSE companyId END as companyId 
+        FROM src_fields
+    """).dropDuplicates()
+
+    targ_fields2 = spark.sql("""
+        SELECT customerUniqueId, cleansedAccountNumber, accountNumber, accountKey, companyId 
+        FROM targ_fields
+    """).dropDuplicates()
+
+    src_to_tgt_diff = src_fields2.exceptAll(targ_fields2)
+    tgt_to_src_diff = targ_fields2.exceptAll(src_fields2)
+    
+    return src_to_tgt_diff.unionByName(tgt_to_src_diff)
+
+# Scenario 3: Narrative and Transaction Country Comparison
+def scenario_3():
+    src_fields3a = spark.sql("""
+        SELECT customerUniqueId, CASE WHEN country = '*' THEN null ELSE country END as country 
+        FROM src_fields
+    """).dropDuplicates()
+
+    targ_fields3b = spark.sql("""
+        SELECT customerUniqueId, country 
+        FROM targ_fields
+    """).dropDuplicates()
+
+    src_to_tgt_diff = src_fields3a.exceptAll(targ_fields3b)
+    tgt_to_src_diff = targ_fields3b.exceptAll(src_fields3a)
+
+    return src_to_tgt_diff.unionByName(tgt_to_src_diff)
+
+# Scenario 4: Line of Business and Non-Operating Entity Comparison
+def scenario_4():
+    src_fields4 = spark.sql("""
+        SELECT customerUniqueId, lineOfBusiness, null as lineOfBusinessDescription 
+        FROM src_fields
+    """).dropDuplicates()
+
+    targ_fields4 = spark.sql("""
+        SELECT customerUniqueId, lineOfBusiness, lineOfBusinessDescription 
+        FROM targ_fields
+    """).dropDuplicates()
+
+    src_to_tgt_diff = src_fields4.exceptAll(targ_fields4)
+    tgt_to_src_diff = targ_fields4.exceptAll(src_fields4)
+
+    return src_to_tgt_diff.unionByName(tgt_to_src_diff)
+
+# Scenario 5: Last Updated Date Comparison
+def scenario_5():
+    src_fields5 = spark.sql("""
+        SELECT customerUniqueId, CAST(update_tms AS DATE) as lastUpdatedDate 
+        FROM src_fields
+    """).dropDuplicates()
+
+    targ_fields5 = spark.sql("""
+        SELECT customerUniqueId, lastUpdatedDate 
+        FROM targ_fields
+    """).dropDuplicates()
+
+    src_to_tgt_diff = src_fields5.exceptAll(targ_fields5)
+    tgt_to_src_diff = targ_fields5.exceptAll(src_fields5)
+
+    return src_to_tgt_diff.unionByName(tgt_to_src_diff)
+
+# Scenario 6: Maturity Date and Non-Operating Entity
+def scenario_6():
+    src_fields6 = spark.sql("""
+        SELECT customerUniqueId, CAST(maturityDate AS DATE) as maturityDate, 
+               CASE WHEN nonOperatingEntity IN ('T', 'true', 'TRUE') THEN 'true' ELSE 'false' END as nonOperatingEntity 
+        FROM src_fields
+    """).dropDuplicates()
+
+    targ_fields6 = spark.sql("""
+        SELECT customerUniqueId, maturityDate, CAST(nonOperatingEntity AS STRING) as nonOperatingEntity 
+        FROM targ_fields
+    """).dropDuplicates()
+
+    src_to_tgt_diff = src_fields6.exceptAll(targ_fields6)
+    tgt_to_src_diff = targ_fields6.exceptAll(src_fields6)
+
+    return src_to_tgt_diff.unionByName(tgt_to_src_diff)
+
+# Scenario 7: Legal Entity Comparison
+def scenario_7():
+    src_fields7 = spark.sql("""
+        SELECT customerUniqueId, legal_entity 
+        FROM src_fields
+    """).dropDuplicates()
+
+    targ_fields7 = spark.sql("""
+        SELECT customerUniqueId, legalEntity 
+        FROM targ_fields
+    """).dropDuplicates()
+
+    src_to_tgt_diff = src_fields7.exceptAll(targ_fields7)
+    tgt_to_src_diff = targ_fields7.exceptAll(src_fields7)
+
+    return src_to_tgt_diff.unionByName(tgt_to_src_diff)
+
+# Scenario 8: Credit Limit Comparison
+def scenario_8_credit_limit():
+    src_fields8 = spark.sql("""
+        WITH data5 AS (
+            SELECT DISTINCT customerUniqueId, 
+                            CASE WHEN credit_limit IS NULL THEN 0.0 ELSE credit_limit END as credit_limit
+            FROM src_fields
+        )
+        SELECT customerUniqueId, CAST(credit_limit as DOUBLE) as credit_limit 
+        FROM data5
+    """)
+    targ_fields8 = spark.sql("""
+        SELECT DISTINCT customerUniqueId, creditLimit 
+        FROM targ_fields
+    """)
+    
+    src_to_tgt_diff = src_fields8.exceptAll(targ_fields8)
+    tgt_to_src_diff = targ_fields8.exceptAll(src_fields8)
+
+    return src_to_tgt_diff.unionByName(tgt_to_src_diff)
+
+# Scenario 9: Joint Account Comparison
+def scenario_9_joint_account():
+    src_fields9 = spark.sql("""
+        SELECT customerUniqueId, 
+               CASE WHEN joint_account = '1' THEN 'true' 
+                    WHEN joint_account IS NULL THEN NULL 
+                    ELSE 'false' END as jointAccount 
+        FROM src_fields
+    """)
+    targ_fields9 = spark.sql("""
+        SELECT customerUniqueId, CAST(jointAccount AS STRING) as jointAccount 
+        FROM targ_fields
+    """)
+    
+    src_to_tgt_diff = src_fields9.exceptAll(targ_fields9)
+    tgt_to_src_diff = targ_fields9.exceptAll(src_fields9)
+
+    return src_to_tgt_diff.unionByName(tgt_to_src_diff)
+
+# Scenario 10: Sensitive Industry Comparison
+def scenario_10_sensitive_industry():
+    src_fields10 = spark.sql("""
+        SELECT DISTINCT customerUniqueId, 
+                        CASE WHEN sensitive_industry = 'N' THEN 'false' 
+                             ELSE 'true' END as sensitiveIndustry 
+        FROM src_fields
+    """).dropDuplicates()
+
+    targ_fields10 = spark.sql("""
+        SELECT customerUniqueId, CAST(sensitiveIndustry AS STRING) as sensitiveIndustry 
+        FROM targ_fields
+    """).dropDuplicates()
+
+    src_to_tgt_diff = src_fields10.exceptAll(targ_fields10)
+    tgt_to_src_diff = targ_fields10.exceptAll(src_fields10)
+
+    return src_to_tgt_diff.unionByName(tgt_to_src_diff)
+
+# Scenario 11: Cold Account Comparison
+def scenario_11_cold_account():
+    src_fields11 = spark.sql("""
+        WITH data4 AS (
+            SELECT customerUniqueId, account_id, 
+                   CASE WHEN (cold_account = 'N' OR cold_account IS NULL) THEN 'false' ELSE 'true' END as cold_account 
+            FROM src_fields
+        )
+        SELECT customerUniqueId, account_id, MAX(cold_account) as coldAccount 
+        FROM data4 
+        GROUP BY customerUniqueId, account_id
+    """)
+    
+    targ_fields11 = spark.sql("""
+        SELECT customerUniqueId, accountNumber, CAST(coldAccount AS STRING) as coldAccount 
+        FROM targ_fields
+    """)
+
+
+    
+    src_to_tgt_diff = src_fields11.exceptAll(targ_fields11)
+    tgt_to_src_diff = targ_fields11.exceptAll(src_fields11)
+
+    return src_to_tgt_diff.unionByName(tgt_to_src_diff)
+
+# Combine all scenarios
+def combine_scenarios():
+    a_cus = read_customer_data()
+    prod_qtx = read_product_data()
+
+    comparison_1 = scenario_1()
+    comparison_2 = scenario_2()
+    comparison_3 = scenario_3()
+    comparison_4 = scenario_4()
+    comparison_5 = scenario_5()
+    comparison_6 = scenario_6()
+    comparison_7 = scenario_7()
+    comparison_8 = scenario_8_credit_limit()
+    comparison_9 = scenario_9_joint_account()
+    comparison_10 = scenario_10_sensitive_industry()
+    comparison_11 = scenario_11_cold_account()
+
+    combined_comparisons = comparison_1.unionByName(comparison_2)\
+        .unionByName(comparison_3)\
+        .unionByName(comparison_4)\
+        .unionByName(comparison_5)\
+        .unionByName(comparison_6)\
+        .unionByName(comparison_7)\
+        .unionByName(comparison_8)\
+        .unionByName(comparison_9)\
+        .unionByName(comparison_10)\
+        .unionByName(comparison_11)
+
+    combined_comparisons.write.mode("overwrite").parquet(args['OUTPUT_PATH'])
+
+# Run the combination of scenarios
+combine_scenarios()
+
+# Commit the Glue job
+job.commit()
