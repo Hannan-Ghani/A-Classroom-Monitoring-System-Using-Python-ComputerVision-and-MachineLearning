@@ -37,9 +37,19 @@ def read_product_data():
     prodJoin.createOrReplaceTempView('prodJoin')
     return prodJoin
 
-# Insert the view definitions for src_fields and targ_fields here!
+# Insert the prod_qtx view creation here!
+def create_prod_qtx(a_cus, prodJoin):
+    # Perform an inner join between customer and product data to create prod_qtx
+    prod_qtx = a_cus.join(prodJoin, a_cus.customerUniqueId == prodJoin.customerUniqueId, how='inner')\
+        .select(prodJoin['*'])\
+        .dropDuplicates()
+    
+    prod_qtx.createOrReplaceTempView('prod_qtx')
+    prod_qtx.cache()
+
+# Create the views src_fields and targ_fields
 def create_views():
-    # Create src_fields from the customer or product data
+    # Create src_fields from the product data (prod_qtx)
     src_fields = spark.sql("""
         SELECT customerUniqueId, account_risk_code, account_id, account_risk_code_desc
         FROM prod_qtx
@@ -76,6 +86,9 @@ def combine_scenarios():
     # First, load customer and product data
     a_cus = read_customer_data()
     prod_qtx = read_product_data()
+
+    # Create the prod_qtx view before running any scenarios
+    create_prod_qtx(a_cus, prod_qtx)
 
     # Then, create the views for src_fields and targ_fields
     create_views()
