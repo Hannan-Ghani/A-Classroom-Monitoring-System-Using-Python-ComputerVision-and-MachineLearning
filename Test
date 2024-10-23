@@ -3,7 +3,7 @@ from pyspark.context import SparkContext
 from awsglue.context import GlueContext
 from awsglue.job import Job
 from awsglue.utils import getResolvedOptions
-from pyspark.sql.functions import col, lit
+from pyspark.sql.functions import col, lit, regexp_replace, when, explode
 
 # Initialize Glue job and Spark context
 args = getResolvedOptions(sys.argv, ['JOB_NAME', 'CUSTOMER_PATH', 'PRODUCT_FORTENT_PATH', 'PRODUCT_CORE_PATH', 'DOCUMENT_PATH', 'OUTPUT_PATH'])
@@ -16,7 +16,7 @@ job.init(args['JOB_NAME'], args)
 # Initialize logger
 logger = glueContext.get_logger()
 
-# Function to log missing columns and align source/target columns side by side
+# Function to log missing columns and align source/target columns side by side with consistent column count
 def align_columns_for_side_by_side(src_df, tgt_df, columns, key_column, scenario_name):
     src_columns = set(src_df.columns)
     tgt_columns = set(tgt_df.columns)
@@ -33,11 +33,11 @@ def align_columns_for_side_by_side(src_df, tgt_df, columns, key_column, scenario
         logger.info(f"{scenario_name}: Missing columns in target: {missing_in_tgt}")
     
     # Add missing columns as null in source
-    for col_name in missing_in_src:
+    for col_name in missing_in_tgt:  # Add target columns missing in source
         src_df = src_df.withColumn(col_name, lit(None))
     
     # Add missing columns as null in target
-    for col_name in missing_in_tgt:
+    for col_name in missing_in_src:  # Add source columns missing in target
         tgt_df = tgt_df.withColumn(col_name, lit(None))
     
     # Rename columns to indicate source and target
