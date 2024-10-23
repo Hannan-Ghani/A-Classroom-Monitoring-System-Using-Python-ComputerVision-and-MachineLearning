@@ -3,15 +3,9 @@ def align_columns_for_side_by_side(src_df, tgt_df, required_columns, key_column,
     src_columns = set(src_df.columns)
     tgt_columns = set(tgt_df.columns)
     
-    # Only keep the required columns from both source and target
-    required_columns_set = set(required_columns)
-    
-    # Find all columns that exist in both and ignore missing ones
-    common_columns = required_columns_set.intersection(src_columns, tgt_columns)
-    
-    # Identify missing columns in source and target
-    missing_in_src = required_columns_set - src_columns
-    missing_in_tgt = required_columns_set - tgt_columns
+    # Identify missing columns in source and target based on the required columns
+    missing_in_src = set(required_columns) - src_columns
+    missing_in_tgt = set(required_columns) - tgt_columns
     
     # Log missing columns
     if missing_in_src:
@@ -19,9 +13,17 @@ def align_columns_for_side_by_side(src_df, tgt_df, required_columns, key_column,
     if missing_in_tgt:
         logger.info(f"{scenario_name}: Missing columns in target: {missing_in_tgt}")
     
-    # Only keep common columns and rename them with _src and _tgt
-    src_df = src_df.select([col(c).alias(f"{c}_src") for c in common_columns])
-    tgt_df = tgt_df.select([col(c).alias(f"{c}_tgt") for c in common_columns])
+    # Add missing columns as null in source
+    for col_name in missing_in_tgt:
+        src_df = src_df.withColumn(col_name, lit(None))
+    
+    # Add missing columns as null in target
+    for col_name in missing_in_src:
+        tgt_df = tgt_df.withColumn(col_name, lit(None))
+    
+    # Now select only the required columns in both source and target
+    src_df = src_df.select([col(c).alias(f"{c}_src") for c in required_columns])
+    tgt_df = tgt_df.select([col(c).alias(f"{c}_tgt") for c in required_columns])
     
     # Full outer join to align source and target side by side
     combined_df = src_df.join(tgt_df, src_df[f"{key_column}_src"] == tgt_df[f"{key_column}_tgt"], "full_outer")
