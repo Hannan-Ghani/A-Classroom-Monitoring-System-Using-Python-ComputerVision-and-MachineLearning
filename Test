@@ -1,29 +1,24 @@
-# Function to align columns for comparison and handle missing columns dynamically
+# Function to align columns for comparison, remove columns that can't be matched, and log them
 def align_columns_for_side_by_side(src_df, tgt_df, required_columns, key_column, scenario_name):
     src_columns = set(src_df.columns)
     tgt_columns = set(tgt_df.columns)
     
-    # Identify missing columns in source and target based on the required columns
+    # Identify the columns that are present in both DataFrames
+    common_columns = set(required_columns).intersection(src_columns, tgt_columns)
+    
+    # Identify missing columns in source and target
     missing_in_src = set(required_columns) - src_columns
     missing_in_tgt = set(required_columns) - tgt_columns
     
-    # Log missing columns
+    # Log the columns that are being removed due to absence in either source or target
     if missing_in_src:
-        logger.info(f"{scenario_name}: Missing columns in source: {missing_in_src}")
+        logger.info(f"{scenario_name}: Removing columns missing in source: {missing_in_src}")
     if missing_in_tgt:
-        logger.info(f"{scenario_name}: Missing columns in target: {missing_in_tgt}")
+        logger.info(f"{scenario_name}: Removing columns missing in target: {missing_in_tgt}")
     
-    # Add missing columns as null in source
-    for col_name in missing_in_tgt:
-        src_df = src_df.withColumn(col_name, lit(None))
-    
-    # Add missing columns as null in target
-    for col_name in missing_in_src:
-        tgt_df = tgt_df.withColumn(col_name, lit(None))
-    
-    # Now select only the required columns in both source and target
-    src_df = src_df.select([col(c).alias(f"{c}_src") for c in required_columns])
-    tgt_df = tgt_df.select([col(c).alias(f"{c}_tgt") for c in required_columns])
+    # Select only the common columns and rename them for source and target
+    src_df = src_df.select([col(c).alias(f"{c}_src") for c in common_columns])
+    tgt_df = tgt_df.select([col(c).alias(f"{c}_tgt") for c in common_columns])
     
     # Full outer join to align source and target side by side
     combined_df = src_df.join(tgt_df, src_df[f"{key_column}_src"] == tgt_df[f"{key_column}_tgt"], "full_outer")
