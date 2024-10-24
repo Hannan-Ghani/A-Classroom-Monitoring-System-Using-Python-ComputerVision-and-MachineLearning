@@ -1,32 +1,15 @@
-import sys
-from pyspark.context import SparkContext
-from awsglue.context import GlueContext
-from awsglue.job import Job
-from awsglue.utils import getResolvedOptions
-from pyspark.sql.functions import col, lit, regexp_replace
-
-# Initialize Glue job and Spark context
-args = getResolvedOptions(sys.argv, ['JOB_NAME', 'CUSTOMER_PATH', 'PRODUCT_FORTENT_PATH', 'PRODUCT_CORE_PATH', 'DOCUMENT_PATH', 'OUTPUT_PATH'])
-sc = SparkContext()
-glueContext = GlueContext(sc)
-spark = glueContext.spark_session
-job = Job(glueContext)
-job.init(args['JOB_NAME'], args)
-
-# Initialize logger
-logger = glueContext.get_logger()
-
-# Read customer data and create the src_fields view
-def read_customer_data():
-    a_cus = spark.read.parquet(args['CUSTOMER_PATH'])\
-        .filter("NUM_OF_ACCOUNT >= 0 and (SOURCE_COUNTRY <> 'ZA' Or SOURCE_COUNTRY IS NULL) and customer_key is not null and customer_key not in('', '***', 'TTMAMC-**', 'TMEMA-**', 'TMUK1-**', 'MUK2-**', 'Not Available')")\
-        .withColumn('customerUniqueId', regexp_replace(col('customer_key'), '^-', ''))
-    a_cus.createOrReplaceTempView('src_fields')  # Register src_fields
-    a_cus.cache()
+def read_target_data():
+    Prod_fortent = spark.read.parquet(args['PRODUCT_FORTENT_PATH'])
+    Prod_core = spark.read.parquet(args['PRODUCT_CORE_PATH'])
     
-    # Log successful creation of the table
-    logger.info(f"src_fields table created successfully, total rows: {a_cus.count()}")
+    # Union the product data
+    prodJoin = Prod_core.unionByName(Prod_fortent)
     
-    return a_cus
-
-# Combine scenarios (rest of your code goes here)
+    # Create the targ_fields view
+    prodJoin.createOrReplaceTempView('targ_fields')
+    prodJoin.cache()
+    
+    # Log successful creation of the view
+    logger.info(f"targ_fields table created successfully, total rows: {prodJoin.count()}")
+    
+    return prodJoin
