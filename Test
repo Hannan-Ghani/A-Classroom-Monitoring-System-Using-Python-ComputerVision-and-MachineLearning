@@ -1,84 +1,63 @@
-import sys
-from pyspark.context import SparkContext
-from awsglue.context import GlueContext
-from awsglue.job import Job
-from awsglue.utils import getResolvedOptions
+The “cannot resolve column name” error you’re getting in your main code might occur because the columns expected in your Glue job are not present in the Parquet files you generated. Here are a few steps to troubleshoot and ensure you’re resolving the issue:
 
-# Initialize Glue context
-args = getResolvedOptions(sys.argv, ['JOB_NAME', 'OUTPUT_PATH'])
-sc = SparkContext()
-glueContext = GlueContext(sc)
-spark = glueContext.spark_session
-job = Job(glueContext)
-job.init(args['JOB_NAME'], args)
+1. Check Column Names in Generated Parquet Files
 
-# Define the base S3 output path
-output_path = args['OUTPUT_PATH']
+Ensure that the column names in your generated Parquet files exactly match the column names expected by the main code. Parquet files are case-sensitive, so even small variations in capitalization (e.g., account_key vs accountKey) can lead to errors.
 
-# Sample data for Customer
-customer_data = [
-    ('CUST001', 3, 'US', 'ACC001', '123456', 'USD', 'BANK01', 'true', '2023-10-01', 'LOB1', 'LOB Desc 1', '2025-01-01', 'false', 'false', '12345678', 'source1', 'EXTERNAL', 'INDUSTRY_CODE1', 'LEGAL_ENTITY1'),
-    ('CUST002', 2, 'UK', 'ACC002', '654321', 'GBP', 'BANK02', 'false', '2023-09-01', 'LOB2', 'LOB Desc 2', '2026-02-01', 'true', 'true', '87654321', 'source2', 'INTERNAL', 'INDUSTRY_CODE2', 'LEGAL_ENTITY2'),
-    ('CUST003', 5, 'ZA', 'ACC003', '987654', 'ZAR', 'BANK03', 'true', '2023-08-01', 'LOB3', 'LOB Desc 3', '2024-03-01', 'false', 'true', '13579246', 'source3', 'EXTERNAL', 'INDUSTRY_CODE3', 'LEGAL_ENTITY3')
-]
+You can check the columns of the generated files using the following code:
 
-# Sample data for Product Fortent
-product_fortent_data = [
-    ('ACC001', 'TMUK2', 'PRIMARY', 'CML - COMP PARENT', 'UKCMPVHI', '12345678', 'high_type1', 'risk_desc1', 'jointAccount1', 'closedDate1', 'coldAccount1', 'creditLimit1', 'inferredAccountRisk1'),
-    ('ACC002', 'TMUK2', 'CML - COMP PARENT', 'PRIMARY', 'UKCMLPV5K', '87654321', 'high_type2', 'risk_desc2', 'jointAccount2', 'closedDate2', 'coldAccount2', 'creditLimit2', 'inferredAccountRisk2'),
-    ('ACC004', 'OTHER', 'PRIMARY', 'OTHER', 'UKCMLPVUNK', '54321098', 'low_type1', 'risk_desc3', 'jointAccount3', 'closedDate3', 'coldAccount3', 'creditLimit3', 'inferredAccountRisk3')
-]
+df = spark.read.parquet("s3://path-to-your-parquet-file/")
+df.printSchema()
 
-# Sample data for Product Core
-product_core_data = [
-    ('ACC001', 'CUST001', 'HIGH', 'BANK01', 'USD', 'EXTERNAL', 'INDUSTRY_CODE1', 'lineOfBusiness1', 'maturityDate1', 'nonOperatingEntity1', 'legal_entity1'),
-    ('ACC003', 'CUST003', 'LOW', 'BANK03', 'ZAR', 'INTERNAL', 'INDUSTRY_CODE3', 'lineOfBusiness3', 'maturityDate3', 'nonOperatingEntity3', 'legal_entity3'),
-    ('ACC005', 'CUST005', 'MEDIUM', 'BANK05', 'EUR', 'EXTERNAL', 'INDUSTRY_CODE5', 'lineOfBusiness5', 'maturityDate5', 'nonOperatingEntity5', 'legal_entity5')
-]
+2. Compare Columns in Your Main Code and Parquet Files
 
-# Sample data for Document
-document_data = [
-    ('CUST001', 'ACC001', 'DOC001', 'product_id1', 'region_id1', 'risk_code1', 'sensitiveIndustry1', 'rmName1'),
-    ('CUST002', 'ACC002', 'DOC002', 'product_id2', 'region_id2', 'risk_code2', 'sensitiveIndustry2', 'rmName2'),
-    ('CUST003', 'ACC003', 'DOC003', 'product_id3', 'region_id3', 'risk_code3', 'sensitiveIndustry3', 'rmName3')
-]
+Ensure that the columns listed in your main code match the ones in the generated Parquet files. If any are missing, add them either to your Parquet generation script or modify the main code to handle the missing columns gracefully (by skipping or logging them).
 
-# Convert each dataset to DataFrames, including all columns from your original code
+3. Log Missing Columns in the Glue Job
 
-# Customer DataFrame
-customer_df = spark.createDataFrame(customer_data, [
-    'customer_key', 'NUM_OF_ACCOUNT', 'SOURCE_COUNTRY', 'account_key', 
-    'account_no', 'currency_code', 'financial_institution', 'joint_account', 
-    'lastUpdatedDate', 'line_of_business', 'line_of_business_desc', 'maturity_date', 
-    'non_operating_entity', 'numbered_account', 'sortcode', 'source_sys_code', 
-    'external_account_type', 'industry_code_desc', 'legal_entity'
-])
+Modify your main code to log any missing columns. You can handle this by comparing the expected columns with the actual columns read from the input data.
 
-# Product Fortent DataFrame
-product_fortent_df = spark.createDataFrame(product_fortent_data, [
-    'account_key', 'screening_system', 'customer_role', 'low_account_type', 
-    'high_account_type', 'sortcode', 'high_account_type_desc', 'account_risk_code_desc',
-    'joint_account', 'closedDate', 'coldAccount', 'creditLimit', 'inferredAccountRisk'
-])
+Here’s an example of how to dynamically handle missing columns in your main code:
 
-# Product Core DataFrame
-product_core_df = spark.createDataFrame(product_core_data, [
-    'account_key', 'customer_key', 'account_risk_code_desc', 
-    'financial_institution', 'currency_code', 'external_account_type', 
-    'industry_code', 'line_of_business', 'maturity_date', 'non_operating_entity', 'legal_entity'
-])
+expected_columns = ['customer_key', 'account_key', 'NUM_OF_ACCOUNT', ...]  # List all columns here
+actual_columns = df.columns
 
-# Document DataFrame
-document_df = spark.createDataFrame(document_data, [
-    'customerUniqueId', 'account_key', 'document_id', 
-    'product_id', 'region_id', 'risk_code', 'sensitiveIndustry', 'rmName'
-])
+missing_columns = set(expected_columns) - set(actual_columns)
 
-# Write each DataFrame to its respective Parquet file, categorized by type
-customer_df.write.mode('overwrite').parquet(f"{output_path}/customer/")
-product_fortent_df.write.mode('overwrite').parquet(f"{output_path}/product_fortent/")
-product_core_df.write.mode('overwrite').parquet(f"{output_path}/product_core/")
-document_df.write.mode('overwrite').parquet(f"{output_path}/document/")
+if missing_columns:
+    print(f"Missing columns: {missing_columns}")
+else:
+    print("All expected columns are present.")
 
-# Commit the Glue job
-job.commit()
+4. Ensure All Data Types Match
+
+Another possible cause of the error could be mismatched data types. Ensure that the data types in the generated Parquet files are consistent with what your main code expects.
+
+5. Modify the Main Code to Be More Resilient
+
+If some columns are optional or may not always be present, you could modify the main code to skip over missing columns rather than failing with an exception.
+
+Here is an example of how to handle missing columns dynamically:
+
+# Check for missing columns before querying
+expected_columns = ['account_key', 'customer_key', 'currency_code', 'financial_institution']
+
+df = spark.read.parquet('s3://your-bucket/customer/')
+
+# Ensure only columns that exist are selected
+available_columns = [col for col in expected_columns if col in df.columns]
+
+if len(available_columns) < len(expected_columns):
+    missing_columns = set(expected_columns) - set(df.columns)
+    print(f"Missing columns: {missing_columns}")
+
+# Select only the available columns
+df = df.select(available_columns)
+
+Next Steps:
+
+	1.	Check the columns of the generated Parquet files to ensure they match your main code.
+	2.	Update your main Glue job to either add missing columns or handle them gracefully by logging and skipping those columns.
+	3.	Check the case-sensitivity of your column names.
+
+After making these changes, test your Glue job again. Let me know if you need any specific guidance on modifying your main code.
