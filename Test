@@ -1,26 +1,281 @@
-# Function to align columns for comparison, remove columns that can't be matched, and log them
+import sys
+from pyspark.context import SparkContext
+from awsglue.context import GlueContext
+from awsglue.job import Job
+from awsglue.utils import getResolvedOptions
+from pyspark.sql.functions import col, lit, regexp_replace, when, explode
+
+# Initialize Glue job and Spark context
+args = getResolvedOptions(sys.argv, ['JOB_NAME', 'CUSTOMER_PATH', 'PRODUCT_FORTENT_PATH', 'PRODUCT_CORE_PATH', 'DOCUMENT_PATH', 'OUTPUT_PATH'])
+sc = SparkContext()
+glueContext = GlueContext(sc)
+spark = glueContext.spark_session
+job = Job(glueContext)
+job.init(args['JOB_NAME'], args)
+
+# Initialize logger
+logger = glueContext.get_logger()
+
+# Function to align columns, add missing columns as null, and ensure column alignment
 def align_columns_for_side_by_side(src_df, tgt_df, required_columns, key_column, scenario_name):
     src_columns = set(src_df.columns)
     tgt_columns = set(tgt_df.columns)
     
-    # Identify the columns that are present in both DataFrames
+    # Find all common columns based on the required columns list
     common_columns = set(required_columns).intersection(src_columns, tgt_columns)
     
-    # Identify missing columns in source and target
+    # Identify missing columns in source and target based on the required columns
     missing_in_src = set(required_columns) - src_columns
     missing_in_tgt = set(required_columns) - tgt_columns
     
-    # Log the columns that are being removed due to absence in either source or target
+    # Log the missing columns
     if missing_in_src:
-        logger.info(f"{scenario_name}: Removing columns missing in source: {missing_in_src}")
+        logger.info(f"{scenario_name}: Missing columns in source: {missing_in_src}")
     if missing_in_tgt:
-        logger.info(f"{scenario_name}: Removing columns missing in target: {missing_in_tgt}")
+        logger.info(f"{scenario_name}: Missing columns in target: {missing_in_tgt}")
     
-    # Select only the common columns and rename them for source and target
+    # Add missing columns as null in source
+    for col_name in missing_in_tgt:
+        src_df = src_df.withColumn(col_name, lit(None))
+    
+    # Add missing columns as null in target
+    for col_name in missing_in_src:
+        tgt_df = tgt_df.withColumn(col_name, lit(None))
+    
+    # Ensure both DataFrames have the same common columns and rename columns for source and target
     src_df = src_df.select([col(c).alias(f"{c}_src") for c in common_columns])
     tgt_df = tgt_df.select([col(c).alias(f"{c}_tgt") for c in common_columns])
     
-    # Full outer join to align source and target side by side
+    # Perform the full outer join to align source and target side by side
     combined_df = src_df.join(tgt_df, src_df[f"{key_column}_src"] == tgt_df[f"{key_column}_tgt"], "full_outer")
     
     return combined_df
+
+# Read customer data
+def read_customer_data():
+    a_cus = spark.read.parquet(args['CUSTOMER_PATH'])\
+        .filter("NUM_OF_ACCOUNT >= 0 and (SOURCE_COUNTRY <> 'ZA' Or SOURCE_COUNTRY IS NULL) and customer_key is not null and customer_key not in('', '***', 'TTMAMC-**', 'TMEMA-**', 'TMUK1-**', 'MUK2-**', 'Not Available')")\
+        .withColumn('customerUniqueId', regexp_replace(col('customer_key'), '^-', ''))
+    a_cus.createOrReplaceTempView('a_cus')
+    a_cus.cache()
+    return a_cus
+
+# Read product data
+def read_product_data():
+    Prod_fortent = spark.read.parquet(args['PRODUCT_FORTENT_PATH'])
+    Prod_fortent.createOrReplaceTempView('Prod_fortent')
+    Prod_fortent.cache()
+
+    Prod_core = spark.read.parquet(args['PRODUCT_CORE_PATH'])
+    Prod_core.createOrReplaceTempView('Prod_core')
+    Prod_core.cache()
+
+    # Union operation
+    prodJoin = Prod_core.unionByName(Prod_fortent)
+    prodJoin.createOrReplaceTempView('prodJoin')
+    return prodJoin
+
+# Scenario 1: Customer Unique ID and Account Key comparison
+def scenario_1():
+    src_fields1 = spark.sql("SELECT * FROM src_fields")
+    tgt_fields1 = spark.sql("SELECT * FROM targ_fields")
+    
+    # Columns explicitly mentioned for Scenario 1
+    required_columns = ['customerUniqueId', 'accountNumber', 'accountKey']
+    key_column = 'customerUniqueId'
+    
+    # Align columns and combine
+    combined_df = align_columns_for_side_by_side(src_fields1, tgt_fields1, required_columns, key_column, "Scenario 1")
+    return combined_df
+
+# Scenario 2: Cleansed Account Number comparison
+def scenario_2():
+    src_fields2 = spark.sql("SELECT * FROM src_fields")
+    tgt_fields2 = spark.sql("SELECT * FROM targ_fields")
+
+    required_columns = ['customerUniqueId', 'cleansedAccountNumber', 'accountNumber', 'accountKey']
+    key_column = 'customerUniqueId'
+    
+    combined_df = align_columns_for_side_by_side(src_fields2, tgt_fields2, required_columns, key_column, "Scenario 2")
+    return combined_df
+
+# Scenario 3: Country and Currency comparison
+def scenario_3():
+    src_fields3 = spark.sql("SELECT * FROM src_fields")
+    tgt_fields3 = spark.sql("SELECT * FROM targ_fields")
+
+    required_columns = ['customerUniqueId', 'country', 'currencyCode']
+    key_column = 'customerUniqueId'
+    
+    combined_df = align_columns_for_side_by_side(src_fields3, tgt_fields3, required_columns, key_column, "Scenario 3")
+    return combined_df
+
+# Scenario 4: Line of Business and Non-Operating Entity comparison
+def scenario_4():
+    src_fields4 = spark.sql("SELECT * FROM src_fields")
+    tgt_fields4 = spark.sql("SELECT * FROM targ_fields")
+
+    required_columns = ['customerUniqueId', 'lineOfBusiness', 'nonOperatingEntity']
+    key_column = 'customerUniqueId'
+    
+    combined_df = align_columns_for_side_by_side(src_fields4, tgt_fields4, required_columns, key_column, "Scenario 4")
+    return combined_df
+
+# Scenario 5: Last Updated Date comparison
+def scenario_5():
+    src_fields5 = spark.sql("SELECT * FROM src_fields")
+    tgt_fields5 = spark.sql("SELECT * FROM targ_fields")
+
+    required_columns = ['customerUniqueId', 'lastUpdatedDate']
+    key_column = 'customerUniqueId'
+    
+    combined_df = align_columns_for_side_by_side(src_fields5, tgt_fields5, required_columns, key_column, "Scenario 5")
+    return combined_df
+
+# Scenario 6: Maturity Date and Non-Operating Entity comparison
+def scenario_6():
+    src_fields6 = spark.sql("SELECT * FROM src_fields")
+    tgt_fields6 = spark.sql("SELECT * FROM targ_fields")
+
+    required_columns = ['customerUniqueId', 'maturityDate', 'nonOperatingEntity']
+    key_column = 'customerUniqueId'
+    
+    combined_df = align_columns_for_side_by_side(src_fields6, tgt_fields6, required_columns, key_column, "Scenario 6")
+    return combined_df
+
+# Scenario 7: Legal Entity comparison
+def scenario_7():
+    src_fields7 = spark.sql("SELECT * FROM src_fields")
+    tgt_fields7 = spark.sql("SELECT * FROM targ_fields")
+
+    required_columns = ['customerUniqueId', 'legal_entity']
+    key_column = 'customerUniqueId'
+    
+    combined_df = align_columns_for_side_by_side(src_fields7, tgt_fields7, required_columns, key_column, "Scenario 7")
+    return combined_df
+
+# Scenario 8: Credit Limit comparison
+def scenario_8_credit_limit():
+    src_fields8 = spark.sql("""
+        WITH data5 AS (
+            SELECT DISTINCT customerUniqueId, 
+                            CASE WHEN credit_limit IS NULL THEN 0.0 ELSE credit_limit END as credit_limit
+            FROM src_fields
+        )
+        SELECT customerUniqueId, CAST(credit_limit as DOUBLE) as credit_limit 
+        FROM data5
+    """)
+    tgt_fields8 = spark.sql("""
+        SELECT DISTINCT customerUniqueId, creditLimit 
+        FROM targ_fields
+    """)
+
+    required_columns = ['customerUniqueId', 'credit_limit']
+    key_column = 'customerUniqueId'
+    
+    combined_df = align_columns_for_side_by_side(src_fields8, tgt_fields8, required_columns, key_column, "Scenario 8")
+    return combined_df
+
+# Scenario 9: Joint Account comparison
+def scenario_9_joint_account():
+    src_fields9 = spark.sql("""
+        SELECT customerUniqueId, 
+               CASE WHEN joint_account = '1' THEN 'true' 
+                    WHEN joint_account IS NULL THEN NULL 
+                    ELSE 'false' END as jointAccount 
+        FROM src_fields
+    """)
+    tgt_fields9 = spark.sql("""
+        SELECT customerUniqueId, CAST(jointAccount AS STRING) as jointAccount 
+        FROM targ_fields
+    """)
+
+    required_columns = ['customerUniqueId', 'jointAccount']
+    key_column = 'customerUniqueId'
+    
+    combined_df = align_columns_for_side_by_side(src_fields9, tgt_fields9, required_columns, key_column, "Scenario 9")
+    return combined_df
+
+# Scenario 10: Sensitive Industry comparison
+def scenario_10_sensitive_industry():
+    src_fields10 = spark.sql("""
+        SELECT DISTINCT customerUniqueId, 
+                        CASE WHEN sensitive_industry = 'N' THEN 'false' 
+                             ELSE 'true' END as sensitiveIndustry 
+        FROM src_fields
+    """).dropDuplicates()
+
+    tgt_fields10 = spark.sql("""
+        SELECT customerUniqueId, CAST(sensitiveIndustry AS STRING) as sensitiveIndustry 
+        FROM targ_fields
+    """).dropDuplicates()
+
+    required_columns = ['customerUniqueId', 'sensitiveIndustry']
+    key_column = 'customerUniqueId'
+    
+    combined_df = align_columns_for_side_by_side(src_fields10, tgt_fields10, required_columns, key_column, "Scenario 10")
+    return combined_df
+
+# Scenario 11: Cold Account comparison
+def scenario_11_cold_account():
+    src_fields11 = spark.sql("""
+        WITH data4 AS (
+            SELECT customerUniqueId, account_id, 
+                   CASE WHEN (cold_account = 'N' OR cold_account IS NULL) THEN 'false' ELSE 'true' END as cold_account 
+            FROM src_fields
+        )
+        SELECT customerUniqueId, account_id, MAX(cold_account) as coldAccount 
+        FROM data4 
+        GROUP BY customerUniqueId, account_id
+    """)
+    
+    tgt_fields11 = spark.sql("""
+        SELECT customerUniqueId, accountNumber, CAST(coldAccount AS STRING) as coldAccount 
+        FROM targ_fields
+    """)
+
+    required_columns = ['customerUniqueId', 'coldAccount']
+    key_column = 'customerUniqueId'
+    
+    combined_df = align_columns_for_side_by_side(src_fields11, tgt_fields11, required_columns, key_column, "Scenario 11")
+    return combined_df
+
+# Combine all scenarios
+def combine_scenarios():
+    # First, load customer and product data
+    a_cus = read_customer_data()
+    prod_qtx = read_product_data()
+
+    # Run each scenario and combine the results
+    comparison_1 = scenario_1()
+    comparison_2 = scenario_2()
+    comparison_3 = scenario_3()
+    comparison_4 = scenario_4()
+    comparison_5 = scenario_5()
+    comparison_6 = scenario_6()
+    comparison_7 = scenario_7()
+    comparison_8 = scenario_8_credit_limit()
+    comparison_9 = scenario_9_joint_account()
+    comparison_10 = scenario_10_sensitive_industry()
+    comparison_11 = scenario_11_cold_account()
+
+    # Combine all scenario comparisons into one DataFrame
+    combined_comparisons = comparison_1.unionByName(comparison_2)\
+        .unionByName(comparison_3)\
+        .unionByName(comparison_4)\
+        .unionByName(comparison_5)\
+        .unionByName(comparison_6)\
+        .unionByName(comparison_7)\
+        .unionByName(comparison_8)\
+        .unionByName(comparison_9)\
+        .unionByName(comparison_10)\
+        .unionByName(comparison_11)
+    
+    # Write the combined result to Parquet
+    combined_comparisons.write.mode("overwrite").parquet(args['OUTPUT_PATH'])
+
+# Run the combination of scenarios
+combine_scenarios()
+
+# Commit the Glue job
+job.commit()
