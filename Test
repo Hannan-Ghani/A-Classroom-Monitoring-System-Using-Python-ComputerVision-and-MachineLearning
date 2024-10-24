@@ -1,33 +1,44 @@
-def read_target_data():
-    logger.info("Starting to read target data from PRODUCT_FORTENT_PATH and PRODUCT_CORE_PATH")
-    
-    # Load data from both paths and check row counts
-    Prod_fortent = spark.read.parquet(args['PRODUCT_FORTENT_PATH'])
-    Prod_core = spark.read.parquet(args['PRODUCT_CORE_PATH'])
-    
-    fortent_count = Prod_fortent.count()
-    core_count = Prod_core.count()
-    
-    logger.info(f"Product Fortent Path count: {fortent_count}")
-    logger.info(f"Product Core Path count: {core_count}")
-    
-    if fortent_count == 0 or core_count == 0:
-        logger.error("One or both of the product data files are empty or unavailable.")
-    
-    # Perform union of the two datasets
-    prodJoin = Prod_core.unionByName(Prod_fortent)
-    
-    # Register targ_fields as a view
-    prodJoin.createOrReplaceTempView('targ_fields')
-    prodJoin.cache()
-    
-    # Log if targ_fields was successfully created
-    if spark.catalog.tableExists('targ_fields'):
-        logger.info(f"targ_fields table created successfully, total rows: {prodJoin.count()}")
-    else:
-        logger.error("targ_fields not created. Please check the data paths or data loading.")
-    
-    # Test query to ensure targ_fields is accessible
-    spark.sql("SELECT * FROM targ_fields LIMIT 5").show()
+import sys
+from pyspark.context import SparkContext
+from awsglue.context import GlueContext
+from awsglue.utils import getResolvedOptions
+from awsglue.job import Job
+from pyspark.sql import SparkSession
 
-    return prodJoin
+# Initialize Spark and Glue context
+args = getResolvedOptions(sys.argv, ['JOB_NAME', 'OUTPUT_PATH'])
+sc = SparkContext()
+glueContext = GlueContext(sc)
+spark = glueContext.spark_session
+job = Job(glueContext)
+job.init(args['JOB_NAME'], args)
+
+# Sample data to create the Parquet file
+data = [
+    ("CUST001", 1, "UK", "CK001", "ACC001", "HIGH", "Entity1", "UID001", "Account1", "12345", "123456789", "123456789", "COMP1", "UK", "GBP", "FI1", True, "2023-01-01", "LOB1", "Business1", "2025-01-01", True, False, "123456", "123456", "System1", "Type1", "TypeDesc1", "LowType1", "LowDesc1", "ExtType1", "IndCode1", "IndDesc1", "Prod1", "Region1", "Risk1", "RM1", "Name1", False, False, 10000.0, "2024-01-01", "AccUID1", "HIGH", 2),
+    ("CUST002", 2, "ZA", "CK002", "ACC002", "MEDIUM", "Entity2", "UID002", "Account2", "67890", "987654321", "987654321", "COMP2", "ZA", "ZAR", "FI2", False, "2023-02-01", "LOB2", "Business2", "2026-01-01", False, True, "654321", "654321", "System2", "Type2", "TypeDesc2", "LowType2", "LowDesc2", "ExtType2", "IndCode2", "IndDesc2", "Prod2", "Region2", "Risk2", "RM2", "Name2", True, True, 20000.0, "2025-01-01", "AccUID2", "MEDIUM", 1),
+    ("CUST003", 1, "US", "CK003", "ACC003", "LOW", "Entity3", "UID003", "Account3", "54321", "112233445", "112233445", "COMP3", "US", "USD", "FI3", True, "2023-03-01", "LOB3", "Business3", "2027-01-01", True, False, "789123", "789123", "System3", "Type3", "TypeDesc3", "LowType3", "LowDesc3", "ExtType3", "IndCode3", "IndDesc3", "Prod3", "Region3", "Risk3", "RM3", "Name3", False, False, 30000.0, "2026-01-01", "AccUID3", "LOW", 3)
+]
+
+# Define the schema
+columns = ["customer_key", "NUM_OF_ACCOUNT", "SOURCE_COUNTRY", "customer_key_2", "account_key", 
+           "account_risk_code_desc", "legal_entity", "customerUniqueId", "accountName", 
+           "accountIdPrefix", "accountNumber", "cleansedAccountNumber", "companyId", "country", 
+           "currencyCode", "financial_institution", "jointAccount", "update_tms", 
+           "lineOfBusiness", "lineOfBusinessDescription", "maturityDate", "nonOperatingEntity", 
+           "numberedAccount", "sortcode", "cleansedSortCode", "sourceSystem", 
+           "highAccountType", "highAccountTypeDescription", "lowAccountType", 
+           "lowAccountTypeDescription", "externalAccountType", "industry_code", 
+           "industry_code_desc", "productId", "regionId", "riskCode", "rmId", "rmName", 
+           "sensitiveIndustry", "coldAccount", "credit_limit", "closedDate", "accountUniqueId", 
+           "inferredAccountRisk", "authorizedUserCount"]
+
+# Create DataFrame
+df = spark.createDataFrame(data, columns)
+
+# Write the data to Parquet files
+output_path = args['OUTPUT_PATH']
+df.write.mode("overwrite").parquet(output_path)
+
+# Commit job
+job.commit()
