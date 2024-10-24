@@ -24,23 +24,23 @@ customer_data = [
 
 # Sample data for Product Fortent
 product_fortent_data = [
-    ('ACC001', 'TMUK2', 'PRIMARY', 'CML - COMP PARENT', 'UKCMPVHI', '12345678', 'high_type1', 'risk_desc1'),
-    ('ACC002', 'TMUK2', 'CML - COMP PARENT', 'PRIMARY', 'UKCMLPV5K', '87654321', 'high_type2', 'risk_desc2'),
-    ('ACC004', 'OTHER', 'PRIMARY', 'OTHER', 'UKCMLPVUNK', '54321098', 'low_type1', 'risk_desc3')
+    ('ACC001', 'TMUK2', 'PRIMARY', 'CML - COMP PARENT', 'UKCMPVHI', '12345678', 'high_type1', 'risk_desc1', 'jointAccount1', 'closedDate1', 'coldAccount1', 'creditLimit1', 'inferredAccountRisk1'),
+    ('ACC002', 'TMUK2', 'CML - COMP PARENT', 'PRIMARY', 'UKCMLPV5K', '87654321', 'high_type2', 'risk_desc2', 'jointAccount2', 'closedDate2', 'coldAccount2', 'creditLimit2', 'inferredAccountRisk2'),
+    ('ACC004', 'OTHER', 'PRIMARY', 'OTHER', 'UKCMLPVUNK', '54321098', 'low_type1', 'risk_desc3', 'jointAccount3', 'closedDate3', 'coldAccount3', 'creditLimit3', 'inferredAccountRisk3')
 ]
 
 # Sample data for Product Core
 product_core_data = [
-    ('ACC001', 'CUST001', 'HIGH', 'BANK01', 'USD', 'EXTERNAL', 'INDUSTRY_CODE1'),
-    ('ACC003', 'CUST003', 'LOW', 'BANK03', 'ZAR', 'INTERNAL', 'INDUSTRY_CODE3'),
-    ('ACC005', 'CUST005', 'MEDIUM', 'BANK05', 'EUR', 'EXTERNAL', 'INDUSTRY_CODE5')
+    ('ACC001', 'CUST001', 'HIGH', 'BANK01', 'USD', 'EXTERNAL', 'INDUSTRY_CODE1', 'lineOfBusiness1', 'maturityDate1', 'nonOperatingEntity1', 'legal_entity1'),
+    ('ACC003', 'CUST003', 'LOW', 'BANK03', 'ZAR', 'INTERNAL', 'INDUSTRY_CODE3', 'lineOfBusiness3', 'maturityDate3', 'nonOperatingEntity3', 'legal_entity3'),
+    ('ACC005', 'CUST005', 'MEDIUM', 'BANK05', 'EUR', 'EXTERNAL', 'INDUSTRY_CODE5', 'lineOfBusiness5', 'maturityDate5', 'nonOperatingEntity5', 'legal_entity5')
 ]
 
 # Sample data for Document
 document_data = [
-    ('CUST001', 'ACC001', 'DOC001'),
-    ('CUST002', 'ACC002', 'DOC002'),
-    ('CUST003', 'ACC003', 'DOC003')
+    ('CUST001', 'ACC001', 'DOC001', 'product_id1', 'region_id1', 'risk_code1', 'sensitiveIndustry1', 'rmName1'),
+    ('CUST002', 'ACC002', 'DOC002', 'product_id2', 'region_id2', 'risk_code2', 'sensitiveIndustry2', 'rmName2'),
+    ('CUST003', 'ACC003', 'DOC003', 'product_id3', 'region_id3', 'risk_code3', 'sensitiveIndustry3', 'rmName3')
 ]
 
 # Convert each dataset to DataFrames, including all columns from your original code
@@ -57,19 +57,21 @@ customer_df = spark.createDataFrame(customer_data, [
 # Product Fortent DataFrame
 product_fortent_df = spark.createDataFrame(product_fortent_data, [
     'account_key', 'screening_system', 'customer_role', 'low_account_type', 
-    'high_account_type', 'sortcode', 'high_account_type_desc', 'account_risk_code_desc'
+    'high_account_type', 'sortcode', 'high_account_type_desc', 'account_risk_code_desc',
+    'joint_account', 'closedDate', 'coldAccount', 'creditLimit', 'inferredAccountRisk'
 ])
 
 # Product Core DataFrame
 product_core_df = spark.createDataFrame(product_core_data, [
     'account_key', 'customer_key', 'account_risk_code_desc', 
     'financial_institution', 'currency_code', 'external_account_type', 
-    'industry_code'
+    'industry_code', 'line_of_business', 'maturity_date', 'non_operating_entity', 'legal_entity'
 ])
 
 # Document DataFrame
 document_df = spark.createDataFrame(document_data, [
-    'customerUniqueId', 'account_key', 'document_id'
+    'customerUniqueId', 'account_key', 'document_id', 
+    'product_id', 'region_id', 'risk_code', 'sensitiveIndustry', 'rmName'
 ])
 
 # Write each DataFrame to its respective Parquet file, categorized by type
