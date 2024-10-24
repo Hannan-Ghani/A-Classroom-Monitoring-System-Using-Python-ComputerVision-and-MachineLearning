@@ -1,15 +1,33 @@
 def read_target_data():
+    logger.info("Starting to read target data from PRODUCT_FORTENT_PATH and PRODUCT_CORE_PATH")
+    
+    # Load data from both paths and check row counts
     Prod_fortent = spark.read.parquet(args['PRODUCT_FORTENT_PATH'])
     Prod_core = spark.read.parquet(args['PRODUCT_CORE_PATH'])
     
-    # Union the product data
+    fortent_count = Prod_fortent.count()
+    core_count = Prod_core.count()
+    
+    logger.info(f"Product Fortent Path count: {fortent_count}")
+    logger.info(f"Product Core Path count: {core_count}")
+    
+    if fortent_count == 0 or core_count == 0:
+        logger.error("One or both of the product data files are empty or unavailable.")
+    
+    # Perform union of the two datasets
     prodJoin = Prod_core.unionByName(Prod_fortent)
     
-    # Create the targ_fields view
+    # Register targ_fields as a view
     prodJoin.createOrReplaceTempView('targ_fields')
     prodJoin.cache()
     
-    # Log successful creation of the view
-    logger.info(f"targ_fields table created successfully, total rows: {prodJoin.count()}")
+    # Log if targ_fields was successfully created
+    if spark.catalog.tableExists('targ_fields'):
+        logger.info(f"targ_fields table created successfully, total rows: {prodJoin.count()}")
+    else:
+        logger.error("targ_fields not created. Please check the data paths or data loading.")
     
+    # Test query to ensure targ_fields is accessible
+    spark.sql("SELECT * FROM targ_fields LIMIT 5").show()
+
     return prodJoin
