@@ -6,39 +6,56 @@ from awsglue.job import Job
 from pyspark.sql import SparkSession
 
 # Initialize Spark and Glue context
-args = getResolvedOptions(sys.argv, ['JOB_NAME', 'OUTPUT_PATH'])
+args = getResolvedOptions(sys.argv, ['JOB_NAME', 'CUSTOMER_PATH', 'PRODUCT_PATH', 'TARGET_PATH'])
 sc = SparkContext()
 glueContext = GlueContext(sc)
 spark = glueContext.spark_session
 job = Job(glueContext)
 job.init(args['JOB_NAME'], args)
 
-# Sample data to create the Parquet file
-data = [
-    ("CUST001", 1, "UK", "CK001", "ACC001", "HIGH", "Entity1", "UID001", "Account1", "12345", "123456789", "123456789", "COMP1", "UK", "GBP", "FI1", True, "2023-01-01", "LOB1", "Business1", "2025-01-01", True, False, "123456", "123456", "System1", "Type1", "TypeDesc1", "LowType1", "LowDesc1", "ExtType1", "IndCode1", "IndDesc1", "Prod1", "Region1", "Risk1", "RM1", "Name1", False, False, 10000.0, "2024-01-01", "AccUID1", "HIGH", 2),
-    ("CUST002", 2, "ZA", "CK002", "ACC002", "MEDIUM", "Entity2", "UID002", "Account2", "67890", "987654321", "987654321", "COMP2", "ZA", "ZAR", "FI2", False, "2023-02-01", "LOB2", "Business2", "2026-01-01", False, True, "654321", "654321", "System2", "Type2", "TypeDesc2", "LowType2", "LowDesc2", "ExtType2", "IndCode2", "IndDesc2", "Prod2", "Region2", "Risk2", "RM2", "Name2", True, True, 20000.0, "2025-01-01", "AccUID2", "MEDIUM", 1),
-    ("CUST003", 1, "US", "CK003", "ACC003", "LOW", "Entity3", "UID003", "Account3", "54321", "112233445", "112233445", "COMP3", "US", "USD", "FI3", True, "2023-03-01", "LOB3", "Business3", "2027-01-01", True, False, "789123", "789123", "System3", "Type3", "TypeDesc3", "LowType3", "LowDesc3", "ExtType3", "IndCode3", "IndDesc3", "Prod3", "Region3", "Risk3", "RM3", "Name3", False, False, 30000.0, "2026-01-01", "AccUID3", "LOW", 3)
+# Data for customer parquet file
+customer_data = [
+    ("CUST001", 1, "UK", "UID001", "Account1", "12345", "123456789", "COMP1", "UK", "GBP", True, "2023-01-01", "LOB1", "Business1", "2025-01-01", True, False),
+    ("CUST002", 2, "ZA", "UID002", "Account2", "67890", "987654321", "COMP2", "ZA", "ZAR", False, "2023-02-01", "LOB2", "Business2", "2026-01-01", False, True),
+    ("CUST003", 1, "US", "UID003", "Account3", "54321", "112233445", "COMP3", "US", "USD", True, "2023-03-01", "LOB3", "Business3", "2027-01-01", True, False)
 ]
+customer_columns = ["customer_key", "NUM_OF_ACCOUNT", "SOURCE_COUNTRY", "customerUniqueId", "accountName", 
+                    "accountIdPrefix", "accountNumber", "companyId", "country", "currencyCode", "jointAccount", 
+                    "update_tms", "lineOfBusiness", "lineOfBusinessDescription", "maturityDate", 
+                    "nonOperatingEntity", "numberedAccount"]
 
-# Define the schema
-columns = ["customer_key", "NUM_OF_ACCOUNT", "SOURCE_COUNTRY", "customer_key_2", "account_key", 
-           "account_risk_code_desc", "legal_entity", "customerUniqueId", "accountName", 
-           "accountIdPrefix", "accountNumber", "cleansedAccountNumber", "companyId", "country", 
-           "currencyCode", "financial_institution", "jointAccount", "update_tms", 
-           "lineOfBusiness", "lineOfBusinessDescription", "maturityDate", "nonOperatingEntity", 
-           "numberedAccount", "sortcode", "cleansedSortCode", "sourceSystem", 
-           "highAccountType", "highAccountTypeDescription", "lowAccountType", 
-           "lowAccountTypeDescription", "externalAccountType", "industry_code", 
-           "industry_code_desc", "productId", "regionId", "riskCode", "rmId", "rmName", 
-           "sensitiveIndustry", "coldAccount", "credit_limit", "closedDate", "accountUniqueId", 
-           "inferredAccountRisk", "authorizedUserCount"]
+# Data for product parquet file
+product_data = [
+    ("PROD001", "CK001", "ACC001", "HIGH", "FI1", "System1", "Type1", "IndCode1", "IndDesc1", 10000.0),
+    ("PROD002", "CK002", "ACC002", "MEDIUM", "FI2", "System2", "Type2", "IndCode2", "IndDesc2", 20000.0),
+    ("PROD003", "CK003", "ACC003", "LOW", "FI3", "System3", "Type3", "IndCode3", "IndDesc3", 30000.0)
+]
+product_columns = ["productId", "customer_key", "account_key", "account_risk_code_desc", "financial_institution", 
+                   "sourceSystem", "externalAccountType", "industry_code", "industry_code_desc", "credit_limit"]
 
-# Create DataFrame
-df = spark.createDataFrame(data, columns)
+# Data for target parquet file
+target_data = [
+    ("TARG001", "UID001", "Account1", "AccountType1", "123456", "Region1", "Risk1", "RM1", "Name1", "TRUE"),
+    ("TARG002", "UID002", "Account2", "AccountType2", "654321", "Region2", "Risk2", "RM2", "Name2", "FALSE"),
+    ("TARG003", "UID003", "Account3", "AccountType3", "789123", "Region3", "Risk3", "RM3", "Name3", "TRUE")
+]
+target_columns = ["targetId", "customerUniqueId", "accountName", "highAccountType", "sortcode", "regionId", 
+                  "riskCode", "rmId", "rmName", "jointAccount"]
 
-# Write the data to Parquet files
-output_path = args['OUTPUT_PATH']
-df.write.mode("overwrite").parquet(output_path)
+# Create DataFrames
+customer_df = spark.createDataFrame(customer_data, customer_columns)
+product_df = spark.createDataFrame(product_data, product_columns)
+target_df = spark.createDataFrame(target_data, target_columns)
+
+# Specify output folders for each dataset
+customer_output_path = args['CUSTOMER_PATH'] + "/customer_data/"
+product_output_path = args['PRODUCT_PATH'] + "/product_data/"
+target_output_path = args['TARGET_PATH'] + "/target_data/"
+
+# Write Parquet files to specified paths in separate folders
+customer_df.write.mode("overwrite").parquet(customer_output_path)
+product_df.write.mode("overwrite").parquet(product_output_path)
+target_df.write.mode("overwrite").parquet(target_output_path)
 
 # Commit job
 job.commit()
