@@ -1,17 +1,46 @@
-ldef logTransactionIds(transactionIds: List[String], validationType: String, outputBasePath: String)(implicit spark: SparkSession): Unit = {
-    import spark.implicits._
+def applyDirectColumnValidation(
+  sourceCols: String,
+  targetCols: String,
+  transactionSource: DataFrame,
+  caseClass: DataFrame
+)(implicit spark: SparkSession): (DataFrame, List[String], List[String]) = {
+  import spark.implicits._
 
-    // Convert List[String] to DataFrame by parallelizing it
-    val unmatchedIdsDF = spark.sparkContext.parallelize(transactionIds).toDF("UnmatchedTransactionIDs")
-    
-    val sanitizedValidationType = validationType.replace(" ", "_")
-    val outputPath = s"$outputBasePath/${sanitizedValidationType}_unmatched_ids"
+  if (!transactionSource.columns.contains("TRANSACTION_ID") || !caseClass.columns.contains("TRANSACTION_ID")) {
+    logger.warn("TRANSACTION_ID is missing in either source or target. Skipping direct column validation.")
+    return (spark.createDataFrame(spark.sparkContext.emptyRDD[Row], caseClass.schema), List.empty, List.empty)
+  }
 
-    try {
-        unmatchedIdsDF.write.mode("overwrite").text(outputPath)
-        println(s"Successfully wrote unmatched IDs for $validationType to $outputPath")
-    } catch {
-        case e: Exception =>
-            println(s"Error writing unmatched IDs for $validationType: ${e.getMessage}")
-    }
+  val sourceColumns = sourceCols.split(",").map(_.trim).toSeq
+  val targetColumns = targetCols.split(",").map(_.trim).toSeq
+
+  val (existingSourceColumns, existingTargetColumns) = filterExistingColumnPairs(sourceColumns, targetColumns, transactionSource, caseClass)
+
+  if (existingSourceColumns.isEmpty || existingTargetColumns.isEmpty) {
+    logger.warn(s"No valid columns left for comparison after filtering missing columns.")
+    (spark.createDataFrame(spark.sparkContext.emptyRDD[Row], caseClass.schema), List.empty, List.empty)
+  } else {
+    val sourceDirectData = transactionSource.select($"TRANSACTION_ID" +: existingSourceColumns.map(col): _*)
+    val targetDirectData = caseClass.select($"transactionid" +: existingTargetColumns.map(col): _*)
+
+    // Find unmatched rows
+    val unmatchedSourceToTarget = sourceDirectData.except(targetDirectData)
+    val unmatchedTargetToSource = targetDirectData.except(sourceDirectData)
+
+    // Log matching rows
+    val matchingRows = sourceDirectData.intersect(targetDirectData)
+    val matchedIds = matchingRows.select("TRANSACTION_ID").as[String].collect().toList
+
+    // Identify matching columns
+    val matchingColumns = existingSourceColumns.zip(existingTargetColumns).collect {
+      case (sourceCol, targetCol) if sourceDirectData.schema.fieldNames.contains(sourceCol) &&
+                                      targetDirectData.schema.fieldNames.contains(targetCol) => sourceCol
+    }.toList
+
+    // Combine source-to-target and target-to-source differences into a single DataFrame
+    val result = unmatchedSourceToTarget.withColumn("ValidationType", lit("Direct Source-to-Target Validation"))
+      .unionByName(unmatchedTargetToSource.withColumn("ValidationType", lit("Direct Target-to-Source Validation")), allowMissingColumns = true)
+
+    (result, matchedIds, matchingColumns)
+  }
 }
