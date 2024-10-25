@@ -1,63 +1,257 @@
-The “cannot resolve column name” error you’re getting in your main code might occur because the columns expected in your Glue job are not present in the Parquet files you generated. Here are a few steps to troubleshoot and ensure you’re resolving the issue:
+import com.amazonaws.services.glue.GlueContext
+import com.amazonaws.services.glue.util.Job
+import org.apache.spark.SparkContext
+import org.apache.spark.sql.{DataFrame, SparkSession, Row}
+import org.apache.spark.sql.functions._
+import org.apache.log4j.Logger
+import com.amazonaws.services.glue.util.GlueArgParser
+import java.io.{File, PrintWriter}
+import scala.collection.mutable.ListBuffer
 
-1. Check Column Names in Generated Parquet Files
+object DynamicCaseClass {
 
-Ensure that the column names in your generated Parquet files exactly match the column names expected by the main code. Parquet files are case-sensitive, so even small variations in capitalization (e.g., account_key vs accountKey) can lead to errors.
+  // Initialize logger globally
+  val logger: Logger = Logger.getLogger(this.getClass.getName)
 
-You can check the columns of the generated files using the following code:
+  def main(sysArgs: Array[String]): Unit = {
+    val spark: SparkSession = SparkSession.builder().getOrCreate()
+    val glueContext: GlueContext = new GlueContext(spark.sparkContext)
+    import spark.implicits._
 
-df = spark.read.parquet("s3://path-to-your-parquet-file/")
-df.printSchema()
+    val args = GlueArgParser.getResolvedOptions(sysArgs, Seq("s3PathConfig", "s3ValidationConfig").toArray)
+    val s3PathConfig = args("s3PathConfig")
+    val s3ValidationConfig = args("s3ValidationConfig")
 
-2. Compare Columns in Your Main Code and Parquet Files
+    val pathConfig = readPathConfig(spark.read.textFile(s3PathConfig).collect())
+    val validationConfig = parseValidationConfig(spark.read.textFile(s3ValidationConfig).collect())
+    val inputSourcePath = pathConfig.getOrElse("inputSourcePath", "")
+    val inputTargetPath = pathConfig.getOrElse("inputTargetPath", "")
+    val outputBasePath = pathConfig.getOrElse("outputBasePath", "")
 
-Ensure that the columns listed in your main code match the ones in the generated Parquet files. If any are missing, add them either to your Parquet generation script or modify the main code to handle the missing columns gracefully (by skipping or logging them).
+    val transactionSource: DataFrame = spark.read.parquet(inputSourcePath)
+    val caseClass: DataFrame = spark.read.parquet(inputTargetPath)
 
-3. Log Missing Columns in the Glue Job
+    var combinedResults: DataFrame = spark.createDataFrame(spark.sparkContext.emptyRDD[Row], caseClass.schema)
+    val summaryLog = new ListBuffer[String]
 
-Modify your main code to log any missing columns. You can handle this by comparing the expected columns with the actual columns read from the input data.
+    // Null Validation
+    if (validationConfig.contains("null_validation")) {
+      val nullColumns = validationConfig("null_validation")("columns")
+      val nullValidationResult = applyNullValidation(nullColumns, caseClass)(spark)
+      combinedResults = mergeWithCombinedResults(combinedResults, nullValidationResult)
+      summaryLog += s"Null Validation: ${nullValidationResult.count()} unmatched rows"
+    }
 
-Here’s an example of how to dynamically handle missing columns in your main code:
+    // Direct Column Validation
+    if (validationConfig.contains("direct_column_validation")) {
+      val sourceCols = validationConfig("direct_column_validation")("columns_source")
+      val targetCols = validationConfig("direct_column_validation")("columns_target")
+      val (directValidationResult, unmatchedIds) = applyDirectColumnValidation(sourceCols, targetCols, transactionSource, caseClass)(spark)
+      combinedResults = mergeWithCombinedResults(combinedResults, directValidationResult)
+      summaryLog += s"Direct Column Validation: ${directValidationResult.count()} unmatched rows"
+      logTransactionIds(unmatchedIds, "Direct Column Validation", outputBasePath)
+    }
 
-expected_columns = ['customer_key', 'account_key', 'NUM_OF_ACCOUNT', ...]  # List all columns here
-actual_columns = df.columns
+    // Narrative Validation
+    if (validationConfig.contains("narrative_validation")) {
+      val sourceNarrativeCol = validationConfig("narrative_validation")("source_column")
+      val targetNarrativeCol = validationConfig("narrative_validation")("target_column")
+      val (narrativeValidationResult, unmatchedIds) = applyNarrativeValidation(sourceNarrativeCol, targetNarrativeCol, transactionSource, caseClass)(spark)
+      combinedResults = mergeWithCombinedResults(combinedResults, narrativeValidationResult)
+      summaryLog += s"Narrative Validation: ${narrativeValidationResult.count()} unmatched rows"
+      logTransactionIds(unmatchedIds, "Narrative Validation", outputBasePath)
+    }
 
-missing_columns = set(expected_columns) - set(actual_columns)
+    // Amount Local Validation
+    if (validationConfig.contains("amount_local_validation")) {
+      val sourceAmountCol = validationConfig("amount_local_validation")("source_column")
+      val targetAmountCol = validationConfig("amount_local_validation")("target_column")
+      val (amountLocalValidationResult, unmatchedIds) = applyAmountLocalValidation(sourceAmountCol, targetAmountCol, transactionSource, caseClass)(spark)
+      combinedResults = mergeWithCombinedResults(combinedResults, amountLocalValidationResult)
+      summaryLog += s"Amount Local Validation: ${amountLocalValidationResult.count()} unmatched rows"
+      logTransactionIds(unmatchedIds, "Amount Local Validation", outputBasePath)
+    }
 
-if missing_columns:
-    print(f"Missing columns: {missing_columns}")
-else:
-    print("All expected columns are present.")
+    // Transaction Country ISO3 Validation
+    if (validationConfig.contains("transaction_country_iso3_validation")) {
+      val sourceCountryCol = validationConfig("transaction_country_iso3_validation")("source_column")
+      val targetCountryCol = validationConfig("transaction_country_iso3_validation")("target_column")
+      val (countryIsoValidationResult, unmatchedIds) = applyTransactionCountryISO3Validation(sourceCountryCol, targetCountryCol, transactionSource, caseClass)(spark)
+      combinedResults = mergeWithCombinedResults(combinedResults, countryIsoValidationResult)
+      summaryLog += s"Transaction Country ISO3 Validation: ${countryIsoValidationResult.count()} unmatched rows"
+      logTransactionIds(unmatchedIds, "Transaction Country ISO3 Validation", outputBasePath)
+    }
 
-4. Ensure All Data Types Match
+    val combinedOutputPath = s"${outputBasePath}/combined_validation_output/"
+    combinedResults.write.mode("overwrite").parquet(combinedOutputPath)
+    writeSummaryLog(summaryLog.toList, s"${outputBasePath}/summary_log.txt")
 
-Another possible cause of the error could be mismatched data types. Ensure that the data types in the generated Parquet files are consistent with what your main code expects.
+    Job.commit()
+  }
 
-5. Modify the Main Code to Be More Resilient
+  def logTransactionIds(transactionIds: List[String], validationType: String, outputBasePath: String): Unit = {
+    val outputFile = new File(s"${outputBasePath}/${validationType}_unmatched_ids.txt")
+    val writer = new PrintWriter(outputFile)
+    writer.write(s"$validationType Unmatched Transaction IDs:\n")
+    transactionIds.foreach(id => writer.write(s"$id\n"))
+    writer.close()
+  }
 
-If some columns are optional or may not always be present, you could modify the main code to skip over missing columns rather than failing with an exception.
+  def writeSummaryLog(log: List[String], outputPath: String): Unit = {
+    val outputFile = new File(outputPath)
+    val writer = new PrintWriter(outputFile)
+    log.foreach(line => writer.write(s"$line\n"))
+    writer.close()
+  }
 
-Here is an example of how to handle missing columns dynamically:
+  def readPathConfig(config: Array[String]): Map[String, String] = {
+    config.filterNot(line => line.trim.isEmpty || line.trim.startsWith("#")).flatMap { line =>
+      line.split("=").map(_.trim) match {
+        case Array(key, value) if key.nonEmpty && value.nonEmpty =>
+          Some(key -> value)
+        case _ =>
+          logger.warn(s"Invalid line in path config: $line")
+          None
+      }
+    }.toMap
+  }
 
-# Check for missing columns before querying
-expected_columns = ['account_key', 'customer_key', 'currency_code', 'financial_institution']
+  def parseValidationConfig(config: Array[String]): Map[String, Map[String, String]] = {
+    var currentSection: String = ""
+    var validationConfig: Map[String, Map[String, String]] = Map()
+    config.filterNot(line => line.trim.isEmpty || line.trim.startsWith("#")).foreach { line =>
+      if (line.startsWith("[") && line.endsWith("]")) {
+        currentSection = line.substring(1, line.length - 1).trim
+        validationConfig += (currentSection -> Map())
+      } else {
+        val keyValue = line.split("=").map(_.trim)
+        if (keyValue.length == 2 && currentSection.nonEmpty) {
+          val currentValues = validationConfig(currentSection)
+          validationConfig += (currentSection -> (currentValues + (keyValue(0) -> keyValue(1))))
+        } else {
+          logger.warn(s"Invalid line in validation config: $line")
+        }
+      }
+    }
+    validationConfig
+  }
 
-df = spark.read.parquet('s3://your-bucket/customer/')
+  def applyNullValidation(columns: String, caseClass: DataFrame)(implicit spark: SparkSession): DataFrame = {
+    import spark.implicits._
+    if (!caseClass.columns.contains("TRANSACTION_ID")) {
+      logger.warn("TRANSACTION_ID is missing. Skipping null validation.")
+      return spark.createDataFrame(spark.sparkContext.emptyRDD[Row], caseClass.schema)
+    }
+    val nullColumns = columns.split(",").map(_.trim).toSeq
+    caseClass.select(nullColumns.map(col): _*).distinct().withColumn("ValidationType", lit("Null Validation"))
+  }
 
-# Ensure only columns that exist are selected
-available_columns = [col for col in expected_columns if col in df.columns]
+  def applyDirectColumnValidation(sourceCols: String, targetCols: String, transactionSource: DataFrame, caseClass: DataFrame)(implicit spark: SparkSession): (DataFrame, List[String]) = {
+    import spark.implicits._
+    if (!transactionSource.columns.contains("TRANSACTION_ID") || !caseClass.columns.contains("TRANSACTION_ID")) {
+      logger.warn("TRANSACTION_ID is missing in either source or target. Skipping direct column validation.")
+      return (spark.createDataFrame(spark.sparkContext.emptyRDD[Row], caseClass.schema), List.empty)
+    }
+    val sourceColumns = sourceCols.split(",").map(_.trim).toSeq
+    val targetColumns = targetCols.split(",").map(_.trim).toSeq
 
-if len(available_columns) < len(expected_columns):
-    missing_columns = set(expected_columns) - set(df.columns)
-    print(f"Missing columns: {missing_columns}")
+    val (existingSourceColumns, existingTargetColumns) = filterExistingColumnPairs(sourceColumns, targetColumns, transactionSource, caseClass)
+    if (existingSourceColumns.isEmpty || existingTargetColumns.isEmpty) {
+      logger.warn(s"No valid columns left for comparison after filtering missing columns.")
+      (spark.createDataFrame(spark.sparkContext.emptyRDD[Row], caseClass.schema), List.empty)
+    } else {
+      val sourceDirectData = transactionSource.select($"TRANSACTION_ID" +: existingSourceColumns.map(col): _*)
+      val targetDirectData = caseClass.select($"transactionid" +: existingTargetColumns.map(col): _*)
 
-# Select only the available columns
-df = df.select(available_columns)
+      val directSourceToTargetDiff = sourceDirectData.exceptAll(targetDirectData)
+      val directTargetToSourceDiff = targetDirectData.exceptAll(sourceDirectData)
+      val unmatchedIds = directSourceToTargetDiff.select("TRANSACTION_ID").as[String].collect().toList
 
-Next Steps:
+      val result = directSourceToTargetDiff.withColumn("ValidationType", lit("Direct Source-to-Target Validation"))
+        .unionByName(directTargetToSourceDiff.withColumn("ValidationType", lit("Direct Target-to-Source Validation")), allowMissingColumns = true)
 
-	1.	Check the columns of the generated Parquet files to ensure they match your main code.
-	2.	Update your main Glue job to either add missing columns or handle them gracefully by logging and skipping those columns.
-	3.	Check the case-sensitivity of your column names.
+      (result, unmatchedIds)
+    }
+  }
 
-After making these changes, test your Glue job again. Let me know if you need any specific guidance on modifying your main code.
+  def applyNarrativeValidation(sourceNarrativeCol: String, targetNarrativeCol: String, transactionSource: DataFrame, caseClass: DataFrame)(implicit spark: SparkSession): (DataFrame, List[String]) = {
+    import spark.implicits._
+    if (!transactionSource.columns.contains("TRANSACTION_ID") || !caseClass.columns.contains("TRANSACTION_ID")) {
+      logger.warn("TRANSACTION_ID is missing in either source or target. Skipping narrative validation.")
+      return (spark.createDataFrame(spark.sparkContext.emptyRDD[Row], caseClass.schema), List.empty)
+    }
+    val sourceNarrativeData = transactionSource.select($"TRANSACTION_ID", col(sourceNarrativeCol))
+    val targetNarrativeData = caseClass.select($"transactionid", col(targetNarrativeCol))
+
+    val narrativeSourceToTargetDiff = sourceNarrativeData.exceptAll(targetNarrativeData)
+    val narrativeTargetToSourceDiff = targetNarrativeData.exceptAll(sourceNarrativeData)
+    val unmatchedIds = narrativeSourceToTargetDiff.select("TRANSACTION_ID").as[String].collect().toList
+
+    val result = narrativeSourceToTargetDiff.withColumn("ValidationType", lit("Narrative Source-to-Target Validation"))
+      .unionByName(narrativeTargetToSourceDiff.withColumn("ValidationType", lit("Narrative Target-to-Source Validation")), allowMissingColumns = true)
+
+    (result, unmatchedIds)
+  }
+
+  def applyAmountLocalValidation(sourceAmountCol: String, targetAmountCol: String, transactionSource: DataFrame, caseClass: DataFrame)(implicit spark: SparkSession): (DataFrame, List[String]) = {
+    import spark.implicits._
+    if (!transactionSource.columns.contains("TRANSACTION_ID") || !caseClass.columns.contains("TRANSACTION_ID")) {
+      logger.warn("TRANSACTION_ID is missing in either source or target. Skipping amount local validation.")
+      return (spark.createDataFrame(spark.sparkContext.emptyRDD[Row], caseClass.schema), List.empty)
+    }
+    val sourceAmountData = transactionSource.select($"TRANSACTION_ID", col(sourceAmountCol))
+    val targetAmountData = caseClass.select($"transactionid", col(targetAmountCol))
+
+    val amountLocalSourceToTargetDiff = sourceAmountData.exceptAll(targetAmountData)
+    val amountLocalTargetToSourceDiff = targetAmountData.exceptAll(sourceAmountData)
+    val unmatchedIds = amountLocalSourceToTargetDiff.select("TRANSACTION_ID").as[String].collect().toList
+
+    val result = amountLocalSourceToTargetDiff.withColumn("ValidationType", lit("Amount Local Source-to-Target Validation"))
+      .unionByName(amountLocalTargetToSourceDiff.withColumn("ValidationType", lit("Amount Local Target-to-Source Validation")), allowMissingColumns = true)
+
+    (result, unmatchedIds)
+  }
+
+  def applyTransactionCountryISO3Validation(sourceCountryCol: String, targetCountryCol: String, transactionSource: DataFrame, caseClass: DataFrame)(implicit spark: SparkSession): (DataFrame, List[String]) = {
+    import spark.implicits._
+    if (!transactionSource.columns.contains("TRANSACTION_ID") || !caseClass.columns.contains("TRANSACTION_ID")) {
+      logger.warn("TRANSACTION_ID is missing in either source or target. Skipping transaction country ISO3 validation.")
+      return (spark.createDataFrame(spark.sparkContext.emptyRDD[Row], caseClass.schema), List.empty)
+    }
+    val mappingUDF = udf((input: String) => Map("AD" -> "AND", "AE" -> "ARE", "AF" -> "AFG", "AG" -> "ATG", "AI" -> "AIA").getOrElse(input, input))
+    val sourceTransactionCountry = transactionSource.withColumn("transactionCountryIso3Mapped", mappingUDF(col(sourceCountryCol)))
+    val targetTransactionCountry = caseClass.select(col(targetCountryCol))
+
+    val countryIsoSourceToTargetDiff = sourceTransactionCountry.select($"TRANSACTION_ID", col("transactionCountryIso3Mapped")).exceptAll(targetTransactionCountry)
+    val countryIsoTargetToSourceDiff = targetTransactionCountry.exceptAll(sourceTransactionCountry.select($"TRANSACTION_ID", col("transactionCountryIso3Mapped")))
+    val unmatchedIds = countryIsoSourceToTargetDiff.select("TRANSACTION_ID").as[String].collect().toList
+
+    val result = countryIsoSourceToTargetDiff.withColumn("ValidationType", lit("Transaction Country ISO3 Source-to-Target Validation"))
+      .unionByName(countryIsoTargetToSourceDiff.withColumn("ValidationType", lit("Transaction Country ISO3 Target-to-Source Validation")), allowMissingColumns = true)
+
+    (result, unmatchedIds)
+  }
+
+  def filterExistingColumnPairs(sourceColumns: Seq[String], targetColumns: Seq[String], transactionSource: DataFrame, caseClass: DataFrame): (Seq[String], Seq[String]) = {
+    val existingSourceColumns = filterExistingColumns(transactionSource, sourceColumns)
+    val existingTargetColumns = filterExistingColumns(caseClass, targetColumns)
+    sourceColumns.zip(targetColumns).foreach { case (sourceCol, targetCol) =>
+      if (!existingSourceColumns.contains(sourceCol) || !existingTargetColumns.contains(targetCol)) {
+        logger.warn(s"Skipping comparison for columns: $sourceCol and $targetCol because one or both are missing.")
+      }
+    }
+    val validPairs = sourceColumns.zip(targetColumns).filter { case (sourceCol, targetCol) =>
+      existingSourceColumns.contains(sourceCol) && existingTargetColumns.contains(targetCol)
+    }
+    (validPairs.map(_._1), validPairs.map(_._2))
+  }
+
+  def filterExistingColumns(df: DataFrame, columns: Seq[String]): Seq[String] = {
+    val existingColumns = df.columns.toSet
+    columns.filter(existingColumns.contains)
+  }
+
+  def mergeWithCombinedResults(existingResults: DataFrame, newResults: DataFrame): DataFrame = {
+    if (existingResults.isEmpty) newResults else existingResults.unionByName(newResults, allowMissingColumns = true)
+  }
+}
