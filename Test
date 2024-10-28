@@ -1,8 +1,12 @@
-def logTransactionIds(transactionIds: List[String], validationType: String, outputBasePath: String): Unit = {
-    val outputFile = new File(s"${outputBasePath}/${validationType}_matched_ids.txt") // Updated file name
-    val writer = new PrintWriter(outputFile)
+def logTransactionIds(transactionIds: List[String], validationType: String, outputBasePath: String)(implicit spark: SparkSession): Unit = {
+    import spark.implicits._
+    // Prepare the DataFrame for unmatched transaction IDs
+    val unmatchedIdsDF = transactionIds.toDF("UnmatchedTransactionIDs")
 
-    writer.write(s"$validationType Matched Transaction IDs:\n") // Updated message
-    transactionIds.foreach(id => writer.write(s"$id\n"))
-    writer.close()
+    // Construct the output path and replace spaces with underscores
+    val sanitizedValidationType = validationType.replace(" ", "_")
+    val outputPath = s"$outputBasePath/${sanitizedValidationType}_unmatched_ids"
+
+    // Write to S3 using Spark's DataFrame write
+    unmatchedIdsDF.write.mode("overwrite").text(outputPath)
 }
