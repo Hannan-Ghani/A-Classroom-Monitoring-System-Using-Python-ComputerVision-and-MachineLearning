@@ -1,6 +1,9 @@
 def logTransactionIds(transactionIds: List[String], validationType: String, outputBasePath: String)(implicit spark: SparkSession): Unit = {
     import spark.implicits._
-    val unmatchedIdsDF = transactionIds.toDF("UnmatchedTransactionIDs")
+
+    // Convert List[String] to DataFrame by parallelizing it
+    val unmatchedIdsDF = spark.sparkContext.parallelize(transactionIds).toDF("UnmatchedTransactionIDs")
+    
     val sanitizedValidationType = validationType.replace(" ", "_")
     val outputPath = s"$outputBasePath/${sanitizedValidationType}_unmatched_ids"
 
