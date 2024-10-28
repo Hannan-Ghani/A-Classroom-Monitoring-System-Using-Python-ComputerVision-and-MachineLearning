@@ -1,17 +1,6 @@
-def logTransactionIds(transactionIds: List[String], validationType: String, outputBasePath: String)(implicit spark: SparkSession): Unit = {
-    import spark.implicits._
-
-    // Convert List[String] to DataFrame by parallelizing it
-    val unmatchedIdsDF = spark.sparkContext.parallelize(transactionIds).toDF("UnmatchedTransactionIDs")
-    
-    val sanitizedValidationType = validationType.replace(" ", "_")
-    val outputPath = s"$outputBasePath/${sanitizedValidationType}_unmatched_ids"
-
-    try {
-        unmatchedIdsDF.write.mode("overwrite").text(outputPath)
-        println(s"Successfully wrote unmatched IDs for $validationType to $outputPath")
-    } catch {
-        case e: Exception =>
-            println(s"Error writing unmatched IDs for $validationType: ${e.getMessage}")
-    }
+def writeSummaryLog(log: List[String], outputPath: String)(implicit spark: SparkSession): Unit = {
+  import spark.implicits._
+  val summaryDF = spark.sparkContext.parallelize(log).toDF("Summary")
+  summaryDF.write.mode("overwrite").text(outputPath)
+  println(s"Successfully wrote summary log to $outputPath")
 }
