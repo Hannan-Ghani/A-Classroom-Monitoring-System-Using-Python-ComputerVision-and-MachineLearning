@@ -1,6 +1,22 @@
-def writeSummaryLog(log: List[String], outputPath: String)(implicit spark: SparkSession): Unit = {
-  import spark.implicits._
-  val summaryDF = spark.sparkContext.parallelize(log).toDF("Summary")
-  summaryDF.write.mode("overwrite").text(outputPath)
-  println(s"Successfully wrote summary log to $outputPath")
+def logTransactionIds(transactionIds: List[String], validationType: String, outputBasePath: String): Unit = {
+    import spark.implicits._
+
+    // Create the output path, replacing spaces with underscores in the validation type
+    val sanitizedValidationType = validationType.replace(" ", "_")
+    val outputPath = s"$outputBasePath/${sanitizedValidationType}_matched_ids.txt"
+
+    // Check if there are any IDs to log, ensuring it doesn't create empty files
+    if (transactionIds.nonEmpty) {
+        val matchedIdsDF = transactionIds.toDF("MatchedTransactionIDs")
+
+        try {
+            matchedIdsDF.write.mode("overwrite").text(outputPath)
+            println(s"Successfully wrote matched IDs for $validationType to $outputPath")
+        } catch {
+            case e: Exception =>
+                println(s"Error writing matched IDs for $validationType: ${e.getMessage}")
+        }
+    } else {
+        println(s"No matched IDs found for $validationType, so no file was created.")
+    }
 }
