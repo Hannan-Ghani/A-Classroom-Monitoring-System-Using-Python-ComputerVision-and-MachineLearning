@@ -1,12 +1,14 @@
 def logTransactionIds(transactionIds: List[String], validationType: String, outputBasePath: String)(implicit spark: SparkSession): Unit = {
     import spark.implicits._
-    // Prepare the DataFrame for unmatched transaction IDs
     val unmatchedIdsDF = transactionIds.toDF("UnmatchedTransactionIDs")
-
-    // Construct the output path and replace spaces with underscores
     val sanitizedValidationType = validationType.replace(" ", "_")
     val outputPath = s"$outputBasePath/${sanitizedValidationType}_unmatched_ids"
 
-    // Write to S3 using Spark's DataFrame write
-    unmatchedIdsDF.write.mode("overwrite").text(outputPath)
+    try {
+        unmatchedIdsDF.write.mode("overwrite").text(outputPath)
+        println(s"Successfully wrote unmatched IDs for $validationType to $outputPath")
+    } catch {
+        case e: Exception =>
+            println(s"Error writing unmatched IDs for $validationType: ${e.getMessage}")
+    }
 }
