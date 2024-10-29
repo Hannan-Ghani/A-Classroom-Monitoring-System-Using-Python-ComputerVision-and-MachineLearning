@@ -1,22 +1,55 @@
-def logTransactionIds(transactionIds: List[String], validationType: String, outputBasePath: String): Unit = {
+import com.amazonaws.services.glue.GlueContext
+import org.apache.spark.SparkContext
+import org.apache.spark.sql.{DataFrame, SparkSession}
+import org.apache.spark.sql.functions._
+import java.io.{File, PrintWriter}
+
+object DirectColumnValidation {
+
+  def main(sysArgs: Array[String]): Unit = {
+    // Initialize Spark session
+    val spark: SparkSession = SparkSession.builder().getOrCreate()
     import spark.implicits._
 
-    // Create the output path, replacing spaces with underscores in the validation type
-    val sanitizedValidationType = validationType.replace(" ", "_")
-    val outputPath = s"$outputBasePath/${sanitizedValidationType}_matched_ids.txt"
+    // Paths to source and target files
+    val inputSourcePath = "s3://your-bucket/input/source.parquet"
+    val inputTargetPath = "s3://your-bucket/input/target.parquet"
+    val outputBasePath = "s3://your-bucket/output/"
 
-    // Check if there are any IDs to log, ensuring it doesn't create empty files
-    if (transactionIds.nonEmpty) {
-        val matchedIdsDF = transactionIds.toDF("MatchedTransactionIDs")
+    // Load source and target data
+    val transactionSource: DataFrame = spark.read.parquet(inputSourcePath)
+    val caseClass: DataFrame = spark.read.parquet(inputTargetPath)
+      .withColumn("transactiontype", lit("debit"))  // Set all transactiontype values to "debit" in target
 
-        try {
-            matchedIdsDF.write.mode("overwrite").text(outputPath)
-            println(s"Successfully wrote matched IDs for $validationType to $outputPath")
-        } catch {
-            case e: Exception =>
-                println(s"Error writing matched IDs for $validationType: ${e.getMessage}")
-        }
-    } else {
-        println(s"No matched IDs found for $validationType, so no file was created.")
-    }
+    // Columns to compare between source and target
+    val sourceCols = Seq("transactionid", "column1", "column2") // Replace column names as needed
+    val targetCols = Seq("transactionid", "column1", "column2") // Ensure columns match in source and target
+
+    // Filter for existing columns in both dataframes
+    val existingSourceColumns = sourceCols.filter(transactionSource.columns.contains)
+    val existingTargetColumns = targetCols.filter(caseClass.columns.contains)
+
+    // Select columns and find matching transaction IDs
+    val sourceData = transactionSource.select(existingSourceColumns.map(col): _*)
+    val targetData = caseClass.select(existingTargetColumns.map(col): _*)
+
+    // Find matching rows based on intersection and get the matching transaction IDs
+    val matchingData = sourceData.intersect(targetData)
+    val matchingIds = matchingData.select("transactionid").as[String].collect().toList
+
+    // Write matching IDs to a text file
+    writeMatchingTransactionIds(matchingIds, outputBasePath, "matching_transaction_ids.txt")
+
+    // Stop Spark session
+    spark.stop()
+  }
+
+  def writeMatchingTransactionIds(matchingIds: List[String], outputBasePath: String, fileName: String): Unit = {
+    val outputPath = s"$outputBasePath/$fileName"
+    val writer = new PrintWriter(new File(outputPath))
+    writer.write("Matching Transaction IDs:\n")
+    matchingIds.foreach(id => writer.write(s"$id\n"))
+    writer.close()
+    println(s"Successfully wrote matching transaction IDs to $outputPath")
+  }
 }
