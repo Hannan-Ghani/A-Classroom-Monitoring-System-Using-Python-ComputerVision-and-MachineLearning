@@ -1,55 +1,113 @@
+
 import com.amazonaws.services.glue.GlueContext
+import com.amazonaws.services.glue.util.Job
 import org.apache.spark.SparkContext
 import org.apache.spark.sql.{DataFrame, SparkSession}
 import org.apache.spark.sql.functions._
+import org.apache.log4j.Logger
+import com.amazonaws.services.glue.util.GlueArgParser
 import java.io.{File, PrintWriter}
 
-object DirectColumnValidation {
+object DynamicCaseClass {
+
+  val logger: Logger = Logger.getLogger(this.getClass.getName)
 
   def main(sysArgs: Array[String]): Unit = {
-    // Initialize Spark session
     val spark: SparkSession = SparkSession.builder().getOrCreate()
+    val glueContext: GlueContext = new GlueContext(spark.sparkContext)
     import spark.implicits._
 
-    // Paths to source and target files
-    val inputSourcePath = "s3://your-bucket/input/source.parquet"
-    val inputTargetPath = "s3://your-bucket/input/target.parquet"
-    val outputBasePath = "s3://your-bucket/output/"
+    val args = GlueArgParser.getResolvedOptions(sysArgs, Seq("s3PathConfig", "s3ValidationConfig").toArray)
+    val s3PathConfig = args("s3PathConfig")
+    val s3ValidationConfig = args("s3ValidationConfig")
 
-    // Load source and target data
+    val pathConfig = readPathConfig(spark.read.textFile(s3PathConfig).collect())
+    val validationConfig = parseValidationConfig(spark.read.textFile(s3ValidationConfig).collect())
+    val inputSourcePath = pathConfig.getOrElse("inputSourcePath", "")
+    val inputTargetPath = pathConfig.getOrElse("inputTargetPath", "")
+    val outputBasePath = pathConfig.getOrElse("outputBasePath", "")
+
     val transactionSource: DataFrame = spark.read.parquet(inputSourcePath)
     val caseClass: DataFrame = spark.read.parquet(inputTargetPath)
-      .withColumn("transactiontype", lit("debit"))  // Set all transactiontype values to "debit" in target
 
-    // Columns to compare between source and target
-    val sourceCols = Seq("transactionid", "column1", "column2") // Replace column names as needed
-    val targetCols = Seq("transactionid", "column1", "column2") // Ensure columns match in source and target
+    // Direct Column Validation
+    val sourceCols = "TRANSACTION_ID,CS1,CS2"
+    val targetCols = "transactionId,ct1,ct2"
+    val matchingIds = applyDirectColumnValidation(sourceCols, targetCols, transactionSource, caseClass)(spark)
+    
+    // Log matched transaction IDs
+    logTransactionIds(matchingIds, "Direct Column Validation", outputBasePath)
 
-    // Filter for existing columns in both dataframes
-    val existingSourceColumns = sourceCols.filter(transactionSource.columns.contains)
-    val existingTargetColumns = targetCols.filter(caseClass.columns.contains)
-
-    // Select columns and find matching transaction IDs
-    val sourceData = transactionSource.select(existingSourceColumns.map(col): _*)
-    val targetData = caseClass.select(existingTargetColumns.map(col): _*)
-
-    // Find matching rows based on intersection and get the matching transaction IDs
-    val matchingData = sourceData.intersect(targetData)
-    val matchingIds = matchingData.select("transactionid").as[String].collect().toList
-
-    // Write matching IDs to a text file
-    writeMatchingTransactionIds(matchingIds, outputBasePath, "matching_transaction_ids.txt")
-
-    // Stop Spark session
-    spark.stop()
+    Job.commit()
   }
 
-  def writeMatchingTransactionIds(matchingIds: List[String], outputBasePath: String, fileName: String): Unit = {
-    val outputPath = s"$outputBasePath/$fileName"
-    val writer = new PrintWriter(new File(outputPath))
-    writer.write("Matching Transaction IDs:\n")
-    matchingIds.foreach(id => writer.write(s"$id\n"))
+  // Function to compare columns with different names and find matching rows
+  def applyDirectColumnValidation(sourceCols: String, targetCols: String, transactionSource: DataFrame, caseClass: DataFrame)(implicit spark: SparkSession): List[String] = {
+    import spark.implicits._
+
+    // Split column names
+    val sourceColumns = sourceCols.split(",").map(_.trim).toSeq
+    val targetColumns = targetCols.split(",").map(_.trim).toSeq
+
+    // Ensure equal column counts
+    if (sourceColumns.length != targetColumns.length) {
+      throw new IllegalArgumentException("Source and target column lists must have the same length.")
+    }
+
+    // Select columns with aliases (col_0, col_1, etc.) for alignment
+    val sourceSelected = transactionSource.select(sourceColumns.zipWithIndex.map {
+      case (colName, i) => col(colName).as(s"col_$i") 
+    }: _*)
+
+    val targetSelected = caseClass.select(targetColumns.zipWithIndex.map {
+      case (colName, i) => col(colName).as(s"col_$i")
+    }: _*)
+
+    // Intersect to find matching rows
+    val matchingData = sourceSelected.intersect(targetSelected)
+
+    // Collect transaction IDs from matching rows (first column is col_0)
+    matchingData.select("col_0").as[String].collect().toList
+  }
+
+  // Logs matched transaction IDs to a text file in S3
+  def logTransactionIds(transactionIds: List[String], validationType: String, outputBasePath: String): Unit = {
+    val outputFile = new File(s"${outputBasePath}/${validationType}_matched_ids.txt")
+    val writer = new PrintWriter(outputFile)
+    writer.write(s"$validationType Matched Transaction IDs:\n")
+    transactionIds.foreach(id => writer.write(s"$id\n"))
     writer.close()
-    println(s"Successfully wrote matching transaction IDs to $outputPath")
+  }
+
+  def readPathConfig(config: Array[String]): Map[String, String] = {
+    config.filterNot(line => line.trim.isEmpty || line.trim.startsWith("#")).flatMap { line =>
+      line.split("=").map(_.trim) match {
+        case Array(key, value) if key.nonEmpty && value.nonEmpty =>
+          Some(key -> value)
+        case _ =>
+          logger.warn(s"Invalid line in path config: $line")
+          None
+      }
+    }.toMap
+  }
+
+  def parseValidationConfig(config: Array[String]): Map[String, Map[String, String]] = {
+    var currentSection: String = ""
+    var validationConfig: Map[String, Map[String, String]] = Map()
+    config.filterNot(line => line.trim.isEmpty || line.trim.startsWith("#")).foreach { line =>
+      if (line.startsWith("[") && line.endsWith("]")) {
+        currentSection = line.substring(1, line.length - 1).trim
+        validationConfig += (currentSection -> Map())
+      } else {
+        val keyValue = line.split("=").map(_.trim)
+        if (keyValue.length == 2 && currentSection.nonEmpty) {
+          val currentValues = validationConfig(currentSection)
+          validationConfig += (currentSection -> (currentValues + (keyValue(0) -> keyValue(1))))
+        } else {
+          logger.warn(s"Invalid line in validation config: $line")
+        }
+      }
+    }
+    validationConfig
   }
 }
