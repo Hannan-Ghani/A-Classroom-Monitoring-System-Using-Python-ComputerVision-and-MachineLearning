@@ -1,71 +1,12 @@
-import org.apache.spark.sql.{DataFrame, SparkSession}
-import org.apache.spark.sql.functions._
-import java.io.{File, PrintWriter}
-
-object SimpleDirectColumnValidation {
-
-  def main(args: Array[String]): Unit = {
-    val spark: SparkSession = SparkSession.builder().appName("DirectColumnValidation").getOrCreate()
+// Logs matched transaction IDs to an output file
+def logTransactionIds(transactionIds: List[String], outputBasePath: String)(implicit spark: SparkSession): Unit = {
     import spark.implicits._
 
-    // Hardcoded input and output paths
-    val inputSourcePath = "s3://your-bucket/source.parquet"  // Replace with actual source path
-    val inputTargetPath = "s3://your-bucket/target.parquet"  // Replace with actual target path
-    val outputBasePath = "s3://your-bucket/output"           // Replace with actual output path
+    // Convert list to DataFrame for writing to S3
+    val outputPath = s"$outputBasePath/matched_transaction_ids"
+    val transactionIdsDF = transactionIds.toDF("MatchedTransactionIDs")
 
-    // Load source and target data
-    val transactionSource: DataFrame = spark.read.parquet(inputSourcePath)
-    val caseClass: DataFrame = spark.read.parquet(inputTargetPath)
-
-    // Direct Column Validation
-    val sourceCols = "TRANSACTION_ID,CS1,CS2"  // Source columns with different names
-    val targetCols = "transactionId,ct1,ct2"   // Target columns with different names
-
-    // Apply direct column validation with aligned columns
-    val matchingIds = applyDirectColumnValidation(sourceCols, targetCols, transactionSource, caseClass)(spark)
-
-    // Log matched transaction IDs
-    logTransactionIds(matchingIds, outputBasePath)
-
-    spark.stop()
-  }
-
-  // Function to compare columns with different names and find matching rows
-  def applyDirectColumnValidation(sourceCols: String, targetCols: String, transactionSource: DataFrame, caseClass: DataFrame)(implicit spark: SparkSession): List[String] = {
-    import spark.implicits._
-
-    // Split column names
-    val sourceColumns = sourceCols.split(",").map(_.trim).toSeq
-    val targetColumns = targetCols.split(",").map(_.trim).toSeq
-
-    // Ensure equal column counts
-    if (sourceColumns.length != targetColumns.length) {
-      throw new IllegalArgumentException("Source and target column lists must have the same length.")
-    }
-
-    // Rename target columns to match source column names for easy comparison
-    val renamedTarget = caseClass
-      .withColumnRenamed("transactionId", "TRANSACTION_ID")
-      .withColumnRenamed("ct1", "CS1")
-      .withColumnRenamed("ct2", "CS2")
-
-    // Select columns for comparison after renaming
-    val sourceSelected = transactionSource.select(sourceColumns.map(col): _*)
-    val targetSelected = renamedTarget.select(sourceColumns.map(col): _*)
-
-    // Intersect to find matching rows
-    val matchingData = sourceSelected.intersect(targetSelected)
-
-    // Collect transaction IDs from matching rows
-    matchingData.select("TRANSACTION_ID").as[String].collect().toList
-  }
-
-  // Logs matched transaction IDs to a text file
-  def logTransactionIds(transactionIds: List[String], outputBasePath: String): Unit = {
-    val outputFile = new File(s"$outputBasePath/matched_transaction_ids.txt")
-    val writer = new PrintWriter(outputFile)
-    writer.write("Matched Transaction IDs:\n")
-    transactionIds.foreach(id => writer.write(s"$id\n"))
-    writer.close()
-  }
+    // Write the output file to S3 or the local filesystem
+    transactionIdsDF.write.mode("overwrite").text(outputPath)
+    println(s"Successfully wrote matched transaction IDs to $outputPath")
 }
