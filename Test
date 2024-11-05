@@ -1,28 +1,32 @@
-def applyNullValidation(columns: String, caseClass: DataFrame)(implicit spark: SparkSession): DataFrame = {
-    import spark.implicits._
+def applyDirectColumnValidation(
+    sourceCols: String,
+    targetCols: String,
+    transactionSource: DataFrame,
+    caseClass: DataFrame
+)(implicit spark: SparkSession): List[String] = {
+  import spark.implicits._
 
-    // Split the columns string and filter to only include columns that exist in caseClass
-    val nullColumns = columns.split(",").map(_.trim).toSeq
-    val filteredColumns = nullColumns.filter(colName => caseClass.columns.contains(colName))
+  // Split and align column names
+  val sourceColumns = sourceCols.split(",").map(_.trim).toSeq
+  val targetColumns = targetCols.split(",").map(_.trim).toSeq
 
-    // If no valid columns are found, return an empty DataFrame
-    if (filteredColumns.isEmpty) {
-        logger.warn("No valid columns found for null validation.")
-        return spark.createDataFrame(spark.sparkContext.emptyRDD[Row], caseClass.schema)
-    }
+  // Ensure equal column counts
+  if (sourceColumns.length != targetColumns.length) {
+    throw new IllegalArgumentException("Source and target column lists must have the same length.")
+  }
 
-    // Filter rows where all specified columns are null
-    val nullFilteredData = caseClass.filter(filteredColumns.map(colName => col(colName).isNull).reduce(_ && _))
+  // Select columns and rename for consistency
+  val sourceSelected = transactionSource.select(sourceColumns.zipWithIndex.map {
+    case (colName, i) => col(colName).as(s"col_$i")
+  }: _*)
 
-    // Add a validation type column for identification and return the result
-    nullFilteredData.withColumn("ValidationType", lit("Null Validation"))
-}
+  val targetSelected = caseClass.select(targetColumns.zipWithIndex.map {
+    case (colName, i) => col(colName).as(s"col_$i")
+  }: _*)
 
+  // Perform intersect on aligned DataFrames
+  val matchingData = sourceSelected.intersect(targetSelected)
 
-
-// Null Validation
-if (validationConfig.contains("null_validation")) {
-    val nullColumns = validationConfig("null_validation")("columns")
-    val nullValidationResult = applyNullValidation(nullColumns, caseClass)(spark)
-    combinedResults = mergeWithCombinedResults(combinedResults, nullValidationResult)
+  // Collect transaction IDs (from first column, assumed as "col_0" after renaming)
+  matchingData.select("col_0").as[String].collect().toList
 }
