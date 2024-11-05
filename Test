@@ -1,14 +1,28 @@
-// Find the transaction ID column in a case-insensitive manner
-val targetTransactionId = caseClass.columns.find(_.equalsIgnoreCase("transactionId")).getOrElse("transactionId")
+def applyNullValidation(columns: String, caseClass: DataFrame)(implicit spark: SparkSession): DataFrame = {
+    import spark.implicits._
 
-// Select columns with aliases for alignment
-val sourceSelected = transactionSource.select(col(sourceTransactionId).as("col_0") +: sourceColumns.tail.zipWithIndex.map {
-  case (colName, i) => col(colName).as(s"col_${i + 1}")
-}: _*)
+    // Split the columns string and filter to only include columns that exist in caseClass
+    val nullColumns = columns.split(",").map(_.trim).toSeq
+    val filteredColumns = nullColumns.filter(colName => caseClass.columns.contains(colName))
 
-val targetSelected = caseClass.select(col(targetTransactionId).as("col_0") +: targetColumns.tail.zipWithIndex.map {
-  case (colName, i) => col(colName).as(s"col_${i + 1}")
-}: _*)
+    // If no valid columns are found, return an empty DataFrame
+    if (filteredColumns.isEmpty) {
+        logger.warn("No valid columns found for null validation.")
+        return spark.createDataFrame(spark.sparkContext.emptyRDD[Row], caseClass.schema)
+    }
 
-// Filtering rows where all specified columns are null
-val nullFilteredData = caseClass.filter(nullColumns.map(colName => col(colName).isNull).reduce(_ && _))
+    // Filter rows where all specified columns are null
+    val nullFilteredData = caseClass.filter(filteredColumns.map(colName => col(colName).isNull).reduce(_ && _))
+
+    // Add a validation type column for identification and return the result
+    nullFilteredData.withColumn("ValidationType", lit("Null Validation"))
+}
+
+
+
+// Null Validation
+if (validationConfig.contains("null_validation")) {
+    val nullColumns = validationConfig("null_validation")("columns")
+    val nullValidationResult = applyNullValidation(nullColumns, caseClass)(spark)
+    combinedResults = mergeWithCombinedResults(combinedResults, nullValidationResult)
+}
