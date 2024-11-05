@@ -1,1 +1,157 @@
-console.log(Buffer.from("username:password").toString('base64'));
+import com.amazonaws.services.glue.GlueContext
+import com.amazonaws.services.glue.util.Job
+import org.apache.spark.SparkContext
+import org.apache.spark.sql.{DataFrame, SparkSession, Row}
+import org.apache.spark.sql.functions._
+import org.apache.log4j.Logger
+import com.amazonaws.services.glue.util.GlueArgParser
+import java.io.{File, PrintWriter}
+import scala.collection.mutable.ListBuffer
+
+object DynamicCaseClass {
+
+  val logger: Logger = Logger.getLogger(this.getClass.getName)
+
+  def main(sysArgs: Array[String]): Unit = {
+    val spark: SparkSession = SparkSession.builder().getOrCreate()
+    val glueContext: GlueContext = new GlueContext(spark.sparkContext)
+    import spark.implicits._
+
+    val args = GlueArgParser.getResolvedOptions(sysArgs, Seq("s3PathConfig", "s3ValidationConfig").toArray)
+    val s3PathConfig = args("s3PathConfig")
+    val s3ValidationConfig = args("s3ValidationConfig")
+
+    val pathConfig = readPathConfig(spark.read.textFile(s3PathConfig).collect())
+    val validationConfig = parseValidationConfig(spark.read.textFile(s3ValidationConfig).collect())
+    val inputSourcePath = pathConfig.getOrElse("inputSourcePath", "")
+    val inputTargetPath = pathConfig.getOrElse("inputTargetPath", "")
+    val outputBasePath = pathConfig.getOrElse("outputBasePath", "")
+
+    val transactionSource: DataFrame = spark.read.parquet(inputSourcePath)
+    val caseClass: DataFrame = spark.read.parquet(inputTargetPath)
+
+    var combinedResults: DataFrame = spark.createDataFrame(spark.sparkContext.emptyRDD[Row], caseClass.schema)
+
+    if (validationConfig.contains("null_validation")) {
+      val nullColumns = validationConfig("null_validation")("columns")
+      val nullValidationResult = applyNullValidation(nullColumns, caseClass)(spark)
+      combinedResults = mergeWithCombinedResults(combinedResults, nullValidationResult)
+    }
+
+    if (validationConfig.contains("direct_column_validation")) {
+      val sourceCols = validationConfig("direct_column_validation")("columns_source")
+      val targetCols = validationConfig("direct_column_validation")("columns_target")
+      val directValidationResult = applyDirectColumnValidation(sourceCols, targetCols, transactionSource, caseClass)(spark)
+      combinedResults = mergeWithCombinedResults(combinedResults, directValidationResult)
+    }
+
+    if (validationConfig.contains("narrative_validation")) {
+      val sourceCol = validationConfig("narrative_validation")("source_column")
+      val targetCol = validationConfig("narrative_validation")("target_column")
+      val narrativeValidationResult = applyNarrativeValidation(sourceCol, targetCol, transactionSource, caseClass)(spark)
+      combinedResults = mergeWithCombinedResults(combinedResults, narrativeValidationResult)
+    }
+
+    if (validationConfig.contains("amount_local_validation")) {
+      val sourceCol = validationConfig("amount_local_validation")("source_column")
+      val targetCol = validationConfig("amount_local_validation")("target_column")
+      val amountLocalValidationResult = applyAmountLocalValidation(sourceCol, targetCol, transactionSource, caseClass)(spark)
+      combinedResults = mergeWithCombinedResults(combinedResults, amountLocalValidationResult)
+    }
+
+    if (validationConfig.contains("transaction_country_iso3_validation")) {
+      val sourceCol = validationConfig("transaction_country_iso3_validation")("source_column")
+      val targetCol = validationConfig("transaction_country_iso3_validation")("target_column")
+      val countryIsoValidationResult = applyTransactionCountryISO3Validation(sourceCol, targetCol, transactionSource, caseClass)(spark)
+      combinedResults = mergeWithCombinedResults(combinedResults, countryIsoValidationResult)
+    }
+
+    combinedResults.write.mode("overwrite").parquet(s"${outputBasePath}/combined_validation_output/")
+    Job.commit()
+  }
+
+  def applyDirectColumnValidation(sourceCols: String, targetCols: String, transactionSource: DataFrame, caseClass: DataFrame)(implicit spark: SparkSession): DataFrame = {
+    import spark.implicits._
+    val sourceColumns = sourceCols.split(",").map(_.trim)
+    val targetColumns = targetCols.split(",").map(_.trim)
+
+    val sourceSelected = transactionSource.select(sourceColumns.zipWithIndex.map {
+      case (col, i) => col(col).as(s"col_$i")
+    }: _*)
+
+    val targetSelected = caseClass.select(targetColumns.zipWithIndex.map {
+      case (col, i) => col(col).as(s"col_$i")
+    }: _*)
+
+    sourceSelected.intersect(targetSelected).withColumn("ValidationType", lit("Direct Column Validation"))
+  }
+
+  def applyNullValidation(columns: String, caseClass: DataFrame)(implicit spark: SparkSession): DataFrame = {
+    import spark.implicits._
+    val nullColumns = columns.split(",").map(_.trim).filter(caseClass.columns.contains)
+    caseClass.filter(nullColumns.map(col => col(col).isNull).reduce(_ && _))
+      .select("TRANSACTION_ID").withColumn("ValidationType", lit("Null Validation"))
+  }
+
+  def applyNarrativeValidation(sourceCol: String, targetCol: String, transactionSource: DataFrame, caseClass: DataFrame)(implicit spark: SparkSession): DataFrame = {
+    import spark.implicits._
+    val sourceSelected = transactionSource.select($"TRANSACTION_ID", col(sourceCol).as("narrative"))
+    val targetSelected = caseClass.select($"TRANSACTION_ID", col(targetCol).as("narrative"))
+
+    sourceSelected.intersect(targetSelected).withColumn("ValidationType", lit("Narrative Validation"))
+  }
+
+  def applyAmountLocalValidation(sourceCol: String, targetCol: String, transactionSource: DataFrame, caseClass: DataFrame)(implicit spark: SparkSession): DataFrame = {
+    import spark.implicits._
+    val sourceSelected = transactionSource.select($"TRANSACTION_ID", col(sourceCol).as("amount"))
+    val targetSelected = caseClass.select($"TRANSACTION_ID", col(targetCol).as("amount"))
+
+    sourceSelected.intersect(targetSelected).withColumn("ValidationType", lit("Amount Local Validation"))
+  }
+
+  def applyTransactionCountryISO3Validation(sourceCol: String, targetCol: String, transactionSource: DataFrame, caseClass: DataFrame)(implicit spark: SparkSession): DataFrame = {
+    import spark.implicits._
+    val sourceSelected = transactionSource.select($"TRANSACTION_ID", col(sourceCol).as("country"))
+    val targetSelected = caseClass.select($"TRANSACTION_ID", col(targetCol).as("country"))
+
+    sourceSelected.intersect(targetSelected).withColumn("ValidationType", lit("Transaction Country ISO3 Validation"))
+  }
+
+  def parseValidationConfig(configLines: Array[String]): Map[String, Map[String, String]] = {
+    var currentSection = ""
+    var configMap = Map[String, Map[String, String]]()
+
+    configLines.filter(_.trim.nonEmpty).foreach { line =>
+      if (line.startsWith("[") && line.endsWith("]")) {
+        currentSection = line.substring(1, line.length - 1).trim
+        configMap += (currentSection -> Map())
+      } else {
+        val keyValue = line.split("=").map(_.trim)
+        if (keyValue.length == 2 && currentSection.nonEmpty) {
+          configMap += (currentSection -> (configMap(currentSection) + (keyValue(0) -> keyValue(1))))
+        }
+      }
+    }
+    configMap
+  }
+
+  def readPathConfig(config: Array[String]): Map[String, String] = {
+    config.filterNot(line => line.trim.isEmpty || line.trim.startsWith("#")).flatMap { line =>
+      line.split("=").map(_.trim) match {
+        case Array(key, value) if key.nonEmpty && value.nonEmpty =>
+          Some(key -> value)
+        case _ =>
+          logger.warn(s"Invalid line in path config: $line")
+          None
+      }
+    }.toMap
+  }
+
+  def mergeWithCombinedResults(existingResults: DataFrame, newResults: DataFrame): DataFrame = {
+    if (existingResults.isEmpty) {
+      newResults
+    } else {
+      existingResults.unionByName(newResults, allowMissingColumns = true)
+    }
+  }
+}
