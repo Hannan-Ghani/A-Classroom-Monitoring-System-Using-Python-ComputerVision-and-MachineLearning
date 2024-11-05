@@ -10,23 +10,41 @@ def applyDirectColumnValidation(
   val sourceColumns = sourceCols.split(",").map(_.trim).toSeq
   val targetColumns = targetCols.split(",").map(_.trim).toSeq
 
-  // Ensure equal column counts
+  // Ensure equal column counts in the config
   if (sourceColumns.length != targetColumns.length) {
     throw new IllegalArgumentException("Source and target column lists must have the same length.")
   }
 
-  // Select columns and rename for consistency
-  val sourceSelected = transactionSource.select(sourceColumns.zipWithIndex.map {
-    case (colName, i) => col(colName).as(s"col_$i")
+  // Filter out columns that are missing in either DataFrame and log missing columns
+  val validColumnPairs = sourceColumns.zip(targetColumns).filter {
+    case (sourceCol, targetCol) =>
+      val sourceExists = transactionSource.columns.contains(sourceCol)
+      val targetExists = caseClass.columns.contains(targetCol)
+
+      if (!sourceExists) println(s"Missing column in source: $sourceCol")
+      if (!targetExists) println(s"Missing column in target: $targetCol")
+
+      sourceExists && targetExists
+  }
+
+  // If no valid columns remain, log and return an empty list
+  if (validColumnPairs.isEmpty) {
+    println("No valid columns found for comparison.")
+    return List.empty[String]
+  }
+
+  // Select and rename the valid columns for both DataFrames
+  val sourceSelected = transactionSource.select(validColumnPairs.zipWithIndex.map {
+    case ((sourceCol, _), i) => col(sourceCol).as(s"col_$i")
   }: _*)
 
-  val targetSelected = caseClass.select(targetColumns.zipWithIndex.map {
-    case (colName, i) => col(colName).as(s"col_$i")
+  val targetSelected = caseClass.select(validColumnPairs.zipWithIndex.map {
+    case ((_, targetCol), i) => col(targetCol).as(s"col_$i")
   }: _*)
 
   // Perform intersect on aligned DataFrames
   val matchingData = sourceSelected.intersect(targetSelected)
 
-  // Collect transaction IDs (from first column, assumed as "col_0" after renaming)
+  // Collect transaction IDs from matching rows (assumed to be in "col_0" after renaming)
   matchingData.select("col_0").as[String].collect().toList
 }
