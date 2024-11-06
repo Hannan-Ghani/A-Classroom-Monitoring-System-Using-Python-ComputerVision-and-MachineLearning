@@ -5,7 +5,6 @@ import org.apache.spark.sql.{DataFrame, SparkSession}
 import com.amazonaws.services.glue.util.GlueArgParser
 import org.apache.spark.sql.functions._
 import org.apache.log4j.Logger
-import scala.io.Source
 
 object CleanseCaseClass {
 
@@ -28,22 +27,22 @@ object CleanseCaseClass {
     // ==============================
     // STEP 1: Load Configurations
     // ==============================
-    // Read paths configuration from S3 config text file
-    val configMap = Source.fromFile(s3ConfigPath).getLines().map { line =>
-      val split = line.split("=")
-      (split(0).trim, split(1).trim)
-    }.toMap
+    // Helper function to read configuration file from S3
+    def readConfigFromS3(s3Path: String): Map[String, String] = {
+      val configDF = sparkSession.read.text(s3Path)
+      configDF.collect().map { row =>
+        val split = row.getString(0).split("=")
+        (split(0).trim, split(1).trim)
+      }.toMap
+    }
+
+    // Read paths and column configurations
+    val configMap = readConfigFromS3(s3ConfigPath)
+    val columnConfig = readConfigFromS3(s3ColumnsConfigPath)
+
     val inputSourcePath = configMap("inputSourcePath")
     val inputTargetPath = configMap("inputTargetPath")
     val outputBasePath = configMap("outputBasePath")
-
-    // Load column configurations from S3 config text file
-    val columnConfig = Source.fromFile(s3ColumnsConfigPath).getLines().foldLeft(Map[String, Seq[String]]()) { (acc, line) =>
-      val split = line.split("=")
-      val key = split(0).trim
-      val values = split(1).trim.split(",").map(_.trim).toSeq
-      acc + (key -> values)
-    }
 
     // ==============================
     // STEP 2: Load Data from S3
@@ -61,14 +60,13 @@ object CleanseCaseClass {
     val countryCodeMapping = Map(
       "US" -> "USA", "CA" -> "CAN", "MX" -> "MEX", "GB" -> "GBR", "FR" -> "FRA",
       "DE" -> "DEU", "IN" -> "IND", "CN" -> "CHN", "JP" -> "JPN", "AU" -> "AUS"
-      // Add more mappings as needed
     )
     val mapCountryCodeUDF = udf((code: String) => countryCodeMapping.getOrElse(code, code))
 
     // ==============================
     // STEP 3: Null Value Validation
     // ==============================
-    val nullColumns = columnConfig.getOrElse("null_validation.columns", Seq())
+    val nullColumns = columnConfig.getOrElse("null_validation.columns", "").split(",").map(_.trim).toSeq
     val existingNullColumns = nullColumns.filter(caseClass.columns.contains)
 
     val nullValidationCount = caseClass.filter(row => existingNullColumns.exists(col => row.getAs[Any](col) == null)).count()
@@ -77,8 +75,8 @@ object CleanseCaseClass {
     // ==============================
     // STEP 4: Direct Column Validation (Source-to-Target and Target-to-Source)
     // ==============================
-    val sourceDirectColumns = columnConfig.getOrElse("direct_column_validation.columns_source", Seq())
-    val targetDirectColumns = columnConfig.getOrElse("direct_column_validation.columns_target", Seq())
+    val sourceDirectColumns = columnConfig.getOrElse("direct_column_validation.columns_source", "").split(",").map(_.trim).toSeq
+    val targetDirectColumns = columnConfig.getOrElse("direct_column_validation.columns_target", "").split(",").map(_.trim).toSeq
 
     val directSourceData = transactionSource.select(sourceDirectColumns.map(col): _*)
     val directTargetData = caseClass.select(targetDirectColumns.map(col): _*)
@@ -97,19 +95,17 @@ object CleanseCaseClass {
     // ==============================
     // STEP 5: Country ISO3 Validation (Source-to-Target and Target-to-Source with Country Mapping)
     // ==============================
-    val sourceCountryColumn = columnConfig.getOrElse("transaction_country_iso3_validation.source_column", Seq()).head
-    val targetCountryColumn = columnConfig.getOrElse("transaction_country_iso3_validation.target_column", Seq()).head
+    val sourceCountryColumn = columnConfig.getOrElse("transaction_country_iso3_validation.source_column", "")
+    val targetCountryColumn = columnConfig.getOrElse("transaction_country_iso3_validation.target_column", "")
 
-    // Apply country code mapping to the source dataset
     val sourceCountryData = transactionSource
       .withColumn("isoCountryCodeMapped", mapCountryCodeUDF(col(sourceCountryColumn)))
       .select($"TRANSACTION_ID", $"isoCountryCodeMapped")
 
-    // Select target column without modification
     val targetCountryData = caseClass.select($"transactionId", col(targetCountryColumn).as("isoCountryCode"))
 
     val countrySourceToTargetDiff = sourceCountryData.exceptAll(targetCountryData)
-    val countryTargetToSourceDiff = targetCountryData.exceptAll(sourceCountryData)
+    val countryTargetToSourceDiff = targetCountryData.exceptAll(sourceCountryData.select($"TRANSACTION_ID", $"isoCountryCodeMapped"))
 
     val countrySourceToTargetCount = countrySourceToTargetDiff.count()
     val countryTargetToSourceCount = countryTargetToSourceDiff.count()
