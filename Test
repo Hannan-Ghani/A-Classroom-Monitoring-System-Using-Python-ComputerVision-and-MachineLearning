@@ -1,4 +1,177 @@
-// Access paths correctly from the configuration map
-val inputSourcePath = configMap.get("paths").flatMap(_.get("inputSourcePath")).getOrElse("")
-val inputTargetPath = configMap.get("paths").flatMap(_.get("inputTargetPath")).getOrElse("")
-val outputBasePath = configMap.get("paths").flatMap(_.get("outputBasePath")).getOrElse("")
+import com.amazonaws.services.glue.GlueContext
+import com.amazonaws.services.glue.util.Job
+import org.apache.spark.SparkContext
+import org.apache.spark.sql.{DataFrame, SparkSession}
+import com.amazonaws.services.glue.util.GlueArgParser
+import org.apache.spark.sql.functions._
+import org.apache.log4j.Logger
+import scala.collection.mutable
+
+object CleanseCaseClass {
+
+  def main(sysArgs: Array[String]): Unit = {
+    // Initialize Glue and Spark context
+    val spark: SparkContext = new SparkContext()
+    val glueContext: GlueContext = new GlueContext(spark)
+    val sparkSession: SparkSession = glueContext.getSparkSession
+    import sparkSession.implicits._
+
+    // Setup Logger
+    val logger: Logger = Logger.getLogger("CleanseCaseClassLogger")
+
+    // Read configuration file paths from Glue job parameters
+    val args = GlueArgParser.getResolvedOptions(sysArgs, Seq("s3ConfigPath", "s3ColumnsConfigPath", "outputSummaryPath").toArray)
+    val s3ConfigPath = args("s3ConfigPath")
+    val s3ColumnsConfigPath = args("s3ColumnsConfigPath")
+    val outputSummaryPath = args("outputSummaryPath")
+
+    // ==============================
+    // STEP 1: Load Configurations
+    // ==============================
+    def readConfigFromS3(s3Path: String): Map[String, Map[String, String]] = {
+      val configDF = sparkSession.read.text(s3Path)
+      val configMap = mutable.Map[String, mutable.Map[String, String]]()
+      var currentSection: Option[String] = None
+
+      configDF.collect().foreach { row =>
+        val line = row.getString(0).trim
+        if (line.startsWith("[") && line.endsWith("]")) {
+          currentSection = Some(line.substring(1, line.length - 1).trim)
+          configMap.getOrElseUpdate(currentSection.get, mutable.Map())
+        } else if (line.contains("=") && currentSection.isDefined) {
+          val split = line.split("=", 2)
+          val key = split(0).trim
+          val value = split(1).trim
+          configMap(currentSection.get)(key) = value
+        }
+      }
+
+      configMap.mapValues(_.toMap).toMap
+    }
+
+    val configMap = readConfigFromS3(s3ConfigPath)
+    val columnConfig = readConfigFromS3(s3ColumnsConfigPath)
+
+    val inputSourcePath = configMap.get("paths").flatMap(_.get("inputSourcePath")).getOrElse("")
+    val inputTargetPath = configMap.get("paths").flatMap(_.get("inputTargetPath")).getOrElse("")
+    val outputBasePath = configMap.get("paths").flatMap(_.get("outputBasePath")).getOrElse("")
+
+    // ==============================
+    // STEP 2: Load Data from S3 and Log Schemas
+    // ==============================
+    val transactionSource: DataFrame = sparkSession.read.parquet(inputSourcePath)
+    val caseClass: DataFrame = sparkSession.read.parquet(inputTargetPath)
+
+    logger.info("Schema of transactionSource DataFrame:")
+    transactionSource.printSchema()
+    logger.info("Schema of caseClass DataFrame:")
+    caseClass.printSchema()
+
+    var validationSummary = "Validation Results Summary:\n"
+
+    // ==============================
+    // STEP 3: Null Value Validation
+    // ==============================
+    val nullColumns = columnConfig.get("null_validation").flatMap(_.get("columns")).map(_.split(",").map(_.trim).toSeq).getOrElse(Seq())
+    val existingNullColumns = nullColumns.filter(caseClass.columns.contains)
+    val nullValidationCount = caseClass.filter(row => existingNullColumns.exists(col => row.getAs[Any](col) == null)).count()
+    validationSummary += s"Null Validation: $nullValidationCount found\n"
+
+    // ==============================
+    // STEP 4: Direct Column Validation (Source-to-Target and Target-to-Source)
+    // ==============================
+    val sourceDirectColumns = columnConfig.get("direct_column_validation").flatMap(_.get("columns_source")).map(_.split(",").map(_.trim).toSeq).getOrElse(Seq())
+    val targetDirectColumns = columnConfig.get("direct_column_validation").flatMap(_.get("columns_target")).map(_.split(",").map(_.trim).toSeq).getOrElse(Seq())
+
+    val alignedSourceDirectData = transactionSource.select(sourceDirectColumns.map(col): _*).toDF(sourceDirectColumns.indices.map(i => s"col$i"): _*)
+    val alignedTargetDirectData = caseClass.select(targetDirectColumns.map(col): _*).toDF(sourceDirectColumns.indices.map(i => s"col$i"): _*)
+
+    val directSourceToTargetDiff = alignedSourceDirectData.exceptAll(alignedTargetDirectData)
+    val directTargetToSourceDiff = alignedTargetDirectData.exceptAll(alignedSourceDirectData)
+
+    if (alignedSourceDirectData.columns.contains("col0")) {
+      val directSourceToTargetIds = directSourceToTargetDiff.select("col0").as[String].collect().mkString(", ")
+      val directTargetToSourceIds = directTargetToSourceDiff.select("col0").as[String].collect().mkString(", ")
+      validationSummary += s"Direct Column Validation: ${directSourceToTargetDiff.count() + directTargetToSourceDiff.count()} found\n"
+      validationSummary += s"Source to Target Transaction IDs: $directSourceToTargetIds\n"
+      validationSummary += s"Target to Source Transaction IDs: $directTargetToSourceIds\n"
+    } else {
+      logger.error("TRANSACTION_ID (or equivalent) column is missing in aligned DataFrames for Direct Column Validation")
+    }
+
+    // ==============================
+    // STEP 5: Narrative Validation
+    // ==============================
+    val narrativeSourceColumn = columnConfig.get("narrative_validation").flatMap(_.get("source_column")).getOrElse("")
+    val narrativeTargetColumn = columnConfig.get("narrative_validation").flatMap(_.get("target_column")).getOrElse("")
+
+    val sourceNarrative = transactionSource.select($"TRANSACTION_ID", col(narrativeSourceColumn)).toDF("TRANSACTION_ID", "narrative")
+    val targetNarrative = caseClass.select($"transactionId", col(narrativeTargetColumn)).toDF("TRANSACTION_ID", "narrative")
+
+    val narrativeSourceToTargetDiff = sourceNarrative.exceptAll(targetNarrative)
+    val narrativeTargetToSourceDiff = targetNarrative.exceptAll(sourceNarrative)
+
+    if (sourceNarrative.columns.contains("TRANSACTION_ID")) {
+      val narrativeSourceToTargetIds = narrativeSourceToTargetDiff.select("TRANSACTION_ID").as[String].collect().mkString(", ")
+      val narrativeTargetToSourceIds = narrativeTargetToSourceDiff.select("TRANSACTION_ID").as[String].collect().mkString(", ")
+      validationSummary += s"Narrative Validation: ${narrativeSourceToTargetDiff.count() + narrativeTargetToSourceDiff.count()} found\n"
+      validationSummary += s"Source to Target Transaction IDs: $narrativeSourceToTargetIds\n"
+      validationSummary += s"Target to Source Transaction IDs: $narrativeTargetToSourceIds\n"
+    } else {
+      logger.error("TRANSACTION_ID (or equivalent) column is missing for Narrative Validation")
+    }
+
+    // ==============================
+    // STEP 6: Amount Local Validation
+    // ==============================
+    val amountLocalSourceColumn = columnConfig.get("amount_local_validation").flatMap(_.get("source_column")).getOrElse("")
+    val amountLocalTargetColumn = columnConfig.get("amount_local_validation").flatMap(_.get("target_column")).getOrElse("")
+
+    val sourceAmountLocal = transactionSource.select($"TRANSACTION_ID", col(amountLocalSourceColumn)).toDF("TRANSACTION_ID", "amountLocal")
+    val targetAmountLocal = caseClass.select($"transactionId", col(amountLocalTargetColumn)).toDF("TRANSACTION_ID", "amountLocal")
+
+    val amountLocalSourceToTargetDiff = sourceAmountLocal.exceptAll(targetAmountLocal)
+    val amountLocalTargetToSourceDiff = targetAmountLocal.exceptAll(sourceAmountLocal)
+
+    if (sourceAmountLocal.columns.contains("TRANSACTION_ID")) {
+      val amountLocalSourceToTargetIds = amountLocalSourceToTargetDiff.select("TRANSACTION_ID").as[String].collect().mkString(", ")
+      val amountLocalTargetToSourceIds = amountLocalTargetToSourceDiff.select("TRANSACTION_ID").as[String].collect().mkString(", ")
+      validationSummary += s"Amount Local Validation: ${amountLocalSourceToTargetDiff.count() + amountLocalTargetToSourceDiff.count()} found\n"
+      validationSummary += s"Source to Target Transaction IDs: $amountLocalSourceToTargetIds\n"
+      validationSummary += s"Target to Source Transaction IDs: $amountLocalTargetToSourceIds\n"
+    } else {
+      logger.error("TRANSACTION_ID (or equivalent) column is missing for Amount Local Validation")
+    }
+
+    // ==============================
+    // STEP 7: Country ISO3 Validation
+    // ==============================
+    val iso3SourceColumn = columnConfig.get("transaction_country_iso3_validation").flatMap(_.get("source_column")).getOrElse("")
+    val iso3TargetColumn = columnConfig.get("transaction_country_iso3_validation").flatMap(_.get("target_column")).getOrElse("")
+
+    val sourceCountryData = transactionSource.withColumn("isoCountryCodeMapped", mapCountryCodeUDF(col(iso3SourceColumn))).select($"TRANSACTION_ID", $"isoCountryCodeMapped")
+    val targetCountryData = caseClass.select($"transactionId", col(iso3TargetColumn).as("isoCountryCode"))
+
+    val countrySourceToTargetDiff = sourceCountryData.exceptAll(targetCountryData)
+    val countryTargetToSourceDiff = targetCountryData.exceptAll(sourceCountryData.select($"TRANSACTION_ID", $"isoCountryCodeMapped"))
+
+    if (sourceCountryData.columns.contains("TRANSACTION_ID")) {
+      val countrySourceToTargetIds = countrySourceToTargetDiff.select("TRANSACTION_ID").as[String].collect().mkString(", ")
+      val countryTargetToSourceIds = countryTargetToSourceDiff.select("transactionId").as[String].collect().mkString(", ")
+      validationSummary += s"Country ISO3 Validation: ${countrySourceToTargetDiff.count() + countryTargetToSourceDiff.count()} found\n"
+      validationSummary += s"Source to Target Transaction IDs: $countrySourceToTargetIds\n"
+      validationSummary += s"Target to Source Transaction IDs: $countryTargetToSourceIds\n"
+    } else {
+      logger.error("TRANSACTION_ID (or equivalent) column is missing for Country ISO3 Validation")
+    }
+
+    // ==============================
+    // STEP 8: Write Validation Summary to S3 as Text File
+    // ==============================
+    val outputSummaryDF = Seq(validationSummary).toDF("Validation_Summary")
+    outputSummaryDF.coalesce(1).write.mode("overwrite").text(outputSummaryPath)
+
+    // Commit the Glue job
+    Job.commit()
+  }
+}
