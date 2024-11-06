@@ -70,6 +70,17 @@ object CleanseCaseClass {
     var validationSummary = "Validation Results Summary:\n"
 
     // ==============================
+    // Country Code Mapping UDF
+    // ==============================
+    // Map 2-letter country codes to ISO3 codes
+    val countryCodeMapping = Map(
+      "US" -> "USA", "CA" -> "CAN", "MX" -> "MEX", "GB" -> "GBR", "FR" -> "FRA",
+      "DE" -> "DEU", "IN" -> "IND", "CN" -> "CHN", "JP" -> "JPN", "AU" -> "AUS"
+      // Add additional mappings as needed
+    )
+    val mapCountryCodeUDF = udf((code: String) => countryCodeMapping.getOrElse(code, code))
+
+    // ==============================
     // STEP 3: Null Value Validation
     // ==============================
     val nullColumns = columnConfig.get("null_validation").flatMap(_.get("columns")).map(_.split(",").map(_.trim).toSeq).getOrElse(Seq())
