@@ -1,164 +1,127 @@
-import org.apache.spark.sql.{DataFrame, SparkSession}
-import org.apache.spark.sql.functions._
-import java.io.{File, PrintWriter}
+from pyspark.sql import SparkSession
+from pyspark.sql import DataFrame
+from pyspark.sql.functions import col, udf, lit, when, trim
+from pyspark.sql.functions import min as spark_min, max as spark_max
 import scala.io.Source
 
-object EnhancedValidationFromConfig {
+# Initialize SparkSession
+spark = SparkSession.builder.appName("CleanseCaseClass").getOrCreate()
 
-  def main(args: Array[String]): Unit = {
-    val spark: SparkSession = SparkSession.builder().appName("EnhancedValidationFromConfig").getOrCreate()
-    import spark.implicits._
+# ==============================
+# Configuration Parameters
+# ==============================
 
-    // Paths to config files
-    val s3PathConfig = "path_config.txt"
-    val s3ValidationConfig = "validation_config.txt"
+# Define paths for local testing or use absolute paths to S3 if AWS credentials are configured locally
+s3ConfigPath = "path/to/local/paths_config.txt"
+s3ColumnsConfigPath = "path/to/local/columns_config.txt"
+outputSummaryPath = "path/to/local/output_summary.txt"
 
-    // Load config files
-    val pathConfig = readPathConfig(s3PathConfig)
-    val validationConfig = parseValidationConfig(s3ValidationConfig)
+# ==============================
+# Load Configurations
+# ==============================
+# Load path configuration from a local text file
+configMap = {}
+with open(s3ConfigPath, 'r') as f:
+    for line in f:
+        key, value = line.strip().split('=')
+        configMap[key.strip()] = value.strip()
 
-    // Extract paths from config
-    val inputSourcePath = pathConfig.getOrElse("inputSourcePath", "")
-    val inputTargetPath = pathConfig.getOrElse("inputTargetPath", "")
-    val outputBasePath = pathConfig.getOrElse("outputBasePath", "")
+inputSourcePath = configMap["inputSourcePath"]
+inputTargetPath = configMap["inputTargetPath"]
+outputBasePath = configMap["outputBasePath"]
 
-    // Load source and target data
-    val transactionSource: DataFrame = spark.read.parquet(inputSourcePath)
-    val caseClass: DataFrame = spark.read.parquet(inputTargetPath)
+# Load column configurations from a local text file
+columnConfig = {}
+with open(s3ColumnsConfigPath, 'r') as f:
+    for line in f:
+        key, value = line.strip().split('=')
+        columnConfig[key.strip()] = value.strip().split(',')
 
-    // Collect validation results
-    val summaryLog = new StringBuilder("Validation Results Summary:\n")
+# ==============================
+# Load Data from Paths
+# ==============================
+# Use local paths or S3 paths if accessible
+transactionSource = spark.read.parquet(inputSourcePath)
+caseClass = spark.read.parquet(inputTargetPath)
 
-    // Apply validations based on config
-    if (validationConfig.contains("null_validation")) {
-      val nullColumns = validationConfig("null_validation")("columns")
-      summaryLog.append(applyNullValidation(nullColumns, caseClass)(spark))
-    }
+# Initialize validation summary string
+validationSummary = "Validation Results Summary:\n"
 
-    if (validationConfig.contains("direct_column_validation")) {
-      val sourceCols = validationConfig("direct_column_validation")("columns_source")
-      val targetCols = validationConfig("direct_column_validation")("columns_target")
-      summaryLog.append(applyDirectColumnValidation(sourceCols, targetCols, transactionSource, caseClass)(spark))
-    }
-
-    if (validationConfig.contains("narrative_validation")) {
-      val sourceCol = validationConfig("narrative_validation")("source_column")
-      val targetCol = validationConfig("narrative_validation")("target_column")
-      summaryLog.append(applyNarrativeValidation(sourceCol, targetCol, transactionSource, caseClass)(spark))
-    }
-
-    if (validationConfig.contains("amount_local_validation")) {
-      val sourceCol = validationConfig("amount_local_validation")("source_column")
-      val targetCol = validationConfig("amount_local_validation")("target_column")
-      summaryLog.append(applyAmountLocalValidation(sourceCol, targetCol, transactionSource, caseClass)(spark))
-    }
-
-    if (validationConfig.contains("transaction_country_iso3_validation")) {
-      val sourceCol = validationConfig("transaction_country_iso3_validation")("source_column")
-      val targetCol = validationConfig("transaction_country_iso3_validation")("target_column")
-      summaryLog.append(applyCountryISO3Validation(sourceCol, targetCol, transactionSource, caseClass)(spark))
-    }
-
-    // Write summary log to a text file
-    writeSummaryLog(summaryLog.toString(), s"$outputBasePath/validation_summary.txt")
-    spark.stop()
-  }
-
-  // =======================
-  // Helper Functions
-  // =======================
-
-  def readPathConfig(filePath: String): Map[String, String] = {
-    Source.fromFile(filePath).getLines()
-      .filterNot(line => line.trim.isEmpty || line.startsWith("#"))
-      .map(line => {
-        val splitLine = line.split("=").map(_.trim)
-        (splitLine(0), splitLine(1))
-      }).toMap
-  }
-
-  def parseValidationConfig(filePath: String): Map[String, Map[String, String]] = {
-    var currentSection: String = ""
-    var validationConfig: Map[String, Map[String, String]] = Map()
-    Source.fromFile(filePath).getLines().filterNot(line => line.trim.isEmpty || line.startsWith("#")).foreach { line =>
-      if (line.startsWith("[") && line.endsWith("]")) {
-        currentSection = line.substring(1, line.length - 1).trim
-        validationConfig += (currentSection -> Map())
-      } else {
-        val keyValue = line.split("=").map(_.trim)
-        if (keyValue.length == 2 && currentSection.nonEmpty) {
-          validationConfig = validationConfig + (currentSection -> (validationConfig(currentSection) + (keyValue(0) -> keyValue(1))))
-        }
-      }
-    }
-    validationConfig
-  }
-
-  def applyNullValidation(columns: String, df: DataFrame)(implicit spark: SparkSession): String = {
-    val nullColumns = columns.split(",").map(_.trim).filter(df.columns.contains)
-    val nullFilteredData = df.filter(nullColumns.map(col => col(col).isNull).reduce(_ && _))
-    val nullCount = nullFilteredData.count()
-    val transactionIds = nullFilteredData.select("TRANSACTION_ID").as[String].collect().mkString(", ")
-    s"Null Validation: $nullCount null rows\nTransaction IDs: $transactionIds\n"
-  }
-
-  def applyDirectColumnValidation(
-    sourceCols: String, targetCols: String, sourceDF: DataFrame, targetDF: DataFrame
-  )(implicit spark: SparkSession): String = {
-    val sourceColumns = sourceCols.split(",").map(_.trim)
-    val targetColumns = targetCols.split(",").map(_.trim)
-
-    // Align the columns for comparison
-    val sourceSelected = sourceDF.select(sourceColumns.zipWithIndex.map { case (colName, i) => col(colName).as(s"col_$i") }: _*)
-    val targetSelected = targetDF.select(targetColumns.zipWithIndex.map { case (colName, i) => col(colName).as(s"col_$i") }: _*)
-
-    // Find matching rows
-    val matchingData = sourceSelected.intersect(targetSelected)
-    val matchCount = matchingData.count()
-    val transactionIds = matchingData.select("col_0").as[String].collect().mkString(", ")
-
-    s"Direct Column Validation: $matchCount matched rows\nTransaction IDs: $transactionIds\n"
-  }
-
-  def applyNarrativeValidation(sourceCol: String, targetCol: String, sourceDF: DataFrame, targetDF: DataFrame)(implicit spark: SparkSession): String = {
-    val sourceSelected = sourceDF.select(col("TRANSACTION_ID"), col(sourceCol).as("narrative_source"))
-    val targetSelected = targetDF.select(col("TRANSACTION_ID"), col(targetCol).as("narrative_target"))
-
-    val matchingData = sourceSelected.join(targetSelected, Seq("TRANSACTION_ID"))
-      .filter($"narrative_source" === $"narrative_target")
-    val matchCount = matchingData.count()
-    val transactionIds = matchingData.select("TRANSACTION_ID").as[String].collect().mkString(", ")
-
-    s"Narrative Validation: $matchCount matched rows\nTransaction IDs: $transactionIds\n"
-  }
-
-  def applyAmountLocalValidation(sourceCol: String, targetCol: String, sourceDF: DataFrame, targetDF: DataFrame)(implicit spark: SparkSession): String = {
-    val sourceSelected = sourceDF.select(col("TRANSACTION_ID"), col(sourceCol).as("amount_source"))
-    val targetSelected = targetDF.select(col("TRANSACTION_ID"), col(targetCol).as("amount_target"))
-
-    val matchingData = sourceSelected.join(targetSelected, Seq("TRANSACTION_ID"))
-      .filter($"amount_source" === $"amount_target")
-    val matchCount = matchingData.count()
-    val transactionIds = matchingData.select("TRANSACTION_ID").as[String].collect().mkString(", ")
-
-    s"Amount Local Validation: $matchCount matched rows\nTransaction IDs: $transactionIds\n"
-  }
-
-  def applyCountryISO3Validation(sourceCol: String, targetCol: String, sourceDF: DataFrame, targetDF: DataFrame)(implicit spark: SparkSession): String = {
-    val sourceSelected = sourceDF.select(col("TRANSACTION_ID"), col(sourceCol).as("country_code"))
-    val targetSelected = targetDF.select(col("TRANSACTION_ID"), col(targetCol).as("country_code"))
-
-    val matchingData = sourceSelected.join(targetSelected, Seq("TRANSACTION_ID"))
-      .filter($"country_code" === $"country_code")
-    val matchCount = matchingData.count()
-    val transactionIds = matchingData.select("TRANSACTION_ID").as[String].collect().mkString(", ")
-
-    s"Country ISO3 Validation: $matchCount matched rows\nTransaction IDs: $transactionIds\n"
-  }
-
-  def writeSummaryLog(log: String, outputPath: String): Unit = {
-    val writer = new PrintWriter(new File(outputPath))
-    writer.write(log)
-    writer.close()
-  }
+# ==============================
+# Country Code Mapping UDF
+# ==============================
+countryCodeMapping = {
+    "US": "USA", "CA": "CAN", "MX": "MEX", "GB": "GBR", "FR": "FRA",
+    "DE": "DEU", "IN": "IND", "CN": "CHN", "JP": "JPN", "AU": "AUS"
+    # Add more mappings as needed
 }
+
+def map_country_code(code):
+    return countryCodeMapping.get(code, code)
+
+# Register the UDF in Spark
+mapCountryCodeUDF = udf(map_country_code)
+
+# ==============================
+# Null Value Validation
+# ==============================
+nullColumns = columnConfig.get("null_validation.columns", [])
+existingNullColumns = [col for col in nullColumns if col in caseClass.columns]
+
+nullValidationCount = caseClass.filter(lambda row: any(row[col] is None for col in existingNullColumns)).count()
+validationSummary += f"Null Validation: {nullValidationCount} found\n"
+
+# ==============================
+# Direct Column Validation
+# ==============================
+sourceDirectColumns = columnConfig.get("direct_column_validation.columns_source", [])
+targetDirectColumns = columnConfig.get("direct_column_validation.columns_target", [])
+
+directSourceData = transactionSource.select([col(c) for c in sourceDirectColumns])
+directTargetData = caseClass.select([col(c) for c in targetDirectColumns])
+
+# Source-to-target and target-to-source differences
+directSourceToTargetDiff = directSourceData.exceptAll(directTargetData)
+directTargetToSourceDiff = directTargetData.exceptAll(directSourceData)
+
+# Collect counts and IDs
+directSourceToTargetCount = directSourceToTargetDiff.count()
+directTargetToSourceCount = directTargetToSourceDiff.count()
+directSourceToTargetIds = ", ".join(directSourceToTargetDiff.select("TRANSACTION_ID").rdd.flatMap(lambda x: x).collect())
+directTargetToSourceIds = ", ".join(directTargetToSourceDiff.select("transactionId").rdd.flatMap(lambda x: x).collect())
+
+validationSummary += f"Direct Column Validation: {directSourceToTargetCount + directTargetToSourceCount} found\n"
+validationSummary += f"Source to Target Transaction IDs: {directSourceToTargetIds}\n"
+validationSummary += f"Target to Source Transaction IDs: {directTargetToSourceIds}\n"
+
+# ==============================
+# Country ISO3 Validation with Mapping
+# ==============================
+sourceCountryColumn = columnConfig["transaction_country_iso3_validation.source_column"][0]
+targetCountryColumn = columnConfig["transaction_country_iso3_validation.target_column"][0]
+
+# Apply country code mapping to source data
+sourceCountryData = transactionSource.withColumn("isoCountryCodeMapped", mapCountryCodeUDF(col(sourceCountryColumn)))
+targetCountryData = caseClass.select(col("transactionId"), col(targetCountryColumn).alias("isoCountryCode"))
+
+countrySourceToTargetDiff = sourceCountryData.select("TRANSACTION_ID", "isoCountryCodeMapped").exceptAll(targetCountryData)
+countryTargetToSourceDiff = targetCountryData.exceptAll(sourceCountryData.select("TRANSACTION_ID", "isoCountryCodeMapped"))
+
+# Count and collect IDs for differences
+countrySourceToTargetCount = countrySourceToTargetDiff.count()
+countryTargetToSourceCount = countryTargetToSourceDiff.count()
+countrySourceToTargetIds = ", ".join(countrySourceToTargetDiff.select("TRANSACTION_ID").rdd.flatMap(lambda x: x).collect())
+countryTargetToSourceIds = ", ".join(countryTargetToSourceDiff.select("transactionId").rdd.flatMap(lambda x: x).collect())
+
+validationSummary += f"Country ISO3 Validation: {countrySourceToTargetCount + countryTargetToSourceCount} found\n"
+validationSummary += f"Source to Target Transaction IDs: {countrySourceToTargetIds}\n"
+validationSummary += f"Target to Source Transaction IDs: {countryTargetToSourceIds}\n"
+
+# ==============================
+# Write Validation Summary to Local Output
+# ==============================
+with open(outputSummaryPath, 'w') as f:
+    f.write(validationSummary)
+
+# Stop Spark session
+spark.stop()
