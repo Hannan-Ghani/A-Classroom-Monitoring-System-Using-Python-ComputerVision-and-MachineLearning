@@ -1,8 +1,7 @@
 from pyspark.sql import SparkSession
+from pyspark.sql.functions import col, udf
 from pyspark.sql import DataFrame
-from pyspark.sql.functions import col, udf, lit, when, trim
-from pyspark.sql.functions import min as spark_min, max as spark_max
-import scala.io.Source
+import boto3
 
 # Initialize SparkSession
 spark = SparkSession.builder.appName("CleanseCaseClass").getOrCreate()
@@ -11,36 +10,34 @@ spark = SparkSession.builder.appName("CleanseCaseClass").getOrCreate()
 # Configuration Parameters
 # ==============================
 
-# Define paths for local testing or use absolute paths to S3 if AWS credentials are configured locally
-s3ConfigPath = "path/to/local/paths_config.txt"
-s3ColumnsConfigPath = "path/to/local/columns_config.txt"
-outputSummaryPath = "path/to/local/output_summary.txt"
+# Define paths for local testing or S3 if accessible
+s3ConfigPath = "path/to/local/paths_config.txt"  # Update with your actual local path or S3 path
+s3ColumnsConfigPath = "path/to/local/columns_config.txt"  # Update with your actual local path or S3 path
+outputSummaryPath = "path/to/local/output_summary.txt"  # Update with your actual local path
 
 # ==============================
 # Load Configurations
 # ==============================
-# Load path configuration from a local text file
-configMap = {}
-with open(s3ConfigPath, 'r') as f:
-    for line in f:
-        key, value = line.strip().split('=')
-        configMap[key.strip()] = value.strip()
 
+# Helper function to read configurations
+def read_config(path):
+    config = {}
+    with open(path, 'r') as f:
+        for line in f:
+            key, value = line.strip().split('=')
+            config[key.strip()] = value.strip()
+    return config
+
+configMap = read_config(s3ConfigPath)
 inputSourcePath = configMap["inputSourcePath"]
 inputTargetPath = configMap["inputTargetPath"]
 outputBasePath = configMap["outputBasePath"]
 
-# Load column configurations from a local text file
-columnConfig = {}
-with open(s3ColumnsConfigPath, 'r') as f:
-    for line in f:
-        key, value = line.strip().split('=')
-        columnConfig[key.strip()] = value.strip().split(',')
+columnConfig = read_config(s3ColumnsConfigPath)
 
 # ==============================
 # Load Data from Paths
 # ==============================
-# Use local paths or S3 paths if accessible
 transactionSource = spark.read.parquet(inputSourcePath)
 caseClass = spark.read.parquet(inputTargetPath)
 
@@ -53,7 +50,6 @@ validationSummary = "Validation Results Summary:\n"
 countryCodeMapping = {
     "US": "USA", "CA": "CAN", "MX": "MEX", "GB": "GBR", "FR": "FRA",
     "DE": "DEU", "IN": "IND", "CN": "CHN", "JP": "JPN", "AU": "AUS"
-    # Add more mappings as needed
 }
 
 def map_country_code(code):
@@ -65,7 +61,7 @@ mapCountryCodeUDF = udf(map_country_code)
 # ==============================
 # Null Value Validation
 # ==============================
-nullColumns = columnConfig.get("null_validation.columns", [])
+nullColumns = columnConfig.get("null_validation.columns", "").split(',')
 existingNullColumns = [col for col in nullColumns if col in caseClass.columns]
 
 nullValidationCount = caseClass.filter(lambda row: any(row[col] is None for col in existingNullColumns)).count()
@@ -74,8 +70,8 @@ validationSummary += f"Null Validation: {nullValidationCount} found\n"
 # ==============================
 # Direct Column Validation
 # ==============================
-sourceDirectColumns = columnConfig.get("direct_column_validation.columns_source", [])
-targetDirectColumns = columnConfig.get("direct_column_validation.columns_target", [])
+sourceDirectColumns = columnConfig.get("direct_column_validation.columns_source", "").split(',')
+targetDirectColumns = columnConfig.get("direct_column_validation.columns_target", "").split(',')
 
 directSourceData = transactionSource.select([col(c) for c in sourceDirectColumns])
 directTargetData = caseClass.select([col(c) for c in targetDirectColumns])
@@ -97,8 +93,8 @@ validationSummary += f"Target to Source Transaction IDs: {directTargetToSourceId
 # ==============================
 # Country ISO3 Validation with Mapping
 # ==============================
-sourceCountryColumn = columnConfig["transaction_country_iso3_validation.source_column"][0]
-targetCountryColumn = columnConfig["transaction_country_iso3_validation.target_column"][0]
+sourceCountryColumn = columnConfig["transaction_country_iso3_validation.source_column"]
+targetCountryColumn = columnConfig["transaction_country_iso3_validation.target_column"]
 
 # Apply country code mapping to source data
 sourceCountryData = transactionSource.withColumn("isoCountryCodeMapped", mapCountryCodeUDF(col(sourceCountryColumn)))
