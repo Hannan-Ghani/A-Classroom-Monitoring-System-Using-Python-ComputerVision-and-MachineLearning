@@ -1,14 +1,9 @@
-# Required imports for AWS Glue
-from awsglue.context import GlueContext
-from pyspark.context import SparkContext
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import col, udf
 import boto3
 
-# Initialize Glue and Spark context
-sc = SparkContext.getOrCreate()
-glueContext = GlueContext(sc)
-spark = glueContext.spark_session
+# Initialize SparkSession
+spark = SparkSession.builder.appName("CleanseCaseClass").getOrCreate()
 
 # ==============================
 # Configuration Parameters
@@ -86,11 +81,11 @@ directTargetData = caseClass.select([col(c) for c in targetDirectColumns])
 directSourceToTargetDiff = directSourceData.exceptAll(directTargetData)
 directTargetToSourceDiff = directTargetData.exceptAll(directSourceData)
 
-# Collect counts and IDs
+# Collect counts and IDs without reassigning to avoid overwrites
 directSourceToTargetCount = directSourceToTargetDiff.count()
 directTargetToSourceCount = directTargetToSourceDiff.count()
-directSourceToTargetIds = ", ".join(directSourceToTargetDiff.select("TRANSACTION_ID").rdd.flatMap(lambda x: x).collect())
-directTargetToSourceIds = ", ".join(directTargetToSourceDiff.select("transactionId").rdd.flatMap(lambda x: x).collect())
+directSourceToTargetIds = ", ".join([row["TRANSACTION_ID"] for row in directSourceToTargetDiff.select("TRANSACTION_ID").collect()])
+directTargetToSourceIds = ", ".join([row["transactionId"] for row in directTargetToSourceDiff.select("transactionId").collect()])
 
 validationSummary += f"Direct Column Validation: {directSourceToTargetCount + directTargetToSourceCount} found\n"
 validationSummary += f"Source to Target Transaction IDs: {directSourceToTargetIds}\n"
@@ -112,8 +107,8 @@ countryTargetToSourceDiff = targetCountryData.exceptAll(sourceCountryData.select
 # Count and collect IDs for differences
 countrySourceToTargetCount = countrySourceToTargetDiff.count()
 countryTargetToSourceCount = countryTargetToSourceDiff.count()
-countrySourceToTargetIds = ", ".join(countrySourceToTargetDiff.select("TRANSACTION_ID").rdd.flatMap(lambda x: x).collect())
-countryTargetToSourceIds = ", ".join(countryTargetToSourceDiff.select("transactionId").rdd.flatMap(lambda x: x).collect())
+countrySourceToTargetIds = ", ".join([row["TRANSACTION_ID"] for row in countrySourceToTargetDiff.select("TRANSACTION_ID").collect()])
+countryTargetToSourceIds = ", ".join([row["transactionId"] for row in countryTargetToSourceDiff.select("transactionId").collect()])
 
 validationSummary += f"Country ISO3 Validation: {countrySourceToTargetCount + countryTargetToSourceCount} found\n"
 validationSummary += f"Source to Target Transaction IDs: {countrySourceToTargetIds}\n"
