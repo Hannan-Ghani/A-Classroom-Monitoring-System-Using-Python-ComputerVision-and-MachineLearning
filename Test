@@ -72,11 +72,9 @@ object CleanseCaseClass {
     // ==============================
     // Country Code Mapping UDF
     // ==============================
-    // Map 2-letter country codes to ISO3 codes
     val countryCodeMapping = Map(
       "US" -> "USA", "CA" -> "CAN", "MX" -> "MEX", "GB" -> "GBR", "FR" -> "FRA",
       "DE" -> "DEU", "IN" -> "IND", "CN" -> "CHN", "JP" -> "JPN", "AU" -> "AUS"
-      // Add additional mappings as needed
     )
     val mapCountryCodeUDF = udf((code: String) => countryCodeMapping.getOrElse(code, code))
 
@@ -94,21 +92,17 @@ object CleanseCaseClass {
     val sourceDirectColumns = columnConfig.get("direct_column_validation").flatMap(_.get("columns_source")).map(_.split(",").map(_.trim).toSeq).getOrElse(Seq())
     val targetDirectColumns = columnConfig.get("direct_column_validation").flatMap(_.get("columns_target")).map(_.split(",").map(_.trim).toSeq).getOrElse(Seq())
 
-    val alignedSourceDirectData = transactionSource.select(sourceDirectColumns.map(col): _*).toDF(sourceDirectColumns.indices.map(i => s"col$i"): _*)
-    val alignedTargetDirectData = caseClass.select(targetDirectColumns.map(col): _*).toDF(sourceDirectColumns.indices.map(i => s"col$i"): _*)
+    val directSourceData = transactionSource.select(sourceDirectColumns.map(col): _*)
+    val directTargetData = caseClass.select(targetDirectColumns.map(col): _*)
 
-    val directSourceToTargetDiff = alignedSourceDirectData.exceptAll(alignedTargetDirectData)
-    val directTargetToSourceDiff = alignedTargetDirectData.exceptAll(alignedSourceDirectData)
+    val directSourceToTargetDiff = directSourceData.exceptAll(directTargetData)
+    val directTargetToSourceDiff = directTargetData.exceptAll(directSourceData)
 
-    if (alignedSourceDirectData.columns.contains("col0")) {
-      val directSourceToTargetIds = directSourceToTargetDiff.select("col0").as[String].collect().mkString(", ")
-      val directTargetToSourceIds = directTargetToSourceDiff.select("col0").as[String].collect().mkString(", ")
-      validationSummary += s"Direct Column Validation: ${directSourceToTargetDiff.count() + directTargetToSourceDiff.count()} found\n"
-      validationSummary += s"Source to Target Transaction IDs: $directSourceToTargetIds\n"
-      validationSummary += s"Target to Source Transaction IDs: $directTargetToSourceIds\n"
-    } else {
-      logger.error("TRANSACTION_ID (or equivalent) column is missing in aligned DataFrames for Direct Column Validation")
-    }
+    val directSourceToTargetIds = directSourceToTargetDiff.select(sourceDirectColumns.head).as[String].collect().mkString(", ")
+    val directTargetToSourceIds = directTargetToSourceDiff.select(targetDirectColumns.head).as[String].collect().mkString(", ")
+    validationSummary += s"Direct Column Validation: ${directSourceToTargetDiff.count() + directTargetToSourceDiff.count()} found\n"
+    validationSummary += s"Source to Target Transaction IDs: $directSourceToTargetIds\n"
+    validationSummary += s"Target to Source Transaction IDs: $directTargetToSourceIds\n"
 
     // ==============================
     // STEP 5: Narrative Validation
@@ -116,21 +110,17 @@ object CleanseCaseClass {
     val narrativeSourceColumn = columnConfig.get("narrative_validation").flatMap(_.get("source_column")).getOrElse("")
     val narrativeTargetColumn = columnConfig.get("narrative_validation").flatMap(_.get("target_column")).getOrElse("")
 
-    val sourceNarrative = transactionSource.select($"TRANSACTION_ID", col(narrativeSourceColumn)).toDF("TRANSACTION_ID", "narrative")
-    val targetNarrative = caseClass.select($"transactionId", col(narrativeTargetColumn)).toDF("TRANSACTION_ID", "narrative")
+    val sourceNarrative = transactionSource.select($"TRANSACTION_ID", col(narrativeSourceColumn).as("narrative"))
+    val targetNarrative = caseClass.select($"transactionId".as("TRANSACTION_ID"), col(narrativeTargetColumn).as("narrative"))
 
     val narrativeSourceToTargetDiff = sourceNarrative.exceptAll(targetNarrative)
     val narrativeTargetToSourceDiff = targetNarrative.exceptAll(sourceNarrative)
 
-    if (sourceNarrative.columns.contains("TRANSACTION_ID")) {
-      val narrativeSourceToTargetIds = narrativeSourceToTargetDiff.select("TRANSACTION_ID").as[String].collect().mkString(", ")
-      val narrativeTargetToSourceIds = narrativeTargetToSourceDiff.select("TRANSACTION_ID").as[String].collect().mkString(", ")
-      validationSummary += s"Narrative Validation: ${narrativeSourceToTargetDiff.count() + narrativeTargetToSourceDiff.count()} found\n"
-      validationSummary += s"Source to Target Transaction IDs: $narrativeSourceToTargetIds\n"
-      validationSummary += s"Target to Source Transaction IDs: $narrativeTargetToSourceIds\n"
-    } else {
-      logger.error("TRANSACTION_ID (or equivalent) column is missing for Narrative Validation")
-    }
+    val narrativeSourceToTargetIds = narrativeSourceToTargetDiff.select("TRANSACTION_ID").as[String].collect().mkString(", ")
+    val narrativeTargetToSourceIds = narrativeTargetToSourceDiff.select("TRANSACTION_ID").as[String].collect().mkString(", ")
+    validationSummary += s"Narrative Validation: ${narrativeSourceToTargetDiff.count() + narrativeTargetToSourceDiff.count()} found\n"
+    validationSummary += s"Source to Target Transaction IDs: $narrativeSourceToTargetIds\n"
+    validationSummary += s"Target to Source Transaction IDs: $narrativeTargetToSourceIds\n"
 
     // ==============================
     // STEP 6: Amount Local Validation
@@ -138,21 +128,17 @@ object CleanseCaseClass {
     val amountLocalSourceColumn = columnConfig.get("amount_local_validation").flatMap(_.get("source_column")).getOrElse("")
     val amountLocalTargetColumn = columnConfig.get("amount_local_validation").flatMap(_.get("target_column")).getOrElse("")
 
-    val sourceAmountLocal = transactionSource.select($"TRANSACTION_ID", col(amountLocalSourceColumn)).toDF("TRANSACTION_ID", "amountLocal")
-    val targetAmountLocal = caseClass.select($"transactionId", col(amountLocalTargetColumn)).toDF("TRANSACTION_ID", "amountLocal")
+    val sourceAmountLocal = transactionSource.select($"TRANSACTION_ID", col(amountLocalSourceColumn).as("amountLocal"))
+    val targetAmountLocal = caseClass.select($"transactionId".as("TRANSACTION_ID"), col(amountLocalTargetColumn).as("amountLocal"))
 
     val amountLocalSourceToTargetDiff = sourceAmountLocal.exceptAll(targetAmountLocal)
     val amountLocalTargetToSourceDiff = targetAmountLocal.exceptAll(sourceAmountLocal)
 
-    if (sourceAmountLocal.columns.contains("TRANSACTION_ID")) {
-      val amountLocalSourceToTargetIds = amountLocalSourceToTargetDiff.select("TRANSACTION_ID").as[String].collect().mkString(", ")
-      val amountLocalTargetToSourceIds = amountLocalTargetToSourceDiff.select("TRANSACTION_ID").as[String].collect().mkString(", ")
-      validationSummary += s"Amount Local Validation: ${amountLocalSourceToTargetDiff.count() + amountLocalTargetToSourceDiff.count()} found\n"
-      validationSummary += s"Source to Target Transaction IDs: $amountLocalSourceToTargetIds\n"
-      validationSummary += s"Target to Source Transaction IDs: $amountLocalTargetToSourceIds\n"
-    } else {
-      logger.error("TRANSACTION_ID (or equivalent) column is missing for Amount Local Validation")
-    }
+    val amountLocalSourceToTargetIds = amountLocalSourceToTargetDiff.select("TRANSACTION_ID").as[String].collect().mkString(", ")
+    val amountLocalTargetToSourceIds = amountLocalTargetToSourceDiff.select("TRANSACTION_ID").as[String].collect().mkString(", ")
+    validationSummary += s"Amount Local Validation: ${amountLocalSourceToTargetDiff.count() + amountLocalTargetToSourceDiff.count()} found\n"
+    validationSummary += s"Source to Target Transaction IDs: $amountLocalSourceToTargetIds\n"
+    validationSummary += s"Target to Source Transaction IDs: $amountLocalTargetToSourceIds\n"
 
     // ==============================
     // STEP 7: Country ISO3 Validation
@@ -160,21 +146,18 @@ object CleanseCaseClass {
     val iso3SourceColumn = columnConfig.get("transaction_country_iso3_validation").flatMap(_.get("source_column")).getOrElse("")
     val iso3TargetColumn = columnConfig.get("transaction_country_iso3_validation").flatMap(_.get("target_column")).getOrElse("")
 
-    val sourceCountryData = transactionSource.withColumn("isoCountryCodeMapped", mapCountryCodeUDF(col(iso3SourceColumn))).select($"TRANSACTION_ID", $"isoCountryCodeMapped")
-    val targetCountryData = caseClass.select($"transactionId", col(iso3TargetColumn).as("isoCountryCode"))
+    val sourceCountryData = transactionSource.withColumn("isoCountryCodeMapped", mapCountryCodeUDF(col(iso3SourceColumn)))
+      .select($"TRANSACTION_ID", $"isoCountryCodeMapped".as("countryISO"))
+    val targetCountryData = caseClass.select($"transactionId".as("TRANSACTION_ID"), col(iso3TargetColumn).as("countryISO"))
 
     val countrySourceToTargetDiff = sourceCountryData.exceptAll(targetCountryData)
-    val countryTargetToSourceDiff = targetCountryData.exceptAll(sourceCountryData.select($"TRANSACTION_ID", $"isoCountryCodeMapped"))
+    val countryTargetToSourceDiff = targetCountryData.exceptAll(sourceCountryData)
 
-    if (sourceCountryData.columns.contains("TRANSACTION_ID")) {
-      val countrySourceToTargetIds = countrySourceToTargetDiff.select("TRANSACTION_ID").as[String].collect().mkString(", ")
-      val countryTargetToSourceIds = countryTargetToSourceDiff.select("transactionId").as[String].collect().mkString(", ")
-      validationSummary += s"Country ISO3 Validation: ${countrySourceToTargetDiff.count() + countryTargetToSourceDiff.count()} found\n"
-      validationSummary += s"Source to Target Transaction IDs: $countrySourceToTargetIds\n"
-      validationSummary += s"Target to Source Transaction IDs: $countryTargetToSourceIds\n"
-    } else {
-      logger.error("TRANSACTION_ID (or equivalent) column is missing for Country ISO3 Validation")
-    }
+    val countrySourceToTargetIds = countrySourceToTargetDiff.select("TRANSACTION_ID").as[String].collect().mkString(", ")
+    val countryTargetToSourceIds = countryTargetToSourceDiff.select("TRANSACTION_ID").as[String].collect().mkString(", ")
+    validationSummary += s"Country ISO3 Validation: ${countrySourceToTargetDiff.count() + countryTargetToSourceDiff.count()} found\n"
+    validationSummary += s"Source to Target Transaction IDs: $countrySourceToTargetIds\n"
+    validationSummary += s"Target to Source Transaction IDs: $countryTargetToSourceIds\n"
 
     // ==============================
     // STEP 8: Write Validation Summary to S3 as Text File
