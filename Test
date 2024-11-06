@@ -1,5 +1,6 @@
 import org.apache.spark.sql.{DataFrame, SparkSession}
 import org.apache.spark.sql.functions._
+import scala.util.Try
 
 def applyDirectColumnValidation(
     sourceCols: String,
@@ -13,34 +14,37 @@ def applyDirectColumnValidation(
   val sourceColumns = sourceCols.split(",").map(_.trim).toSeq
   val targetColumns = targetCols.split(",").map(_.trim).toSeq
 
-  // Check for column count equality
+  // Ensure equal column counts
   if (sourceColumns.length != targetColumns.length) {
     throw new IllegalArgumentException("Source and target column lists must have the same length.")
   }
 
-  // Check that each column exists in the respective DataFrames, filtering out any missing columns
-  val validSourceColumns = sourceColumns.filter(transactionSource.columns.contains)
-  val validTargetColumns = targetColumns.filter(caseClass.columns.contains)
+  // Initialize lists to track missing columns
+  val missingSourceCols = sourceColumns.filterNot(transactionSource.columns.contains)
+  val missingTargetCols = targetColumns.filterNot(caseClass.columns.contains)
 
-  // Report any missing columns
-  val missingSourceColumns = sourceColumns.diff(validSourceColumns)
-  val missingTargetColumns = targetColumns.diff(validTargetColumns)
+  // Log missing columns if any
+  if (missingSourceCols.nonEmpty || missingTargetCols.nonEmpty) {
+    println(s"Missing source columns: ${missingSourceCols.mkString(", ")}")
+    println(s"Missing target columns: ${missingTargetCols.mkString(", ")}")
+  }
 
-  missingSourceColumns.foreach(col => println(s"Missing column in source: $col"))
-  missingTargetColumns.foreach(col => println(s"Missing column in target: $col"))
+  // Filter only available columns to continue processing
+  val filteredSourceCols = sourceColumns.diff(missingSourceCols)
+  val filteredTargetCols = targetColumns.diff(missingTargetCols)
 
-  // Align columns and cast to String type for consistent comparison
-  val sourceSelected = transactionSource.select(validSourceColumns.zipWithIndex.map {
+  // Select and align columns, cast to string for uniform comparison
+  val sourceSelected = transactionSource.select(filteredSourceCols.zipWithIndex.map {
     case (colName, i) => col(colName).cast("string").as(s"col_$i")
   }: _*)
 
-  val targetSelected = caseClass.select(validTargetColumns.zipWithIndex.map {
+  val targetSelected = caseClass.select(filteredTargetCols.zipWithIndex.map {
     case (colName, i) => col(colName).cast("string").as(s"col_$i")
   }: _*)
 
-  // Intersect the DataFrames to find matching rows
+  // Intersect to find matching rows
   val matchingData = sourceSelected.intersect(targetSelected)
 
-  // Collect transaction IDs from the first column (assumed as "col_0" after renaming)
+  // Collect transaction IDs from matching rows (first column is col_0)
   matchingData.select("col_0").as[String].collect().toList
 }
