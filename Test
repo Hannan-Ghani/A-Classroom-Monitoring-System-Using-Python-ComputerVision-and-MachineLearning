@@ -1,130 +1,132 @@
-from pyspark.sql import SparkSession
-from pyspark.sql.functions import col, udf
-import boto3
+import com.amazonaws.services.glue.GlueContext
+import com.amazonaws.services.glue.util.Job
+import org.apache.spark.SparkContext
+import org.apache.spark.sql.{DataFrame, SparkSession}
+import com.amazonaws.services.glue.util.GlueArgParser
+import org.apache.spark.sql.functions._
+import org.apache.log4j.Logger
+import scala.io.Source
 
-# Initialize SparkSession
-spark = SparkSession.builder.appName("CleanseCaseClass").getOrCreate()
+object CleanseCaseClass {
 
-# ==============================
-# Configuration Parameters
-# ==============================
+  def main(sysArgs: Array[String]): Unit = {
+    // Initialize Glue and Spark context
+    val spark: SparkContext = new SparkContext()
+    val glueContext: GlueContext = new GlueContext(spark)
+    val sparkSession: SparkSession = glueContext.getSparkSession
+    import sparkSession.implicits._
 
-# Define S3 paths for configuration and output files
-s3ConfigPath = "s3://your-bucket/paths_config.txt"
-s3ColumnsConfigPath = "s3://your-bucket/columns_config.txt"
-outputSummaryPath = "s3://your-bucket/output_summary.txt"
+    // Setup Logger
+    val logger: Logger = Logger.getLogger("CleanseCaseClassLogger")
 
-# ==============================
-# Load Configurations
-# ==============================
+    // Read configuration file paths from Glue job parameters
+    val args = GlueArgParser.getResolvedOptions(sysArgs, Seq("s3ConfigPath", "s3ColumnsConfigPath", "outputSummaryPath").toArray)
+    val s3ConfigPath = args("s3ConfigPath")
+    val s3ColumnsConfigPath = args("s3ColumnsConfigPath")
+    val outputSummaryPath = args("outputSummaryPath")
 
-# Helper function to read configurations from S3
-def read_config_from_s3(s3_path):
-    s3 = boto3.client('s3')
-    bucket, key = s3_path.replace("s3://", "").split("/", 1)
-    obj = s3.get_object(Bucket=bucket, Key=key)
-    config = {}
-    for line in obj['Body'].read().decode("utf-8").splitlines():
-        key, value = line.strip().split('=')
-        config[key.strip()] = value.strip()
-    return config
+    // ==============================
+    // STEP 1: Load Configurations
+    // ==============================
+    // Read paths configuration from S3 config text file
+    val configMap = Source.fromFile(s3ConfigPath).getLines().map { line =>
+      val split = line.split("=")
+      (split(0).trim, split(1).trim)
+    }.toMap
+    val inputSourcePath = configMap("inputSourcePath")
+    val inputTargetPath = configMap("inputTargetPath")
+    val outputBasePath = configMap("outputBasePath")
 
-configMap = read_config_from_s3(s3ConfigPath)
-inputSourcePath = configMap["inputSourcePath"]
-inputTargetPath = configMap["inputTargetPath"]
-outputBasePath = configMap["outputBasePath"]
+    // Load column configurations from S3 config text file
+    val columnConfig = Source.fromFile(s3ColumnsConfigPath).getLines().foldLeft(Map[String, Seq[String]]()) { (acc, line) =>
+      val split = line.split("=")
+      val key = split(0).trim
+      val values = split(1).trim.split(",").map(_.trim).toSeq
+      acc + (key -> values)
+    }
 
-columnConfig = read_config_from_s3(s3ColumnsConfigPath)
+    // ==============================
+    // STEP 2: Load Data from S3
+    // ==============================
+    val transactionSource: DataFrame = sparkSession.read.parquet(inputSourcePath)
+    val caseClass: DataFrame = sparkSession.read.parquet(inputTargetPath)
 
-# ==============================
-# Load Data from S3 Paths
-# ==============================
-transactionSource = spark.read.parquet(inputSourcePath)
-caseClass = spark.read.parquet(inputTargetPath)
+    // Initialize validation summary
+    var validationSummary = "Validation Results Summary:\n"
 
-# Initialize validation summary string
-validationSummary = "Validation Results Summary:\n"
+    // ==============================
+    // Country Code Mapping UDF
+    // ==============================
+    // Map 2-letter country codes to ISO3 codes
+    val countryCodeMapping = Map(
+      "US" -> "USA", "CA" -> "CAN", "MX" -> "MEX", "GB" -> "GBR", "FR" -> "FRA",
+      "DE" -> "DEU", "IN" -> "IND", "CN" -> "CHN", "JP" -> "JPN", "AU" -> "AUS"
+      // Add more mappings as needed
+    )
+    val mapCountryCodeUDF = udf((code: String) => countryCodeMapping.getOrElse(code, code))
 
-# ==============================
-# Country Code Mapping UDF
-# ==============================
-countryCodeMapping = {
-    "US": "USA", "CA": "CAN", "MX": "MEX", "GB": "GBR", "FR": "FRA",
-    "DE": "DEU", "IN": "IND", "CN": "CHN", "JP": "JPN", "AU": "AUS"
+    // ==============================
+    // STEP 3: Null Value Validation
+    // ==============================
+    val nullColumns = columnConfig.getOrElse("null_validation.columns", Seq())
+    val existingNullColumns = nullColumns.filter(caseClass.columns.contains)
+
+    val nullValidationCount = caseClass.filter(row => existingNullColumns.exists(col => row.getAs[Any](col) == null)).count()
+    validationSummary += s"Null Validation: $nullValidationCount found\n"
+
+    // ==============================
+    // STEP 4: Direct Column Validation (Source-to-Target and Target-to-Source)
+    // ==============================
+    val sourceDirectColumns = columnConfig.getOrElse("direct_column_validation.columns_source", Seq())
+    val targetDirectColumns = columnConfig.getOrElse("direct_column_validation.columns_target", Seq())
+
+    val directSourceData = transactionSource.select(sourceDirectColumns.map(col): _*)
+    val directTargetData = caseClass.select(targetDirectColumns.map(col): _*)
+    val directSourceToTargetDiff = directSourceData.exceptAll(directTargetData)
+    val directTargetToSourceDiff = directTargetData.exceptAll(directSourceData)
+
+    val directSourceToTargetCount = directSourceToTargetDiff.count()
+    val directTargetToSourceCount = directTargetToSourceDiff.count()
+    val directSourceToTargetIds = directSourceToTargetDiff.select("TRANSACTION_ID").as[String].collect().mkString(", ")
+    val directTargetToSourceIds = directTargetToSourceDiff.select("transactionId").as[String].collect().mkString(", ")
+
+    validationSummary += s"Direct Column Validation: ${directSourceToTargetCount + directTargetToSourceCount} found\n"
+    validationSummary += s"Source to Target Transaction IDs: $directSourceToTargetIds\n"
+    validationSummary += s"Target to Source Transaction IDs: $directTargetToSourceIds\n"
+
+    // ==============================
+    // STEP 5: Country ISO3 Validation (Source-to-Target and Target-to-Source with Country Mapping)
+    // ==============================
+    val sourceCountryColumn = columnConfig.getOrElse("transaction_country_iso3_validation.source_column", Seq()).head
+    val targetCountryColumn = columnConfig.getOrElse("transaction_country_iso3_validation.target_column", Seq()).head
+
+    // Apply country code mapping to the source dataset
+    val sourceCountryData = transactionSource
+      .withColumn("isoCountryCodeMapped", mapCountryCodeUDF(col(sourceCountryColumn)))
+      .select($"TRANSACTION_ID", $"isoCountryCodeMapped")
+
+    // Select target column without modification
+    val targetCountryData = caseClass.select($"transactionId", col(targetCountryColumn).as("isoCountryCode"))
+
+    val countrySourceToTargetDiff = sourceCountryData.exceptAll(targetCountryData)
+    val countryTargetToSourceDiff = targetCountryData.exceptAll(sourceCountryData)
+
+    val countrySourceToTargetCount = countrySourceToTargetDiff.count()
+    val countryTargetToSourceCount = countryTargetToSourceDiff.count()
+    val countrySourceToTargetIds = countrySourceToTargetDiff.select("TRANSACTION_ID").as[String].collect().mkString(", ")
+    val countryTargetToSourceIds = countryTargetToSourceDiff.select("transactionId").as[String].collect().mkString(", ")
+
+    validationSummary += s"Country ISO3 Validation: ${countrySourceToTargetCount + countryTargetToSourceCount} found\n"
+    validationSummary += s"Source to Target Transaction IDs: $countrySourceToTargetIds\n"
+    validationSummary += s"Target to Source Transaction IDs: $countryTargetToSourceIds\n"
+
+    // ==============================
+    // STEP 6: Write Validation Summary to S3 as Text File
+    // ==============================
+    val outputSummaryDF = Seq(validationSummary).toDF("Validation_Summary")
+    outputSummaryDF.coalesce(1).write.mode("overwrite").text(outputSummaryPath)
+
+    // Commit the Glue job
+    Job.commit()
+  }
 }
-
-def map_country_code(code):
-    return countryCodeMapping.get(code, code)
-
-# Register the UDF in Spark
-mapCountryCodeUDF = udf(map_country_code)
-
-# ==============================
-# Null Value Validation
-# ==============================
-nullColumns = columnConfig.get("null_validation.columns", "").split(',')
-existingNullColumns = [col for col in nullColumns if col in caseClass.columns]
-
-nullValidationCount = caseClass.filter(lambda row: any(row[col] is None for col in existingNullColumns)).count()
-validationSummary += f"Null Validation: {nullValidationCount} found\n"
-
-# ==============================
-# Direct Column Validation
-# ==============================
-sourceDirectColumns = columnConfig.get("direct_column_validation.columns_source", "").split(',')
-targetDirectColumns = columnConfig.get("direct_column_validation.columns_target", "").split(',')
-
-directSourceData = transactionSource.select([col(c) for c in sourceDirectColumns])
-directTargetData = caseClass.select([col(c) for c in targetDirectColumns])
-
-# Source-to-target and target-to-source differences
-directSourceToTargetDiff = directSourceData.exceptAll(directTargetData)
-directTargetToSourceDiff = directTargetData.exceptAll(directSourceData)
-
-# Collect counts and IDs without reassigning to avoid overwrites
-directSourceToTargetCount = directSourceToTargetDiff.count()
-directTargetToSourceCount = directTargetToSourceDiff.count()
-directSourceToTargetIds = ", ".join([row["TRANSACTION_ID"] for row in directSourceToTargetDiff.select("TRANSACTION_ID").collect()])
-directTargetToSourceIds = ", ".join([row["transactionId"] for row in directTargetToSourceDiff.select("transactionId").collect()])
-
-validationSummary += f"Direct Column Validation: {directSourceToTargetCount + directTargetToSourceCount} found\n"
-validationSummary += f"Source to Target Transaction IDs: {directSourceToTargetIds}\n"
-validationSummary += f"Target to Source Transaction IDs: {directTargetToSourceIds}\n"
-
-# ==============================
-# Country ISO3 Validation with Mapping
-# ==============================
-sourceCountryColumn = columnConfig["transaction_country_iso3_validation.source_column"]
-targetCountryColumn = columnConfig["transaction_country_iso3_validation.target_column"]
-
-# Apply country code mapping to source data
-sourceCountryData = transactionSource.withColumn("isoCountryCodeMapped", mapCountryCodeUDF(col(sourceCountryColumn)))
-targetCountryData = caseClass.select(col("transactionId"), col(targetCountryColumn).alias("isoCountryCode"))
-
-countrySourceToTargetDiff = sourceCountryData.select("TRANSACTION_ID", "isoCountryCodeMapped").exceptAll(targetCountryData)
-countryTargetToSourceDiff = targetCountryData.exceptAll(sourceCountryData.select("TRANSACTION_ID", "isoCountryCodeMapped"))
-
-# Count and collect IDs for differences
-countrySourceToTargetCount = countrySourceToTargetDiff.count()
-countryTargetToSourceCount = countryTargetToSourceDiff.count()
-countrySourceToTargetIds = ", ".join([row["TRANSACTION_ID"] for row in countrySourceToTargetDiff.select("TRANSACTION_ID").collect()])
-countryTargetToSourceIds = ", ".join([row["transactionId"] for row in countryTargetToSourceDiff.select("transactionId").collect()])
-
-validationSummary += f"Country ISO3 Validation: {countrySourceToTargetCount + countryTargetToSourceCount} found\n"
-validationSummary += f"Source to Target Transaction IDs: {countrySourceToTargetIds}\n"
-validationSummary += f"Target to Source Transaction IDs: {countryTargetToSourceIds}\n"
-
-# ==============================
-# Write Validation Summary to S3
-# ==============================
-
-# Helper function to write summary to S3
-def write_summary_to_s3(summary, s3_path):
-    s3 = boto3.resource('s3')
-    bucket, key = s3_path.replace("s3://", "").split("/", 1)
-    s3.Object(bucket, key).put(Body=summary)
-
-write_summary_to_s3(validationSummary, outputSummaryPath)
-
-# Stop Spark session
-spark.stop()
