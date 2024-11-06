@@ -9,7 +9,7 @@ object EnhancedValidationFromConfig {
     val spark: SparkSession = SparkSession.builder().appName("EnhancedValidationFromConfig").getOrCreate()
     import spark.implicits._
 
-    // Paths to config files (you can replace these with actual S3 paths or local paths as needed)
+    // Paths to config files
     val s3PathConfig = "path_config.txt"
     val s3ValidationConfig = "validation_config.txt"
 
@@ -96,8 +96,10 @@ object EnhancedValidationFromConfig {
 
   def applyNullValidation(columns: String, df: DataFrame)(implicit spark: SparkSession): String = {
     val nullColumns = columns.split(",").map(_.trim).filter(df.columns.contains)
-    val nullCount = df.select(nullColumns.map(col): _*).filter(row => row.anyNull).count()
-    s"Null Validation: $nullCount found\n"
+    val nullFilteredData = df.filter(nullColumns.map(col => col(col).isNull).reduce(_ && _))
+    val nullCount = nullFilteredData.count()
+    val transactionIds = nullFilteredData.select("TRANSACTION_ID").as[String].collect().mkString(", ")
+    s"Null Validation: $nullCount null rows\nTransaction IDs: $transactionIds\n"
   }
 
   def applyDirectColumnValidation(
@@ -106,47 +108,52 @@ object EnhancedValidationFromConfig {
     val sourceColumns = sourceCols.split(",").map(_.trim)
     val targetColumns = targetCols.split(",").map(_.trim)
 
+    // Align the columns for comparison
     val sourceSelected = sourceDF.select(sourceColumns.zipWithIndex.map { case (colName, i) => col(colName).as(s"col_$i") }: _*)
     val targetSelected = targetDF.select(targetColumns.zipWithIndex.map { case (colName, i) => col(colName).as(s"col_$i") }: _*)
 
+    // Find matching rows
     val matchingData = sourceSelected.intersect(targetSelected)
     val matchCount = matchingData.count()
     val transactionIds = matchingData.select("col_0").as[String].collect().mkString(", ")
 
-    s"Direct Column Validation: $matchCount found\nTransaction IDs: $transactionIds\n"
+    s"Direct Column Validation: $matchCount matched rows\nTransaction IDs: $transactionIds\n"
   }
 
   def applyNarrativeValidation(sourceCol: String, targetCol: String, sourceDF: DataFrame, targetDF: DataFrame)(implicit spark: SparkSession): String = {
-    val sourceSelected = sourceDF.select(col(sourceCol).as("narrative_source"))
-    val targetSelected = targetDF.select(col(targetCol).as("narrative_target"))
+    val sourceSelected = sourceDF.select(col("TRANSACTION_ID"), col(sourceCol).as("narrative_source"))
+    val targetSelected = targetDF.select(col("TRANSACTION_ID"), col(targetCol).as("narrative_target"))
 
-    val matchingData = sourceSelected.intersect(targetSelected)
+    val matchingData = sourceSelected.join(targetSelected, Seq("TRANSACTION_ID"))
+      .filter($"narrative_source" === $"narrative_target")
     val matchCount = matchingData.count()
-    val narratives = matchingData.select("narrative_source").as[String].collect().mkString(", ")
+    val transactionIds = matchingData.select("TRANSACTION_ID").as[String].collect().mkString(", ")
 
-    s"Narrative Validation: $matchCount found\nNarratives: $narratives\n"
+    s"Narrative Validation: $matchCount matched rows\nTransaction IDs: $transactionIds\n"
   }
 
   def applyAmountLocalValidation(sourceCol: String, targetCol: String, sourceDF: DataFrame, targetDF: DataFrame)(implicit spark: SparkSession): String = {
-    val sourceSelected = sourceDF.select(col(sourceCol).as("amount_source"))
-    val targetSelected = targetDF.select(col(targetCol).as("amount_target"))
+    val sourceSelected = sourceDF.select(col("TRANSACTION_ID"), col(sourceCol).as("amount_source"))
+    val targetSelected = targetDF.select(col("TRANSACTION_ID"), col(targetCol).as("amount_target"))
 
-    val matchingData = sourceSelected.intersect(targetSelected)
+    val matchingData = sourceSelected.join(targetSelected, Seq("TRANSACTION_ID"))
+      .filter($"amount_source" === $"amount_target")
     val matchCount = matchingData.count()
-    val amounts = matchingData.select("amount_source").as[String].collect().mkString(", ")
+    val transactionIds = matchingData.select("TRANSACTION_ID").as[String].collect().mkString(", ")
 
-    s"Amount Local Validation: $matchCount found\nAmounts: $amounts\n"
+    s"Amount Local Validation: $matchCount matched rows\nTransaction IDs: $transactionIds\n"
   }
 
   def applyCountryISO3Validation(sourceCol: String, targetCol: String, sourceDF: DataFrame, targetDF: DataFrame)(implicit spark: SparkSession): String = {
-    val sourceSelected = sourceDF.select(col(sourceCol).as("country_code"))
-    val targetSelected = targetDF.select(col(targetCol).as("country_code"))
+    val sourceSelected = sourceDF.select(col("TRANSACTION_ID"), col(sourceCol).as("country_code"))
+    val targetSelected = targetDF.select(col("TRANSACTION_ID"), col(targetCol).as("country_code"))
 
-    val matchingData = sourceSelected.intersect(targetSelected)
+    val matchingData = sourceSelected.join(targetSelected, Seq("TRANSACTION_ID"))
+      .filter($"country_code" === $"country_code")
     val matchCount = matchingData.count()
-    val countryCodes = matchingData.select("country_code").as[String].collect().mkString(", ")
+    val transactionIds = matchingData.select("TRANSACTION_ID").as[String].collect().mkString(", ")
 
-    s"Country ISO3 Validation: $matchCount found\nCountry Codes: $countryCodes\n"
+    s"Country ISO3 Validation: $matchCount matched rows\nTransaction IDs: $transactionIds\n"
   }
 
   def writeSummaryLog(log: String, outputPath: String): Unit = {
