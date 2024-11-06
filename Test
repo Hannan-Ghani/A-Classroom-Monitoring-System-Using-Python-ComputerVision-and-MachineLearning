@@ -1,42 +1,48 @@
+# Required imports for AWS Glue
+from awsglue.context import GlueContext
+from pyspark.context import SparkContext
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import col, udf
-from pyspark.sql import DataFrame
 import boto3
 
-# Initialize SparkSession
-spark = SparkSession.builder.appName("CleanseCaseClass").getOrCreate()
+# Initialize Glue and Spark context
+sc = SparkContext.getOrCreate()
+glueContext = GlueContext(sc)
+spark = glueContext.spark_session
 
 # ==============================
 # Configuration Parameters
 # ==============================
 
-# Define paths for local testing or S3 if accessible
-s3ConfigPath = "path/to/local/paths_config.txt"  # Update with your actual local path or S3 path
-s3ColumnsConfigPath = "path/to/local/columns_config.txt"  # Update with your actual local path or S3 path
-outputSummaryPath = "path/to/local/output_summary.txt"  # Update with your actual local path
+# Define S3 paths for configuration and output files
+s3ConfigPath = "s3://your-bucket/paths_config.txt"
+s3ColumnsConfigPath = "s3://your-bucket/columns_config.txt"
+outputSummaryPath = "s3://your-bucket/output_summary.txt"
 
 # ==============================
 # Load Configurations
 # ==============================
 
-# Helper function to read configurations
-def read_config(path):
+# Helper function to read configurations from S3
+def read_config_from_s3(s3_path):
+    s3 = boto3.client('s3')
+    bucket, key = s3_path.replace("s3://", "").split("/", 1)
+    obj = s3.get_object(Bucket=bucket, Key=key)
     config = {}
-    with open(path, 'r') as f:
-        for line in f:
-            key, value = line.strip().split('=')
-            config[key.strip()] = value.strip()
+    for line in obj['Body'].read().decode("utf-8").splitlines():
+        key, value = line.strip().split('=')
+        config[key.strip()] = value.strip()
     return config
 
-configMap = read_config(s3ConfigPath)
+configMap = read_config_from_s3(s3ConfigPath)
 inputSourcePath = configMap["inputSourcePath"]
 inputTargetPath = configMap["inputTargetPath"]
 outputBasePath = configMap["outputBasePath"]
 
-columnConfig = read_config(s3ColumnsConfigPath)
+columnConfig = read_config_from_s3(s3ColumnsConfigPath)
 
 # ==============================
-# Load Data from Paths
+# Load Data from S3 Paths
 # ==============================
 transactionSource = spark.read.parquet(inputSourcePath)
 caseClass = spark.read.parquet(inputTargetPath)
@@ -114,10 +120,16 @@ validationSummary += f"Source to Target Transaction IDs: {countrySourceToTargetI
 validationSummary += f"Target to Source Transaction IDs: {countryTargetToSourceIds}\n"
 
 # ==============================
-# Write Validation Summary to Local Output
+# Write Validation Summary to S3
 # ==============================
-with open(outputSummaryPath, 'w') as f:
-    f.write(validationSummary)
+
+# Helper function to write summary to S3
+def write_summary_to_s3(summary, s3_path):
+    s3 = boto3.resource('s3')
+    bucket, key = s3_path.replace("s3://", "").split("/", 1)
+    s3.Object(bucket, key).put(Body=summary)
+
+write_summary_to_s3(validationSummary, outputSummaryPath)
 
 # Stop Spark session
 spark.stop()
