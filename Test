@@ -1,95 +1,32 @@
-import com.amazonaws.services.glue.GlueContext
-import com.amazonaws.services.glue.util.GlueArgParser
-import org.apache.spark.SparkContext
-import org.apache.spark.sql.{DataFrame, SparkSession}
-import org.apache.spark.sql.functions._
-import scala.io.Source
-import java.io.InputStream
-import com.amazonaws.services.s3.AmazonS3ClientBuilder
-
-object DirectColumnValidationWithTransactionIDJob {
-
-  def main(args: Array[String]): Unit = {
-    val spark: SparkSession = SparkSession.builder.appName("DirectColumnValidationWithTransactionIDJob").getOrCreate()
-    val glueContext = new GlueContext(spark.sparkContext)
-    import spark.implicits._
-
-    // Parse arguments (excluding JOB_NAME)
-    val options = GlueArgParser.getResolvedOptions(args, Seq("configPath", "columnsConfigPath").toArray)
-
-    // Load configurations from S3
-    val configPath = options("configPath")
-    val columnsConfigPath = options("columnsConfigPath")
-    val config = loadConfig(configPath)
-    val columnsConfig = loadConfig(columnsConfigPath)
-
-    val inputSourcePath = config.getOrElse("paths.inputSourcePath", "")
-    val inputTargetPath = config.getOrElse("paths.inputTargetPath", "")
-    val outputBasePath = config.getOrElse("paths.outputBasePath", "")
-
-    // Load data
-    val sourceDF = spark.read.parquet(inputSourcePath)
-    val targetDF = spark.read.parquet(inputTargetPath)
-
-    // Log schema
-    sourceDF.printSchema()
-    targetDF.printSchema()
-
-    // Perform Direct Column Validation with Transaction ID
-    val validationResult = performDirectColumnValidationWithTransactionID(sourceDF, targetDF, columnsConfig)
-
-    // Save result to S3
-    validationResult.write.mode("overwrite").parquet(s"$outputBasePath/direct_column_validation_result")
-
-    // Generate summary with transaction IDs
-    val summary = generateSummary(validationResult)(spark)
-    val summaryPath = s"$outputBasePath/validation_summary.txt"
-    spark.sparkContext.parallelize(Seq(summary)).saveAsTextFile(summaryPath)
-  }
-
-  // Helper function for loading config files from S3
-  def loadConfig(s3Path: String): Map[String, String] = {
+def loadConfig(s3Path: String): Map[String, String] = {
+  try {
     val s3 = AmazonS3ClientBuilder.defaultClient()
     val uri = new java.net.URI(s3Path)
     val bucket = uri.getHost
     val key = uri.getPath.drop(1)  // Drop the leading '/'
 
+    println(s"Attempting to load config from bucket: $bucket, key: $key")
+    
     val s3Object = s3.getObject(bucket, key)
     val inputStream: InputStream = s3Object.getObjectContent
     val configLines = Source.fromInputStream(inputStream).getLines().toList
-    configLines.filter(_.contains("=")).map { line =>
+
+    println("Config file content:")
+    configLines.foreach(println)
+
+    // Parse lines with "=" and log any skipped lines
+    val configMap = configLines.filter(_.contains("=")).map { line =>
       val parts = line.split("=", 2)
       parts(0).trim -> parts(1).trim
     }.toMap
-  }
 
-  // Direct Column Validation with Transaction ID
-  def performDirectColumnValidationWithTransactionID(sourceDF: DataFrame, targetDF: DataFrame, config: Map[String, String]): DataFrame = {
-    val sourceCols = config.getOrElse("direct_column_validation.columns_source", "").split(",").map(_.trim)
-    val targetCols = config.getOrElse("direct_column_validation.columns_target", "").split(",").map(_.trim)
+    println("Parsed config map:")
+    configMap.foreach { case (key, value) => println(s"$key -> $value") }
 
-    val sourceSelectCols = Seq(col("TRANSACTION_ID").cast("long").as("transaction_id")) ++ 
-      sourceCols.zipWithIndex.map { case (c, i) => col(c).as(s"common_col_$i") }
-
-    val targetSelectCols = Seq(col("transactionId").cast("long").as("transaction_id")) ++ 
-      targetCols.zipWithIndex.map { case (c, i) => col(c).as(s"common_col_$i") }
-
-    val renamedSourceDF = sourceDF.select(sourceSelectCols: _*)
-    val renamedTargetDF = targetDF.select(targetSelectCols: _*)
-
-    renamedSourceDF.exceptAll(renamedTargetDF).union(renamedTargetDF.exceptAll(renamedSourceDF))
-  }
-
-  // Generate Summary with Transaction IDs
-  def generateSummary(validationResult: DataFrame)(implicit spark: SparkSession): String = {
-    import spark.implicits._
-    val discrepancyCount = validationResult.count()
-    val transactionIds = validationResult.select("transaction_id").distinct().as[Long].collect().mkString(", ")
-    
-    s"""
-    |Validation Results Summary:
-    |Direct Column Validation: $discrepancyCount discrepancies found
-    |Transaction IDs with discrepancies: $transactionIds
-    """.stripMargin
+    configMap
+  } catch {
+    case e: Exception =>
+      println(s"Error loading configuration file from $s3Path: ${e.getMessage}")
+      throw e
   }
 }
