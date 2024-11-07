@@ -42,7 +42,7 @@ object DirectColumnValidationWithTransactionIDJob {
     validationResult.write.mode("overwrite").parquet(s"$outputBasePath/direct_column_validation_result")
 
     // Generate summary with transaction IDs
-    val summary = generateSummary(validationResult)
+    val summary = generateSummary(validationResult)(spark)
     val summaryPath = s"$outputBasePath/validation_summary.txt"
     spark.sparkContext.parallelize(Seq(summary)).saveAsTextFile(summaryPath)
   }
@@ -69,18 +69,19 @@ object DirectColumnValidationWithTransactionIDJob {
     val targetCols = config.getOrElse("direct_column_validation.columns_target", "").split(",").map(_.trim)
 
     val renamedSourceDF = sourceDF
-      .select(col("TRANSACTION_ID").as("transaction_id"), sourceCols.zipWithIndex.map { case (c, i) => col(c).as(s"common_col_$i") }: _*)
+      .select(col("TRANSACTION_ID").cast("long").as("transaction_id"), sourceCols.zipWithIndex.map { case (c, i) => col(c).as(s"common_col_$i") }: _*)
 
     val renamedTargetDF = targetDF
-      .select(col("transactionId").as("transaction_id"), targetCols.zipWithIndex.map { case (c, i) => col(c).as(s"common_col_$i") }: _*)
+      .select(col("transactionId").cast("long").as("transaction_id"), targetCols.zipWithIndex.map { case (c, i) => col(c).as(s"common_col_$i") }: _*)
 
     renamedSourceDF.exceptAll(renamedTargetDF).union(renamedTargetDF.exceptAll(renamedSourceDF))
   }
 
   // Generate Summary with Transaction IDs
-  def generateSummary(validationResult: DataFrame): String = {
+  def generateSummary(validationResult: DataFrame)(implicit spark: SparkSession): String = {
+    import spark.implicits._
     val discrepancyCount = validationResult.count()
-    val transactionIds = validationResult.select("transaction_id").distinct().as[String].collect().mkString(", ")
+    val transactionIds = validationResult.select("transaction_id").distinct().as[Long].collect().mkString(", ")
     
     s"""
     |Validation Results Summary:
