@@ -68,11 +68,14 @@ object DirectColumnValidationWithTransactionIDJob {
     val sourceCols = config.getOrElse("direct_column_validation.columns_source", "").split(",").map(_.trim)
     val targetCols = config.getOrElse("direct_column_validation.columns_target", "").split(",").map(_.trim)
 
-    val renamedSourceDF = sourceDF
-      .select(col("TRANSACTION_ID").cast("long").as("transaction_id"), sourceCols.zipWithIndex.map { case (c, i) => col(c).as(s"common_col_$i") }: _*)
+    val sourceSelectCols = Seq(col("TRANSACTION_ID").cast("long").as("transaction_id")) ++ 
+      sourceCols.zipWithIndex.map { case (c, i) => col(c).as(s"common_col_$i") }
 
-    val renamedTargetDF = targetDF
-      .select(col("transactionId").cast("long").as("transaction_id"), targetCols.zipWithIndex.map { case (c, i) => col(c).as(s"common_col_$i") }: _*)
+    val targetSelectCols = Seq(col("transactionId").cast("long").as("transaction_id")) ++ 
+      targetCols.zipWithIndex.map { case (c, i) => col(c).as(s"common_col_$i") }
+
+    val renamedSourceDF = sourceDF.select(sourceSelectCols: _*)
+    val renamedTargetDF = targetDF.select(targetSelectCols: _*)
 
     renamedSourceDF.exceptAll(renamedTargetDF).union(renamedTargetDF.exceptAll(renamedSourceDF))
   }
