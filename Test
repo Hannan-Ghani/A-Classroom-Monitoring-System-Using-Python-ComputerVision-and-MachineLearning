@@ -82,10 +82,11 @@ object CleanseCaseClass {
 
   // Null Validation Method
   def validateNullColumns(df: DataFrame, nullColumns: Seq[String], writer: PrintWriter): Unit = {
+    import df.sparkSession.implicits._
     val existingNullColumns = filterExistingColumns(df, nullColumns)
     if (existingNullColumns.nonEmpty) {
       val nonNullData = df.filter(existingNullColumns.map(col(_).isNotNull).reduce(_ || _))
-      val nonNullTransactionIds = nonNullData.select("transactionId").as[String].collect()  // Explicitly select transactionId
+      val nonNullTransactionIds = nonNullData.select($"transactionId").as[String].collect()  // Explicitly select transactionId
       writer.write("Null Validation Differences:\n")
       writer.write("Non-null values found for columns expected to be null in rows: " + nonNullTransactionIds.mkString(", ") + "\n\n")
     } else {
@@ -95,20 +96,21 @@ object CleanseCaseClass {
 
   // Direct Column Validation Method
   def validateDirectColumns(sourceDF: DataFrame, targetDF: DataFrame, configMap: Map[String, Seq[String]], writer: PrintWriter): Unit = {
+    import sourceDF.sparkSession.implicits._
     val sourceCols = configMap.getOrElse("direct_column_validation_source", Seq())
     val targetCols = configMap.getOrElse("direct_column_validation_target", Seq())
 
     val (alignedSourceCols, alignedTargetCols) = filterExistingColumnPairs(sourceCols, targetCols, sourceDF, targetDF)
 
     if (alignedSourceCols.nonEmpty && alignedTargetCols.nonEmpty) {
-      val sourceData = sourceDF.select(col("TRANSACTION_ID"), alignedSourceCols.zipWithIndex.map { case (col, i) => col(col).as(s"col_$i") }: _*)
-      val targetData = targetDF.select(col("transactionId"), alignedTargetCols.zipWithIndex.map { case (col, i) => col(col).as(s"col_$i") }: _*)
+      val sourceData = sourceDF.select($"TRANSACTION_ID", alignedSourceCols.zipWithIndex.map { case (col, i) => col(col).as(s"col_$i") }: _*)
+      val targetData = targetDF.select($"transactionId", alignedTargetCols.zipWithIndex.map { case (col, i) => col(col).as(s"col_$i") }: _*)
 
       val sourceToTargetDiff = sourceData.except(targetData)
       val targetToSourceDiff = targetData.except(sourceData)
 
-      val sourceToTargetIds = sourceToTargetDiff.select("TRANSACTION_ID").as[String].collect()  // Explicitly select TRANSACTION_ID
-      val targetToSourceIds = targetToSourceDiff.select("transactionId").as[String].collect()  // Explicitly select transactionId
+      val sourceToTargetIds = sourceToTargetDiff.select($"TRANSACTION_ID").as[String].collect()  // Explicitly select TRANSACTION_ID
+      val targetToSourceIds = targetToSourceDiff.select($"transactionId").as[String].collect()  // Explicitly select transactionId
 
       writer.write("Direct Column Validation Differences:\n")
       writer.write("Source to Target Differences: " + sourceToTargetIds.mkString(", ") + "\n")
@@ -120,20 +122,21 @@ object CleanseCaseClass {
 
   // Narrative Validation Method
   def validateNarrativeColumns(sourceDF: DataFrame, targetDF: DataFrame, configMap: Map[String, Seq[String]], writer: PrintWriter): Unit = {
+    import sourceDF.sparkSession.implicits._
     val sourceNarrativeCol = configMap.getOrElse("narrative_validation_source", Seq()).headOption.getOrElse("")
     val targetNarrativeCol = configMap.getOrElse("narrative_validation_target", Seq()).headOption.getOrElse("")
 
     val cleanedSourceNarrative = sourceDF.withColumn("cleaned_narrative", when(trim(col(sourceNarrativeCol)) === "" || trim(col(sourceNarrativeCol)) === "*", null)
       .otherwise(col(sourceNarrativeCol))
-    ).select(col("TRANSACTION_ID"), col("cleaned_narrative"))  // Explicitly select TRANSACTION_ID
+    ).select($"TRANSACTION_ID", $"cleaned_narrative")  // Explicitly select TRANSACTION_ID
 
-    val targetNarrative = targetDF.select(col("transactionId"), col(targetNarrativeCol).as("cleaned_narrative"))
+    val targetNarrative = targetDF.select($"transactionId", col(targetNarrativeCol).as("cleaned_narrative"))
 
     val narrativeSourceToTargetDiff = cleanedSourceNarrative.except(targetNarrative)
     val narrativeTargetToSourceDiff = targetNarrative.except(cleanedSourceNarrative)
 
-    val narrativeSourceToTargetIds = narrativeSourceToTargetDiff.select("TRANSACTION_ID").as[String].collect()  // Explicitly select TRANSACTION_ID
-    val narrativeTargetToSourceIds = narrativeTargetToSourceDiff.select("transactionId").as[String].collect()  // Explicitly select transactionId
+    val narrativeSourceToTargetIds = narrativeSourceToTargetDiff.select($"TRANSACTION_ID").as[String].collect()  // Explicitly select TRANSACTION_ID
+    val narrativeTargetToSourceIds = narrativeTargetToSourceDiff.select($"transactionId").as[String].collect()  // Explicitly select transactionId
 
     writer.write("Narrative Validation Differences:\n")
     writer.write("Source to Target Differences: " + narrativeSourceToTargetIds.mkString(", ") + "\n")
