@@ -1,41 +1,41 @@
-def applyDirectColumnValidation(
-    sourceCols: String,
-    targetCols: String,
-    transactionSource: DataFrame,
-    caseClass: DataFrame
-)(implicit spark: SparkSession): List[String] = {
-  import spark.implicits._
+// =======================
+// Direct Column Validation
+// =======================
+val sourceCols = validationConfigMap.getOrElse("direct_column_validation_source", Seq())
+val targetCols = validationConfigMap.getOrElse("direct_column_validation_target", Seq())
 
-  // Identify transaction ID columns dynamically
-  val sourceTransactionIdCol = transactionSource.columns.find(_.equalsIgnoreCase("TRANSACTION_ID"))
-    .getOrElse(throw new NoSuchElementException("Transaction ID column 'TRANSACTION_ID' not found in source"))
+// Identify transaction ID columns
+val sourceTransactionIdCol = transactionSource.columns.find(_.equalsIgnoreCase("TRANSACTION_ID")).getOrElse {
+  throw new NoSuchElementException("Transaction ID column 'TRANSACTION_ID' not found in source")
+}
+val targetTransactionIdCol = caseClass.columns.find(_.equalsIgnoreCase("transactionId")).getOrElse {
+  throw new NoSuchElementException("Transaction ID column 'transactionId' not found in target")
+}
+
+// Filter for existing column pairs
+val (alignedSourceCols, alignedTargetCols) = filterExistingColumnPairs(sourceCols, targetCols, transactionSource, caseClass)
+
+// Proceed if aligned columns exist
+if (alignedSourceCols.nonEmpty && alignedTargetCols.nonEmpty) {
+  // Select aligned columns with transaction ID as "col_0"
+  val sourceData = transactionSource.select((col(sourceTransactionIdCol).as("col_0") +: 
+    alignedSourceCols.zipWithIndex.map { case (colName, i) => col(colName).as(s"col_${i + 1}") }): _*)
   
-  val targetTransactionIdCol = caseClass.columns.find(_.equalsIgnoreCase("transactionId"))
-    .getOrElse(throw new NoSuchElementException("Transaction ID column 'transactionId' not found in target"))
+  val targetData = caseClass.select((col(targetTransactionIdCol).as("col_0") +: 
+    alignedTargetCols.zipWithIndex.map { case (colName, i) => col(colName).as(s"col_${i + 1}") }): _*)
 
-  // Split and align column names
-  val sourceColumns = sourceCols.split(",").map(_.trim).toSeq
-  val targetColumns = targetCols.split(",").map(_.trim).toSeq
-
-  // Ensure equal column counts
-  if (sourceColumns.length != targetColumns.length) {
-    throw new IllegalArgumentException("Source and target column lists must have the same length.")
-  }
-
-  // Select columns and rename for consistency
-  val sourceSelected = transactionSource.select((Seq(col(sourceTransactionIdCol).as("col_0")) ++ 
-    sourceColumns.zipWithIndex.map { case (colName, i) => col(colName).as(s"col_${i + 1}") }): _*)
-
-  val targetSelected = caseClass.select((Seq(col(targetTransactionIdCol).as("col_0")) ++ 
-    targetColumns.zipWithIndex.map { case (colName, i) => col(colName).as(s"col_${i + 1}") }): _*)
-
-  // Perform `exceptAll` to find mismatches in either direction
-  val sourceToTargetDiff = sourceSelected.exceptAll(targetSelected)
-  val targetToSourceDiff = targetSelected.exceptAll(sourceSelected)
+  // Perform exceptAll to capture mismatches
+  val sourceToTargetDiff = sourceData.exceptAll(targetData)
+  val targetToSourceDiff = targetData.exceptAll(sourceData)
 
   // Collect transaction IDs from mismatches
-  val unmatchedIds = (sourceToTargetDiff.select("col_0").as[String].collect() ++ 
-                      targetToSourceDiff.select("col_0").as[String].collect()).distinct.toList
+  val sourceToTargetIds = sourceToTargetDiff.select("col_0").as[String].collect()
+  val targetToSourceIds = targetToSourceDiff.select("col_0").as[String].collect()
 
-  unmatchedIds
+  // Log the mismatches to the output file
+  writer.write("Direct Column Validation Differences:\n")
+  writer.write("Source to Target Differences (Transaction IDs): " + sourceToTargetIds.mkString(", ") + "\n")
+  writer.write("Target to Source Differences (Transaction IDs): " + targetToSourceIds.mkString(", ") + "\n\n")
+} else {
+  writer.write("Direct Column Validation Differences: No relevant columns found for direct validation.\n\n")
 }
