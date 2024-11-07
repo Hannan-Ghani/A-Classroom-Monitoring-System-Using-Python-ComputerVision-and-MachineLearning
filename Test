@@ -1,5 +1,4 @@
 import com.amazonaws.services.glue.GlueContext
-import com.amazonaws.services.glue.util.Job
 import com.amazonaws.services.glue.util.GlueArgParser
 import org.apache.spark.SparkContext
 import org.apache.spark.sql.{DataFrame, SparkSession}
@@ -15,10 +14,8 @@ object DirectColumnValidationWithTransactionIDJob {
     val glueContext = new GlueContext(spark.sparkContext)
     import spark.implicits._
 
-    // Parse arguments
-    val options = GlueArgParser.getResolvedOptions(args, Seq("JOB_NAME", "configPath", "columnsConfigPath").toArray)
-    val jobName = options("JOB_NAME")
-    Job.init(jobName, glueContext, options)
+    // Parse arguments (excluding JOB_NAME)
+    val options = GlueArgParser.getResolvedOptions(args, Seq("configPath", "columnsConfigPath").toArray)
 
     // Load configurations from S3
     val configPath = options("configPath")
@@ -48,8 +45,6 @@ object DirectColumnValidationWithTransactionIDJob {
     val summary = generateSummary(validationResult)
     val summaryPath = s"$outputBasePath/validation_summary.txt"
     spark.sparkContext.parallelize(Seq(summary)).saveAsTextFile(summaryPath)
-
-    Job.commit()
   }
 
   // Helper function for loading config files from S3
