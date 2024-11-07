@@ -1,28 +1,13 @@
-def validateDirectColumns(sourceDF: DataFrame, targetDF: DataFrame, configMap: Map[String, Seq[String]], writer: PrintWriter): Unit = {
-  import sourceDF.sparkSession.implicits._
-  val sourceCols = configMap.getOrElse("direct_column_validation_source", Seq())
-  val targetCols = configMap.getOrElse("direct_column_validation_target", Seq())
-
-  val (alignedSourceCols, alignedTargetCols) = filterExistingColumnPairs(sourceCols, targetCols, sourceDF, targetDF)
-
-  if (alignedSourceCols.nonEmpty && alignedTargetCols.nonEmpty) {
-    val sourceData = sourceDF.select(
-      col("TRANSACTION_ID") +: alignedSourceCols.zipWithIndex.map { case (column, i) => col(column).as(s"col_$i") }: _*
-    )
-    val targetData = targetDF.select(
-      col("transactionId") +: alignedTargetCols.zipWithIndex.map { case (column, i) => col(column).as(s"col_$i") }: _*
-    )
-
-    val sourceToTargetDiff = sourceData.except(targetData)
-    val targetToSourceDiff = targetData.except(sourceData)
-
-    val sourceToTargetIds = sourceToTargetDiff.select($"TRANSACTION_ID").as[String].collect()  // Explicitly select TRANSACTION_ID
-    val targetToSourceIds = targetToSourceDiff.select($"transactionId").as[String].collect()  // Explicitly select transactionId
-
-    writer.write("Direct Column Validation Differences:\n")
-    writer.write("Source to Target Differences: " + sourceToTargetIds.mkString(", ") + "\n")
-    writer.write("Target to Source Differences: " + targetToSourceIds.mkString(", ") + "\n\n")
-  } else {
-    writer.write("No relevant columns found for direct validation.\n\n")
-  }
+def parseConfigFile(configPath: String, sparkSession: SparkSession): Map[String, String] = {
+  import sparkSession.implicits._
+  sparkSession.read.text(configPath).as[String].collect().flatMap { line =>
+    val parts = line.split("=")
+    if (parts.length == 2) {
+      Some(parts(0).trim -> parts(1).trim)
+    } else {
+      // Log or handle invalid lines that do not contain "="
+      println(s"Warning: Invalid config line - $line")
+      None
+    }
+  }.toMap
 }
