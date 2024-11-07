@@ -1,2 +1,1 @@
-val sourceData = transactionSource.select(alignedSourceCols.zipWithIndex.map { case (columnName, i) => col(columnName).as(s"col_$i") }: _*)
-val targetData = caseClass.select(alignedTargetCols.zipWithIndex.map { case (columnName, i) => col(columnName).as(s"col_$i") }: _*)
+val nonNulldata = caseClass.filter(nullColumns.map(columnName => col(columnName).isNotNull).reduce(_ && _))
