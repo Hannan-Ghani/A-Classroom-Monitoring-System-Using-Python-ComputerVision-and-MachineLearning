@@ -1,177 +1,159 @@
-Absolutely, going step-by-step is a great way to ensure all validations are functioning as expected. Let’s walk through each validation one at a time, updating and verifying each part.
-
-Step 1: Null Validation
-
-Goal: Identify rows in the target data where specific columns should be null but are not. We’ll log the transaction IDs for rows that don’t meet this expectation.
-	1.	Filter Null Columns: Ensure only specified columns are checked.
-	2.	Log Transaction IDs where non-null values are found.
-
-Here’s the updated code for Null Validation:
-
-// Null Validation
-val nullColumns = configMap("null_validation_columns").split(",").map(_.trim)
-val existingNullColumns = filterExistingColumns(caseClass, nullColumns)
-
-if (existingNullColumns.nonEmpty) {
-  // Select columns and filter out rows where any column in `existingNullColumns` is not null
-  val nonNullData = caseClass.filter(existingNullColumns.map(col => col(col).isNotNull).reduce(_ || _))
-  
-  // Collect transaction IDs for rows with non-null values
-  val nonNullTransactionIds = nonNullData.select("transactionid").as[String].collect()
-
-  // Write results to the output log
-  writer.write("Null Validation Differences:\n")
-  writer.write("Non-null values found for columns expected to be null in rows: " + nonNullTransactionIds.mkString(", ") + "\n\n")
-} else {
-  writer.write("Null Validation Differences: No relevant columns found for null validation.\n\n")
-}
-
-Step 2: Direct Column Validation
-
-Goal: Compare specific columns in source and target to identify mismatches. We’ll align columns based on names provided in the config file and log the transaction IDs with mismatches.
-
-Here’s the updated code for Direct Column Validation:
-
-// Direct Column Validation
-val sourceCols = configMap("direct_column_validation_columns_source").split(",").map(_.trim)
-val targetCols = configMap("direct_column_validation_columns_target").split(",").map(_.trim)
-
-val (alignedSourceCols, alignedTargetCols) = filterExistingColumnPairs(sourceCols, targetCols, transactionSource, caseClass)
-
-if (alignedSourceCols.nonEmpty && alignedTargetCols.nonEmpty) {
-  val sourceData = transactionSource.select(alignedSourceCols.zipWithIndex.map { case (col, i) => col(col).as(s"col_$i") }: _*)
-  val targetData = caseClass.select(alignedTargetCols.zipWithIndex.map { case (col, i) => col(col).as(s"col_$i") }: _*)
-
-  val sourceToTargetDiff = sourceData.except(targetData)
-  val targetToSourceDiff = targetData.except(sourceData)
-
-  val sourceToTargetIds = sourceToTargetDiff.select("col_0").as[String].collect()
-  val targetToSourceIds = targetToSourceDiff.select("col_0").as[String].collect()
-
-  writer.write("Direct Column Validation Differences:\n")
-  writer.write("Source to Target Differences: " + sourceToTargetIds.mkString(", ") + "\n")
-  writer.write("Target to Source Differences: " + targetToSourceIds.mkString(", ") + "\n\n")
-} else {
-  writer.write("Direct Column Validation Differences: No relevant columns found for direct validation.\n\n")
-}
-
-Step 3: Narrative Validation
-
-Goal: Compare the narrative columns after cleaning empty values (like "" or "*"). Log transaction IDs with mismatches.
-
-Here’s the code for Narrative Validation:
-
-// Narrative Validation
-val sourceNarrativeCol = configMap("narrative_validation_column_source")
-val targetNarrativeCol = configMap("narrative_validation_column_target")
-
-val cleanedSourceNarrative = transactionSource.withColumn("cleaned_narrative", 
-  when(trim(col(sourceNarrativeCol)) === "" || trim(col(sourceNarrativeCol)) === "*", null)
-    .otherwise(col(sourceNarrativeCol))
-).select($"TRANSACTION_ID", $"cleaned_narrative")
-
-val targetNarrative = caseClass.select($"transactionid", col(targetNarrativeCol).as("cleaned_narrative"))
-
-val narrativeSourceToTargetDiff = cleanedSourceNarrative.except(targetNarrative)
-val narrativeTargetToSourceDiff = targetNarrative.except(cleanedSourceNarrative)
-
-val narrativeSourceToTargetIds = narrativeSourceToTargetDiff.select("TRANSACTION_ID").as[String].collect()
-val narrativeTargetToSourceIds = narrativeTargetToSourceDiff.select("transactionid").as[String].collect()
-
-writer.write("Narrative Validation Differences:\n")
-writer.write("Source to Target Differences: " + narrativeSourceToTargetIds.mkString(", ") + "\n")
-writer.write("Target to Source Differences: " + narrativeTargetToSourceIds.mkString(", ") + "\n\n")
-
-Step 4: Amount Local Validation
-
-Goal: Compare amount columns between source and target, logging transaction IDs with mismatches.
-
-// Amount Local Validation
-val sourceAmountCol = configMap("amount_local_validation_column_source")
-val targetAmountCol = configMap("amount_local_validation_column_target")
-
-val sourceAmount = transactionSource.select($"TRANSACTION_ID", col(sourceAmountCol).as("amount"))
-val targetAmount = caseClass.select($"transactionid", col(targetAmountCol).as("amount"))
-
-val amountSourceToTargetDiff = sourceAmount.except(targetAmount)
-val amountTargetToSourceDiff = targetAmount.except(sourceAmount)
-
-val amountSourceToTargetIds = amountSourceToTargetDiff.select("TRANSACTION_ID").as[String].collect()
-val amountTargetToSourceIds = amountTargetToSourceDiff.select("transactionid").as[String].collect()
-
-writer.write("Amount Local Validation Differences:\n")
-writer.write("Source to Target Differences: " + amountSourceToTargetIds.mkString(", ") + "\n")
-writer.write("Target to Source Differences: " + amountTargetToSourceIds.mkString(", ") + "\n\n")
-
-Step 5: Transaction Country ISO3 Validation
-
-Goal: Map country codes to ISO3 format in the source, then compare with the target. Log transaction IDs with mismatches.
-
-// Transaction Country ISO3 Validation with mapping
-val sourceCountryCol = configMap("transaction_country_iso3_validation_column_source")
-val targetCountryCol = configMap("transaction_country_iso3_validation_column_target")
-
-val mappingUDF = udf((input: String) => Map(
-  "AD" -> "AND", "AE" -> "ARE", "AF" -> "AFG", "AG" -> "ATG", "AI" -> "AIA",
-  "AL" -> "ALB", "AM" -> "ARM", "AO" -> "AGO", "AQ" -> "ATA", "AR" -> "ARG",
-  "AS" -> "ASM", "AT" -> "AUT", "AU" -> "AUS", "AW" -> "ABW", "AZ" -> "AZE"
-  // Add more mappings as needed
-).getOrElse(input, input))
-
-val sourceCountry = transactionSource.withColumn("country_iso3", mappingUDF(col(sourceCountryCol)))
-  .select($"TRANSACTION_ID", $"country_iso3".as("country"))
-
-val targetCountry = caseClass.select($"transactionid", col(targetCountryCol).as("country"))
-
-val countrySourceToTargetDiff = sourceCountry.except(targetCountry)
-val countryTargetToSourceDiff = targetCountry.except(sourceCountry)
-
-val countrySourceToTargetIds = countrySourceToTargetDiff.select("TRANSACTION_ID").as[String].collect()
-val countryTargetToSourceIds = countryTargetToSourceDiff.select("transactionid").as[String].collect()
-
-writer.write("Transaction Country ISO3 Validation Differences:\n")
-writer.write("Source to Target Differences: " + countrySourceToTargetIds.mkString(", ") + "\n")
-writer.write("Target to Source Differences: " + countryTargetToSourceIds.mkString(", ") + "\n\n")
-
-Final Step: Logging and Writing the Output File
-
-Now that each validation writes the transaction IDs with differences, we’ll use a single file to output all results.
-
+import com.amazonaws.services.glue.GlueContext
+import com.amazonaws.services.glue.util.Job
+import org.apache.spark.SparkContext
+import org.apache.spark.sql.{DataFrame, SparkSession}
+import org.apache.spark.sql.functions._
+import org.apache.log4j.Logger
+import com.amazonaws.services.glue.util.GlueArgParser
 import java.io.PrintWriter
 
-val outputFile = s"${outputBasePath}/validation_differences.txt"
-val writer = new PrintWriter(outputFile)
+object CleanseCaseClass {
 
-// Execute validations
-// Null Validation
-// Direct Column Validation
-// Narrative Validation
-// Amount Local Validation
-// Transaction Country ISO3 Validation
+  def main(sysArgs: Array[String]): Unit = {
+    val spark: SparkContext = new SparkContext()
+    val glueContext: GlueContext = new GlueContext(spark)
+    val sparkSession: SparkSession = glueContext.getSparkSession
+    import sparkSession.implicits._
 
-writer.close()
+    val logger: Logger = Logger.getLogger("CleanseCaseClassLogger")
 
-Summary of the Output File
+    // Get Glue job parameters for config paths
+    val args = GlueArgParser.getResolvedOptions(sysArgs, Seq("s3PathConfig", "s3ValidationConfig").toArray)
+    val s3PathConfig = args("s3PathConfig")
+    val s3ValidationConfig = args("s3ValidationConfig")
 
-The file validation_differences.txt will contain entries for each validation, listing the transaction IDs with discrepancies. It will look like this:
+    // Read the path configuration file from S3
+    val pathConfigDF = sparkSession.read.text(s3PathConfig)
+    val pathConfigMap = pathConfigDF.collect().map { row =>
+      val split = row.getString(0).split("=")
+      (split(0), split(1))
+    }.toMap
 
-Null Validation Differences:
-Non-null values found for columns expected to be null in rows: ...
+    // Extract paths from the path config
+    val inputSourcePath = pathConfigMap("inputSourcePath")
+    val inputTargetPath = pathConfigMap("inputTargetPath")
+    val outputBasePath = pathConfigMap("outputBasePath")
 
-Direct Column Validation Differences:
-Source to Target Differences: ...
-Target to Source Differences: ...
+    // Load source and target data
+    val transactionSource: DataFrame = sparkSession.read.parquet(inputSourcePath)
+    val caseClass: DataFrame = sparkSession.read.parquet(inputTargetPath)
 
-Narrative Validation Differences:
-Source to Target Differences: ...
-Target to Source Differences: ...
+    // Read validation configuration file from S3
+    val validationConfigDF = sparkSession.read.text(s3ValidationConfig)
+    val validationConfigMap = parseValidationConfig(validationConfigDF)
 
-Amount Local Validation Differences:
-Source to Target Differences: ...
-Target to Source Differences: ...
+    // Initialize output file
+    val outputFile = s"$outputBasePath/validation_differences.txt"
+    val writer = new PrintWriter(outputFile)
 
-Transaction Country ISO3 Validation Differences:
-Source to Target Differences: ...
-Target to Source Differences: ...
+    // Helper Functions
+    def filterExistingColumns(df: DataFrame, columns: Seq[String]): Seq[String] = {
+      val existingColumns = df.columns.toSet
+      val validColumns = columns.filter(existingColumns.contains)
+      if (validColumns.size < columns.size) {
+        val missingColumns = columns.diff(validColumns)
+        logger.warn(s"Missing columns: ${missingColumns.mkString(", ")}")
+      }
+      validColumns
+    }
 
-Let me know if you’d like to test each validation individually or adjust any part before combining them all.
+    def filterExistingColumnPairs(sourceColumns: Seq[String], targetColumns: Seq[String], sourceDF: DataFrame, targetDF: DataFrame): (Seq[String], Seq[String]) = {
+      val existingSourceColumns = sourceDF.columns.toSet
+      val existingTargetColumns = targetDF.columns.toSet
+      val filteredSourceColumns = sourceColumns.zip(targetColumns).collect {
+        case (sourceCol, targetCol) if existingSourceColumns.contains(sourceCol) && existingTargetColumns.contains(targetCol) =>
+          sourceCol
+      }
+      val filteredTargetColumns = sourceColumns.zip(targetColumns).collect {
+        case (sourceCol, targetCol) if existingSourceColumns.contains(sourceCol) && existingTargetColumns.contains(targetCol) =>
+          targetCol
+      }
+      (filteredSourceColumns, filteredTargetColumns)
+    }
+
+    // =======================
+    // Null Validation
+    // =======================
+    val nullColumns = validationConfigMap.getOrElse("null_validation", Seq())
+    val existingNullColumns = filterExistingColumns(caseClass, nullColumns)
+
+    if (existingNullColumns.nonEmpty) {
+      val nonNullData = caseClass.filter(existingNullColumns.map(col => col(col).isNotNull).reduce(_ || _))
+      val nonNullTransactionIds = nonNullData.select("transactionid").as[String].collect()
+      writer.write("Null Validation Differences:\n")
+      writer.write("Non-null values found for columns expected to be null in rows: " + nonNullTransactionIds.mkString(", ") + "\n\n")
+    } else {
+      writer.write("Null Validation Differences: No relevant columns found for null validation.\n\n")
+    }
+
+    // =======================
+    // Direct Column Validation
+    // =======================
+    val sourceCols = validationConfigMap.getOrElse("direct_column_validation_source", Seq())
+    val targetCols = validationConfigMap.getOrElse("direct_column_validation_target", Seq())
+
+    val (alignedSourceCols, alignedTargetCols) = filterExistingColumnPairs(sourceCols, targetCols, transactionSource, caseClass)
+
+    if (alignedSourceCols.nonEmpty && alignedTargetCols.nonEmpty) {
+      val sourceData = transactionSource.select(alignedSourceCols.zipWithIndex.map { case (col, i) => col(col).as(s"col_$i") }: _*)
+      val targetData = caseClass.select(alignedTargetCols.zipWithIndex.map { case (col, i) => col(col).as(s"col_$i") }: _*)
+
+      val sourceToTargetDiff = sourceData.except(targetData)
+      val targetToSourceDiff = targetData.except(sourceData)
+
+      val sourceToTargetIds = sourceToTargetDiff.select("col_0").as[String].collect()
+      val targetToSourceIds = targetToSourceDiff.select("col_0").as[String].collect()
+
+      writer.write("Direct Column Validation Differences:\n")
+      writer.write("Source to Target Differences: " + sourceToTargetIds.mkString(", ") + "\n")
+      writer.write("Target to Source Differences: " + targetToSourceIds.mkString(", ") + "\n\n")
+    } else {
+      writer.write("Direct Column Validation Differences: No relevant columns found for direct validation.\n\n")
+    }
+
+    // =======================
+    // Narrative Validation
+    // =======================
+    val sourceNarrativeCol = validationConfigMap.getOrElse("narrative_validation_source", Seq()).headOption.getOrElse("")
+    val targetNarrativeCol = validationConfigMap.getOrElse("narrative_validation_target", Seq()).headOption.getOrElse("")
+
+    val cleanedSourceNarrative = transactionSource.withColumn("cleaned_narrative", 
+      when(trim(col(sourceNarrativeCol)) === "" || trim(col(sourceNarrativeCol)) === "*", null)
+        .otherwise(col(sourceNarrativeCol))
+    ).select($"TRANSACTION_ID", $"cleaned_narrative")
+
+    val targetNarrative = caseClass.select($"transactionid", col(targetNarrativeCol).as("cleaned_narrative"))
+
+    val narrativeSourceToTargetDiff = cleanedSourceNarrative.except(targetNarrative)
+    val narrativeTargetToSourceDiff = targetNarrative.except(cleanedSourceNarrative)
+
+    val narrativeSourceToTargetIds = narrativeSourceToTargetDiff.select("TRANSACTION_ID").as[String].collect()
+    val narrativeTargetToSourceIds = narrativeTargetToSourceDiff.select("transactionid").as[String].collect()
+
+    writer.write("Narrative Validation Differences:\n")
+    writer.write("Source to Target Differences: " + narrativeSourceToTargetIds.mkString(", ") + "\n")
+    writer.write("Target to Source Differences: " + narrativeTargetToSourceIds.mkString(", ") + "\n\n")
+
+    // Close the writer and finalize the job
+    writer.close()
+    Job.commit()
+  }
+
+  // Helper function to parse validation configuration into a map
+  def parseValidationConfig(configDF: DataFrame): Map[String, Seq[String]] = {
+    var currentSection = ""
+    var validationConfig = Map[String, Seq[String]]()
+
+    configDF.collect().foreach { row =>
+      val line = row.getString(0).trim
+      if (line.startsWith("[") && line.endsWith("]")) {
+        currentSection = line.substring(1, line.length - 1)
+        validationConfig += (currentSection -> Seq())
+      } else if (line.nonEmpty && currentSection.nonEmpty) {
+        val columns = line.split(",").map(_.trim).toSeq
+        validationConfig += (currentSection -> columns)
+      }
+    }
+    validationConfig
+  }
+}
