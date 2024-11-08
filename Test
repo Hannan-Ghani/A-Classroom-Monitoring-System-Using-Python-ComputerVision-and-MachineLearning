@@ -1,63 +1,28 @@
-To add the amountLocal validation to your code, you can follow these steps:
+def validateNonNullColumns(df: DataFrame, columns: Seq[String]): Seq[String] = {
+  import df.sparkSession.implicits._
+  val existingColumns = filterExistingColumns(df, columns)
 
-1. Add Configuration for Amount Validation
+  if (existingColumns.nonEmpty) {
+    // Store results as Seq of formatted strings
+    val nonNullValues = existingColumns.flatMap { column =>
+      val nonNullData = df.select($"transactionId", col(column))  // Select transactionId and the target column
+        .filter(col(column).isNotNull)  // Filter where target column is not null
 
-	•	Update your configuration file to include the columns needed for this validation:
-
-[amount_local_validation_source]
-TRANSACTION_ID, ORIGINAL_AMOUNT
-
-[amount_local_validation_target]
-transactionId, amountLocal
-
-
-
-This configuration will allow flexibility if you want to change the column names or add additional ones.
-
-2. Define a New Validation Function
-
-	•	Add a new function (e.g., validateAmountLocal) to perform the exceptAll operation, which checks for rows that do not match between source and target for the specified columns.
-
-Sample Code for validateAmountLocal
-
-Here’s how the function might look:
-
-def validateAmountLocal(sourceDF: DataFrame, targetDF: DataFrame, configMap: Map[String, Seq[String]]): Seq[String] = {
-  import sourceDF.sparkSession.implicits._
-  
-  // Retrieve the columns from configuration
-  val sourceCols = configMap.getOrElse("amount_local_validation_source", Seq())
-  val targetCols = configMap.getOrElse("amount_local_validation_target", Seq())
-
-  if (sourceCols.length == 2 && targetCols.length == 2) {
-    val sourceData = sourceDF.select(col(sourceCols(0)).as("id"), col(sourceCols(1)).as("amount"))
-    val targetData = targetDF.select(col(targetCols(0)).as("id"), col(targetCols(1)).as("amount"))
-
-    val sourceToTargetDiff = sourceData.exceptAll(targetData)
-    val targetToSourceDiff = targetData.exceptAll(sourceData)
-
-    val sourceToTargetIds = sourceToTargetDiff.select("id").as[String].collect()
-    val targetToSourceIds = targetToSourceDiff.select("id").as[String].collect()
-
-    val sourceToTargetCount = sourceToTargetIds.length
-    val targetToSourceCount = targetToSourceIds.length
-
-    Seq(
-      "Amount Local Validation Differences:",
-      s"Source to Target Differences: $sourceToTargetCount found " + sourceToTargetIds.mkString(", "),
-      s"Target to Source Differences: $targetToSourceCount found " + targetToSourceIds.mkString(", ")
-    )
+      // Collect transaction IDs and corresponding non-null values
+      val nonNullRecords = nonNullData.collect().map(row => (row.getString(0), row.getString(1)))  // (transactionId, column value)
+      
+      if (nonNullRecords.nonEmpty) {
+        val transactionIds = nonNullRecords.map(_._1).mkString(", ")
+        Some(s"Non-Null Validation for $column: ${nonNullRecords.length} found with transaction IDs: " + transactionIds)
+      } else {
+        None
+      }
+    }
+    Seq("Non-Null Validation Differences:") ++ nonNullValues.flatten
   } else {
-    Seq("Amount Local Validation: Column configuration is incorrect or missing.")
+    Seq("Non-Null Validation: No relevant columns found for non-null validation.")
   }
 }
 
-3. Call the New Validation Function
-
-	•	Call this function in your main method, similar to the other validations:
-
-validationResults = validationResults ++ validateAmountLocal(transactionSource, caseClass, validationConfigMap)
-
-
-
-This will add an amountLocal validation check that compares the specified columns in transactionSource and caseClass, just like in your Jupyter notebook code. This function outputs both the count and specific IDs of differences found in each direction (Source to Target and Target to Source). Let me know if this aligns with your requirements!
+[non_null_validation]
+aAccountNumberCleansed, anotherColumn, moreColumns
