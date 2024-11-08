@@ -1,28 +1,73 @@
-def validateNonNullColumns(df: DataFrame, columns: Seq[String]): Seq[String] = {
-  import df.sparkSession.implicits._
-  val existingColumns = filterExistingColumns(df, columns)
+To add this new validation, which checks for differences in values between columns in transactionSource and caseClass using exceptAll, follow these steps:
 
-  if (existingColumns.nonEmpty) {
-    // Store results as Seq of formatted strings
-    val nonNullValues = existingColumns.flatMap { column =>
-      val nonNullData = df.select($"transactionId", col(column))  // Select transactionId and the target column
-        .filter(col(column).isNotNull)  // Filter where target column is not null
+1. Add Configuration Support
 
-      // Collect transaction IDs and corresponding non-null values
-      val nonNullRecords = nonNullData.collect().map(row => (row.getString(0), row.getString(1)))  // (transactionId, column value)
-      
-      if (nonNullRecords.nonEmpty) {
-        val transactionIds = nonNullRecords.map(_._1).mkString(", ")
-        Some(s"Non-Null Validation for $column: ${nonNullRecords.length} found with transaction IDs: " + transactionIds)
-      } else {
-        None
-      }
-    }
-    Seq("Non-Null Validation Differences:") ++ nonNullValues.flatten
+	•	Update your configuration file to specify columns for this validation, for example:
+
+[amount_validation]
+ORIGINAL_AMOUNT, amountLocal
+
+
+	•	This config will allow you to define the source and target columns to compare.
+
+2. Define a New Validation Function
+
+	•	Add a function, validateAmountDifferences, that:
+	•	Reads the source and target columns from the config.
+	•	Uses exceptAll to find mismatches.
+	•	Collects and formats the results for reporting.
+
+Sample Code for validateAmountDifferences
+
+Here’s how to define this new function:
+
+def validateAmountDifferences(sourceDF: DataFrame, targetDF: DataFrame, configMap: Map[String, Seq[String]]): Seq[String] = {
+  import sourceDF.sparkSession.implicits._
+
+  val sourceCols = configMap.getOrElse("amount_validation", Seq())
+  if (sourceCols.length == 2) {
+    val sourceColumn = sourceCols(0) // e.g., "ORIGINAL_AMOUNT"
+    val targetColumn = sourceCols(1) // e.g., "amountLocal"
+
+    // Select transaction ID and amount columns from both source and target
+    val sourceData = sourceDF.select($"TRANSACTION_ID", col(sourceColumn).as("amount"))
+    val targetData = targetDF.select($"transactionId", col(targetColumn).as("amount"))
+
+    // Find mismatches using exceptAll
+    val sourceToTargetDiff = sourceData.exceptAll(targetData)
+    val targetToSourceDiff = targetData.exceptAll(sourceData)
+
+    // Collect transaction IDs for reporting
+    val sourceToTargetIds = sourceToTargetDiff.select($"TRANSACTION_ID").as[String].collect()
+    val targetToSourceIds = targetToSourceDiff.select($"transactionId").as[String].collect()
+
+    val sourceToTargetCount = sourceToTargetIds.length
+    val targetToSourceCount = targetToSourceIds.length
+
+    Seq(
+      "Amount Validation Differences:",
+      s"Source to Target Differences: $sourceToTargetCount found with transaction IDs: " + sourceToTargetIds.mkString(", "),
+      s"Target to Source Differences: $targetToSourceCount found with transaction IDs: " + targetToSourceIds.mkString(", ")
+    )
   } else {
-    Seq("Non-Null Validation: No relevant columns found for non-null validation.")
+    Seq("Amount Validation: Configuration error - amount validation requires exactly two columns.")
   }
 }
 
-[non_null_validation]
-aAccountNumberCleansed, anotherColumn, moreColumns
+Explanation of the Code
+
+	•	Configuration Retrieval: amount_validation configuration is used to retrieve the source and target columns.
+	•	Selecting Columns: TRANSACTION_ID and ORIGINAL_AMOUNT from transactionSource and transactionId and amountLocal from caseClass.
+	•	exceptAll Comparison:
+	•	exceptAll identifies rows in sourceData not in targetData and vice versa.
+	•	Transaction ID Collection: Collects transaction IDs for mismatches, counts them, and formats the results.
+
+3. Call the New Validation Function
+
+	•	Integrate this validation into your main flow by calling validateAmountDifferences:
+
+validationResults = validationResults ++ validateAmountDifferences(transactionSource, caseClass, validationConfigMap)
+
+
+
+This will add a new validation that reports mismatched transaction IDs between ORIGINAL_AMOUNT in the source and amountLocal in the target. Let me know if you need further customization!
