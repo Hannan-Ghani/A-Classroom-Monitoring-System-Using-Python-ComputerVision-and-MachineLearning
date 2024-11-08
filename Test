@@ -1,114 +1,60 @@
-To include a count of differences in the output, you can modify each validation function to calculate the count and format the output accordingly. Here’s how you can modify the functions to add the count of differences along with the IDs.
+To integrate this type of validation into your existing code, you can follow these steps:
 
-Updated Validation Functions
+1. Add Configuration Support
 
-For each validation type (Null Validation, Direct Column Validation, and Narrative Validation), we’ll:
-	1.	Calculate the count of mismatches.
-	2.	Format the output to include the count and IDs found.
+	•	Update your configuration file to specify columns for this “not null” validation.
+	•	For example, add a section in the configuration file, such as:
 
-Here’s how to modify each function:
+[non_null_validation]
+aAccountNumberCleansed, anotherColumn, moreColumns
 
-1. validateNullColumns with Count
 
-def validateNullColumns(df: DataFrame, nullColumns: Seq[String]): Seq[String] = {
+	•	This will allow flexibility if you want to add more columns in the future.
+
+2. Define a New Validation Function
+
+	•	Add a new function (e.g., validateNonNullColumns) in your codebase that follows the provided logic:
+	•	Select the specified columns.
+	•	Filter rows where these columns are not null.
+	•	Collect the resulting non-null values for reporting.
+
+3. Implement the Validation Logic in the Function
+
+	•	The function will:
+	•	Retrieve the relevant columns from the configuration.
+	•	Apply a .filter() on each column to find rows where the value is not null.
+	•	Collect and format the results.
+
+Sample Code for validateNonNullColumns
+
+Here’s how to add this function:
+
+def validateNonNullColumns(df: DataFrame, columns: Seq[String]): Seq[String] = {
   import df.sparkSession.implicits._
-  val existingNullColumns = filterExistingColumns(df, nullColumns)
-  if (existingNullColumns.nonEmpty) {
-    val nonNullData = df.filter(existingNullColumns.map(col(_).isNotNull).reduce(_ || _))
-    val nonNullTransactionIds = nonNullData.select($"transactionId").as[String].collect()
-    val count = nonNullTransactionIds.length
-    Seq(
-      "Null Validation Differences:",
-      s"Non-null values found for columns expected to be null in $count rows: " + nonNullTransactionIds.mkString(", ")
-    )
+  val existingColumns = filterExistingColumns(df, columns)
+  
+  if (existingColumns.nonEmpty) {
+    val nonNullValues = existingColumns.flatMap { column =>
+      val nonNullData = df.select(column).filter(col(column).isNotNull)
+      val nonNullIds = nonNullData.as[String].collect()
+      if (nonNullIds.nonEmpty) {
+        Some(s"Non-Null Validation for $column: ${nonNullIds.length} found " + nonNullIds.mkString(", "))
+      } else {
+        None
+      }
+    }
+    Seq("Non-Null Validation Differences:") ++ nonNullValues.flatten
   } else {
-    Seq("Null Validation Differences: No relevant columns found for null validation.")
+    Seq("Non-Null Validation: No relevant columns found for non-null validation.")
   }
 }
 
-2. validateDirectColumns with Count
+4. Call the New Validation Function
 
-def validateDirectColumns(sourceDF: DataFrame, targetDF: DataFrame, configMap: Map[String, Seq[String]]): Seq[String] = {
-  import sourceDF.sparkSession.implicits._
-  val sourceCols = configMap.getOrElse("direct_column_validation_source", Seq())
-  val targetCols = configMap.getOrElse("direct_column_validation_target", Seq())
+	•	Call this function from the main method, similar to the other validations:
 
-  val (alignedSourceCols, alignedTargetCols) = filterExistingColumnPairs(sourceCols, targetCols, sourceDF, targetDF)
+validationResults = validationResults ++ validateNonNullColumns(caseClass, validationConfigMap.getOrElse("non_null_validation", Seq()))
 
-  if (alignedSourceCols.nonEmpty && alignedTargetCols.nonEmpty) {
-    val sourceData = sourceDF.select(
-      col("TRANSACTION_ID") +: alignedSourceCols.zipWithIndex.map { case (column, i) => col(column).as(s"col_$i") }: _*
-    )
-    val targetData = targetDF.select(
-      col("transactionId") +: alignedTargetCols.zipWithIndex.map { case (column, i) => col(column).as(s"col_$i") }: _*
-    )
 
-    val sourceToTargetDiff = sourceData.except(targetData)
-    val targetToSourceDiff = targetData.except(sourceData)
 
-    val sourceToTargetIds = sourceToTargetDiff.select($"TRANSACTION_ID").as[String].collect()
-    val targetToSourceIds = targetToSourceDiff.select($"transactionId").as[String].collect()
-
-    val sourceToTargetCount = sourceToTargetIds.length
-    val targetToSourceCount = targetToSourceIds.length
-
-    Seq(
-      "Direct Column Validation Differences:",
-      s"Source to Target Differences: $sourceToTargetCount found " + sourceToTargetIds.mkString(", "),
-      s"Target to Source Differences: $targetToSourceCount found " + targetToSourceIds.mkString(", ")
-    )
-  } else {
-    Seq("Direct Column Validation Differences: No relevant columns found for direct validation.")
-  }
-}
-
-3. validateNarrativeColumns with Count
-
-def validateNarrativeColumns(sourceDF: DataFrame, targetDF: DataFrame, configMap: Map[String, Seq[String]]): Seq[String] = {
-  import sourceDF.sparkSession.implicits._
-  val sourceNarrativeCol = configMap.getOrElse("narrative_validation_source", Seq()).headOption.getOrElse("")
-  val targetNarrativeCol = configMap.getOrElse("narrative_validation_target", Seq()).headOption.getOrElse("")
-
-  val cleanedSourceNarrative = sourceDF.withColumn("cleaned_narrative", when(trim(col(sourceNarrativeCol)) === "" || trim(col(sourceNarrativeCol)) === "*", null)
-    .otherwise(col(sourceNarrativeCol))
-  ).select($"TRANSACTION_ID", $"cleaned_narrative")
-
-  val targetNarrative = targetDF.select($"transactionId", col(targetNarrativeCol).as("cleaned_narrative"))
-
-  val narrativeSourceToTargetDiff = cleanedSourceNarrative.except(targetNarrative)
-  val narrativeTargetToSourceDiff = targetNarrative.except(cleanedSourceNarrative)
-
-  val narrativeSourceToTargetIds = narrativeSourceToTargetDiff.select($"TRANSACTION_ID").as[String].collect()
-  val narrativeTargetToSourceIds = narrativeTargetToSourceDiff.select($"transactionId").as[String].collect()
-
-  val sourceToTargetCount = narrativeSourceToTargetIds.length
-  val targetToSourceCount = narrativeTargetToSourceIds.length
-
-  Seq(
-    "Narrative Validation Differences:",
-    s"Source to Target Differences: $sourceToTargetCount found " + narrativeSourceToTargetIds.mkString(", "),
-    s"Target to Source Differences: $targetToSourceCount found " + narrativeTargetToSourceIds.mkString(", ")
-  )
-}
-
-Explanation of Changes
-
-	•	Count Calculation: The .length method is used to count the number of IDs in each difference.
-	•	Formatted Output: Each validation result now includes the count of differences followed by the specific IDs.
-
-Example Output
-
-With these changes, an example output might look like:
-
-Null Validation Differences:
-Non-null values found for columns expected to be null in 2 rows: transaction_id_111, transaction_id_112
-
-Direct Column Validation Differences:
-Source to Target Differences: 4 found transaction_id_111, transaction_id_112, transaction_id_113, transaction_id_114
-Target to Source Differences: 3 found transaction_id_115, transaction_id_116, transaction_id_117
-
-Narrative Validation Differences:
-Source to Target Differences: 1 found transaction_id_118
-Target to Source Differences: 2 found transaction_id_119, transaction_id_120
-
-This updated code will generate the count along with the IDs for each type of difference found. Let me know if this meets your requirements or if any additional adjustments are needed!
+This will add a “non-null” validation check for the specified columns, similar to the logic you used in Jupyter. Let me know if you need further customization for this!
