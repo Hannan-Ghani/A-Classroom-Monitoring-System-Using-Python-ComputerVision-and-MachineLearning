@@ -1,91 +1,116 @@
-To implement this validation in your existing code, here’s a breakdown of the required steps:
+To set up the configuration in this format, we can adjust the parsing logic so that each component (source, target, and mapping) is handled as a separate section in the config file. Here’s how you can achieve this:
 
-1. Add Configuration Support
+Updated Configuration File Format
 
-	•	Add new sections in your configuration file to specify which columns need transformations based on the conditions, for example:
+In your configuration file, you can structure the transaction_country_iso3_validation section like this:
 
-[account_number_transform]
-aAccountId, aAccountNumber, UKUBA, UKGTS, 9, 8
+[transaction_country_iso3_validation_source]
+TRANSACTION_COUNTRY_ISO_CODE
 
-[second_account_number_transform]
-bAccountId, bAccountNumber, UKUBA, UKGTS, 9, 8
+[transaction_country_iso3_validation_target]
+transactionCountryIso3
 
+[mapping]
+AD:AND, AE:ARE, AF:AFG, ...
 
-	•	Each section should define:
-	•	Source column (aAccountId, bAccountId) for transformation.
-	•	Target column (aAccountNumber, bAccountNumber) to compare.
-	•	Conditions (UKUBA, UKGTS) and substring positions to apply the transformations.
+Updated Code
 
-2. Define a New Validation Function
+We’ll need to:
+	1.	Adjust the parseValidationConfig function to recognize these different sections.
+	2.	Modify validateTransactionCountryIso3 to use the parsed configuration sections.
 
-	•	Add a function, validateTransformedAccountNumbers, that:
-	•	Retrieves the columns and transformation conditions from the config.
-	•	Applies transformations based on the specified conditions.
-	•	Uses exceptAll to find mismatches between transformed and target columns.
+Step 1: Modify parseValidationConfig
 
-Sample Code for validateTransformedAccountNumbers
+Here’s an updated parseValidationConfig function to handle the new format:
 
-Here’s how to define this function to handle the transformations and validation:
-
-def validateTransformedAccountNumbers(df: DataFrame, configMap: Map[String, Seq[String]], configKey: String): Seq[String] = {
-  import df.sparkSession.implicits._
-
-  val config = configMap.getOrElse(configKey, Seq())
-  if (config.length == 6) {
-    val sourceColumn = config(0)          // e.g., "aAccountId" or "bAccountId"
-    val targetColumn = config(1)          // e.g., "aAccountNumber" or "bAccountNumber"
-    val condition1 = config(2)            // e.g., "UKUBA"
-    val condition2 = config(3)            // e.g., "UKGTS"
-    val pos1 = config(4).toInt            // e.g., 9 (start position for UKUBA)
-    val pos2 = config(5).toInt            // e.g., 8 (start position for UKGTS)
-
-    // Apply transformations based on conditions
-    val transformedSource = df.withColumn(targetColumn,
-      when(substring(col(sourceColumn), 1, 5) === condition1, substring(col(sourceColumn), pos1, pos2))
-      .when(substring(col(sourceColumn), 1, 5) === condition2, substring(col(sourceColumn), pos2, pos1))
-      .otherwise(null)
-    ).select($"transactionId", col(targetColumn))
-
-    // Select the target data directly from the specified column
-    val targetData = df.select($"transactionId", col(targetColumn))
-
-    // Find mismatches using exceptAll
-    val sourceToTargetDiff = transformedSource.exceptAll(targetData)
-    val targetToSourceDiff = targetData.exceptAll(transformedSource)
-
-    // Collect transaction IDs for reporting
-    val sourceToTargetIds = sourceToTargetDiff.select($"transactionId").as[String].collect()
-    val targetToSourceIds = targetToSourceDiff.select($"transactionId").as[String].collect()
-
-    val sourceToTargetCount = sourceToTargetIds.length
-    val targetToSourceCount = targetToSourceIds.length
-
-    Seq(
-      s"$configKey Validation Differences:",
-      s"Source to Target Differences: $sourceToTargetCount found with transaction IDs: " + sourceToTargetIds.mkString(", "),
-      s"Target to Source Differences: $targetToSourceCount found with transaction IDs: " + targetToSourceIds.mkString(", ")
-    )
-  } else {
-    Seq(s"$configKey Validation: Configuration error - validation requires exactly six parameters.")
-  }
+def parseIso3Mapping(config: String): Map[String, String] = {
+  config.split(",").map { pair =>
+    val Array(code2, code3) = pair.split(":")
+    code2.trim -> code3.trim
+  }.toMap
 }
 
-Explanation of the Code
+def parseValidationConfig(configPath: String, sparkSession: SparkSession): Map[String, Any] = {
+  import sparkSession.implicits._
+  var currentSection = ""
+  var validationConfig = Map[String, Any]()
 
-	•	Configuration Retrieval: The function uses configKey to access the specific configuration for each transformation.
-	•	Column and Condition Selection: Extracts the source and target columns and conditions from the configuration.
-	•	Transformation Logic:
-	•	Checks if the first five characters match the condition (UKUBA or UKGTS) and applies the relevant substring extraction.
-	•	exceptAll Comparison: Compares the transformed source data to the target data.
-	•	Formatted Output: Reports mismatches, including counts and transaction IDs.
+  sparkSession.read.text(configPath).as[String].collect().foreach { line =>
+    val trimmedLine = line.trim
+    if (trimmedLine.startsWith("[") && trimmedLine.endsWith("]")) {
+      currentSection = trimmedLine.substring(1, trimmedLine.length - 1)
+    } else if (trimmedLine.nonEmpty && currentSection.nonEmpty) {
+      currentSection match {
+        case "transaction_country_iso3_validation_source" =>
+          validationConfig += ("sourceColumn" -> trimmedLine)
+        case "transaction_country_iso3_validation_target" =>
+          validationConfig += ("targetColumn" -> trimmedLine)
+        case "mapping" =>
+          validationConfig += ("iso3Mapping" -> parseIso3Mapping(trimmedLine))
+        case _ => // Handle other sections as needed
+      }
+    }
+  }
+  validationConfig
+}
 
-3. Call the New Validation Function
+Explanation
 
-	•	Integrate this validation by calling validateTransformedAccountNumbers with different configurations:
+	•	Section Detection: Each section header (e.g., [transaction_country_iso3_validation_source]) is stored in currentSection.
+	•	Conditional Parsing:
+	•	If currentSection is transaction_country_iso3_validation_source, it sets "sourceColumn" to the column name.
+	•	If currentSection is transaction_country_iso3_validation_target, it sets "targetColumn" to the target column name.
+	•	If currentSection is mapping, it parses the country code mappings into a Map[String, String].
 
-validationResults = validationResults ++ validateTransformedAccountNumbers(caseClass, validationConfigMap, "account_number_transform")
-validationResults = validationResults ++ validateTransformedAccountNumbers(caseClass, validationConfigMap, "second_account_number_transform")
+Step 2: Modify validateTransactionCountryIso3 Function
 
+Now, use the parsed configuration in validateTransactionCountryIso3:
 
+def validateTransactionCountryIso3(sourceDF: DataFrame, targetDF: DataFrame, configMap: Map[String, Any]): Seq[String] = {
+  import sourceDF.sparkSession.implicits._
 
-This will apply the specified transformations and report any mismatches between the transformed and target columns for both aAccountId and bAccountId. Let me know if you need further adjustments!
+  // Retrieve config settings for this validation
+  val sourceColumn = configMap.getOrElse("sourceColumn", "TRANSACTION_COUNTRY_ISO_CODE").toString
+  val targetColumn = configMap.getOrElse("targetColumn", "transactionCountryIso3").toString
+  val mapping = configMap.getOrElse("iso3Mapping", Map.empty[String, String]).asInstanceOf[Map[String, String]]
+
+  // Define the mapping UDF dynamically based on configuration
+  val mappingUDF = udf((input: String) => mapping.getOrElse(input, input))
+
+  // Apply the mapping UDF to create a new column with the mapped ISO3 code
+  val resultDF = sourceDF.withColumn("newISO3", mappingUDF(col(sourceColumn)))
+    .select($"TRANSACTION_ID", $"newISO3")
+
+  // Select target data
+  val targetData = targetDF.select($"transactionId", col(targetColumn))
+
+  // Find mismatches using exceptAll
+  val sourceToTargetDiff = resultDF.exceptAll(targetData)
+  val targetToSourceDiff = targetData.exceptAll(resultDF)
+
+  // Collect transaction IDs for reporting
+  val sourceToTargetIds = sourceToTargetDiff.select($"TRANSACTION_ID").as[String].collect()
+  val targetToSourceIds = targetToSourceDiff.select($"transactionId").as[String].collect()
+
+  val sourceToTargetCount = sourceToTargetIds.length
+  val targetToSourceCount = targetToSourceIds.length
+
+  Seq(
+    "Transaction Country ISO3 Validation Differences:",
+    s"Source to Target Differences: $sourceToTargetCount found with transaction IDs: " + sourceToTargetIds.mkString(", "),
+    s"Target to Source Differences: $targetToSourceCount found with transaction IDs: " + targetToSourceIds.mkString(", ")
+  )
+}
+
+Explanation of Changes in validateTransactionCountryIso3
+
+	•	Dynamic Columns: Uses sourceColumn and targetColumn retrieved from the config for flexibility.
+	•	Dynamic Mapping UDF: The mappingUDF now uses the dynamically parsed Map[String, String] from the config, allowing you to manage all mappings within the configuration file.
+
+Step 3: Call the Validation Function
+
+Finally, call validateTransactionCountryIso3 from your main method, passing transactionSource, caseClass, and validationConfigMap:
+
+validationResults = validationResults ++ validateTransactionCountryIso3(transactionSource, caseClass, validationConfigMap)
+
+This setup makes the validation flexible, allowing you to configure column names and mappings directly in the configuration file. Expand the mapping in the config as needed to include all country codes. Let me know if this meets your requirements or if you need further assistance!
