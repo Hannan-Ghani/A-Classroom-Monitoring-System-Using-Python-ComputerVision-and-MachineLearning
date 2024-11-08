@@ -1,73 +1,91 @@
-To add this new validation, which checks for differences in values between columns in transactionSource and caseClass using exceptAll, follow these steps:
+To implement this validation in your existing code, here’s a breakdown of the required steps:
 
 1. Add Configuration Support
 
-	•	Update your configuration file to specify columns for this validation, for example:
+	•	Add new sections in your configuration file to specify which columns need transformations based on the conditions, for example:
 
-[amount_validation]
-ORIGINAL_AMOUNT, amountLocal
+[account_number_transform]
+aAccountId, aAccountNumber, UKUBA, UKGTS, 9, 8
+
+[second_account_number_transform]
+bAccountId, bAccountNumber, UKUBA, UKGTS, 9, 8
 
 
-	•	This config will allow you to define the source and target columns to compare.
+	•	Each section should define:
+	•	Source column (aAccountId, bAccountId) for transformation.
+	•	Target column (aAccountNumber, bAccountNumber) to compare.
+	•	Conditions (UKUBA, UKGTS) and substring positions to apply the transformations.
 
 2. Define a New Validation Function
 
-	•	Add a function, validateAmountDifferences, that:
-	•	Reads the source and target columns from the config.
-	•	Uses exceptAll to find mismatches.
-	•	Collects and formats the results for reporting.
+	•	Add a function, validateTransformedAccountNumbers, that:
+	•	Retrieves the columns and transformation conditions from the config.
+	•	Applies transformations based on the specified conditions.
+	•	Uses exceptAll to find mismatches between transformed and target columns.
 
-Sample Code for validateAmountDifferences
+Sample Code for validateTransformedAccountNumbers
 
-Here’s how to define this new function:
+Here’s how to define this function to handle the transformations and validation:
 
-def validateAmountDifferences(sourceDF: DataFrame, targetDF: DataFrame, configMap: Map[String, Seq[String]]): Seq[String] = {
-  import sourceDF.sparkSession.implicits._
+def validateTransformedAccountNumbers(df: DataFrame, configMap: Map[String, Seq[String]], configKey: String): Seq[String] = {
+  import df.sparkSession.implicits._
 
-  val sourceCols = configMap.getOrElse("amount_validation", Seq())
-  if (sourceCols.length == 2) {
-    val sourceColumn = sourceCols(0) // e.g., "ORIGINAL_AMOUNT"
-    val targetColumn = sourceCols(1) // e.g., "amountLocal"
+  val config = configMap.getOrElse(configKey, Seq())
+  if (config.length == 6) {
+    val sourceColumn = config(0)          // e.g., "aAccountId" or "bAccountId"
+    val targetColumn = config(1)          // e.g., "aAccountNumber" or "bAccountNumber"
+    val condition1 = config(2)            // e.g., "UKUBA"
+    val condition2 = config(3)            // e.g., "UKGTS"
+    val pos1 = config(4).toInt            // e.g., 9 (start position for UKUBA)
+    val pos2 = config(5).toInt            // e.g., 8 (start position for UKGTS)
 
-    // Select transaction ID and amount columns from both source and target
-    val sourceData = sourceDF.select($"TRANSACTION_ID", col(sourceColumn).as("amount"))
-    val targetData = targetDF.select($"transactionId", col(targetColumn).as("amount"))
+    // Apply transformations based on conditions
+    val transformedSource = df.withColumn(targetColumn,
+      when(substring(col(sourceColumn), 1, 5) === condition1, substring(col(sourceColumn), pos1, pos2))
+      .when(substring(col(sourceColumn), 1, 5) === condition2, substring(col(sourceColumn), pos2, pos1))
+      .otherwise(null)
+    ).select($"transactionId", col(targetColumn))
+
+    // Select the target data directly from the specified column
+    val targetData = df.select($"transactionId", col(targetColumn))
 
     // Find mismatches using exceptAll
-    val sourceToTargetDiff = sourceData.exceptAll(targetData)
-    val targetToSourceDiff = targetData.exceptAll(sourceData)
+    val sourceToTargetDiff = transformedSource.exceptAll(targetData)
+    val targetToSourceDiff = targetData.exceptAll(transformedSource)
 
     // Collect transaction IDs for reporting
-    val sourceToTargetIds = sourceToTargetDiff.select($"TRANSACTION_ID").as[String].collect()
+    val sourceToTargetIds = sourceToTargetDiff.select($"transactionId").as[String].collect()
     val targetToSourceIds = targetToSourceDiff.select($"transactionId").as[String].collect()
 
     val sourceToTargetCount = sourceToTargetIds.length
     val targetToSourceCount = targetToSourceIds.length
 
     Seq(
-      "Amount Validation Differences:",
+      s"$configKey Validation Differences:",
       s"Source to Target Differences: $sourceToTargetCount found with transaction IDs: " + sourceToTargetIds.mkString(", "),
       s"Target to Source Differences: $targetToSourceCount found with transaction IDs: " + targetToSourceIds.mkString(", ")
     )
   } else {
-    Seq("Amount Validation: Configuration error - amount validation requires exactly two columns.")
+    Seq(s"$configKey Validation: Configuration error - validation requires exactly six parameters.")
   }
 }
 
 Explanation of the Code
 
-	•	Configuration Retrieval: amount_validation configuration is used to retrieve the source and target columns.
-	•	Selecting Columns: TRANSACTION_ID and ORIGINAL_AMOUNT from transactionSource and transactionId and amountLocal from caseClass.
-	•	exceptAll Comparison:
-	•	exceptAll identifies rows in sourceData not in targetData and vice versa.
-	•	Transaction ID Collection: Collects transaction IDs for mismatches, counts them, and formats the results.
+	•	Configuration Retrieval: The function uses configKey to access the specific configuration for each transformation.
+	•	Column and Condition Selection: Extracts the source and target columns and conditions from the configuration.
+	•	Transformation Logic:
+	•	Checks if the first five characters match the condition (UKUBA or UKGTS) and applies the relevant substring extraction.
+	•	exceptAll Comparison: Compares the transformed source data to the target data.
+	•	Formatted Output: Reports mismatches, including counts and transaction IDs.
 
 3. Call the New Validation Function
 
-	•	Integrate this validation into your main flow by calling validateAmountDifferences:
+	•	Integrate this validation by calling validateTransformedAccountNumbers with different configurations:
 
-validationResults = validationResults ++ validateAmountDifferences(transactionSource, caseClass, validationConfigMap)
+validationResults = validationResults ++ validateTransformedAccountNumbers(caseClass, validationConfigMap, "account_number_transform")
+validationResults = validationResults ++ validateTransformedAccountNumbers(caseClass, validationConfigMap, "second_account_number_transform")
 
 
 
-This will add a new validation that reports mismatched transaction IDs between ORIGINAL_AMOUNT in the source and amountLocal in the target. Let me know if you need further customization!
+This will apply the specified transformations and report any mismatches between the transformed and target columns for both aAccountId and bAccountId. Let me know if you need further adjustments!
