@@ -1,50 +1,24 @@
-It seems like there are two validations in this OCR-scanned code. Here’s my interpretation and breakdown of each validation:
+Certainly! Here’s a breakdown of the three distinct validations, each with its own configuration, parsing logic, and validation function.
 
 1. Sterling Equivalent Validation
 
-	•	This validation compares sterling_equivalent from transactionSource with amountGbp in caseClass.
-	•	The code selects the columns transaction_id and sterling_equivalent from transactionSource and compares them to transactionId and amountGbp in caseClass.
+This validation checks for differences between sterling_equivalent in transactionSource and amountGbp in caseClass.
 
-2. Aggregated Transaction Document Type Validation
-
-	•	This validation checks if there’s an aggregatedTransactionId in caseClass. If aggregatedTransactionId is not null, it sets aggregatedTransactionDocumentType to “transaction”; otherwise, it is null.
-	•	The code also checks distinct values of aggregatedTransactionId in caseClass.
-
-Here’s how we can implement each of these validations.
-
-Step 1: Add Configuration Support
-
-Add configuration sections to specify the columns for each validation. This setup ensures that column names are flexible and easily configurable.
-
-Example configuration:
+Configuration
 
 [sterling_equivalent_validation]
 sourceColumn=sterling_equivalent
 targetColumn=amountGbp
 
-[aggregated_transaction_document_type_validation]
-sourceColumn=aggregatedTransactionId
-documentTypeColumn=aggregatedTransactionDocumentType
-documentTypeValue=transaction
+Parsing Logic
 
-Step 2: Add Parsing Logic to parseValidationConfig
-
-Add cases in parseValidationConfig to parse sterling_equivalent_validation and aggregated_transaction_document_type_validation sections:
+Add this case to parseValidationConfig:
 
 case "sterling_equivalent_validation" =>
   validationConfig += ("sterlingEquivalentSourceColumn" -> configMap("sourceColumn").trim)
   validationConfig += ("sterlingEquivalentTargetColumn" -> configMap("targetColumn").trim)
 
-case "aggregated_transaction_document_type_validation" =>
-  validationConfig += ("aggregatedTransactionSourceColumn" -> configMap("sourceColumn").trim)
-  validationConfig += ("aggregatedTransactionDocumentTypeColumn" -> configMap("documentTypeColumn").trim)
-  validationConfig += ("aggregatedTransactionDocumentTypeValue" -> configMap("documentTypeValue").trim)
-
-Step 3: Define the Validation Functions
-
-Sterling Equivalent Validation (validateSterlingEquivalent)
-
-This function compares sterling_equivalent in transactionSource to amountGbp in caseClass.
+Validation Function: validateSterlingEquivalent
 
 def validateSterlingEquivalent(sourceDF: DataFrame, targetDF: DataFrame, configMap: Map[String, Any]): Seq[String] = {
   import sourceDF.sparkSession.implicits._
@@ -68,11 +42,27 @@ def validateSterlingEquivalent(sourceDF: DataFrame, targetDF: DataFrame, configM
   )
 }
 
-Aggregated Transaction Document Type Validation (validateAggregatedTransactionDocumentType)
+2. Aggregated Transaction Document Type Validation
 
-This function:
-	•	Sets aggregatedTransactionDocumentType to “transaction” if aggregatedTransactionId is not null.
-	•	Compares this column between transactionSource and caseClass.
+This validation sets aggregatedTransactionDocumentType to “transaction” if aggregatedTransactionId is not null and compares the transformed data with caseClass.
+
+Configuration
+
+[aggregated_transaction_document_type_validation]
+sourceColumn=aggregatedTransactionId
+documentTypeColumn=aggregatedTransactionDocumentType
+documentTypeValue=transaction
+
+Parsing Logic
+
+Add this case to parseValidationConfig:
+
+case "aggregated_transaction_document_type_validation" =>
+  validationConfig += ("aggregatedTransactionSourceColumn" -> configMap("sourceColumn").trim)
+  validationConfig += ("aggregatedTransactionDocumentTypeColumn" -> configMap("documentTypeColumn").trim)
+  validationConfig += ("aggregatedTransactionDocumentTypeValue" -> configMap("documentTypeValue").trim)
+
+Validation Function: validateAggregatedTransactionDocumentType
 
 def validateAggregatedTransactionDocumentType(sourceDF: DataFrame, targetDF: DataFrame, configMap: Map[String, Any]): Seq[String] = {
   import sourceDF.sparkSession.implicits._
@@ -81,7 +71,6 @@ def validateAggregatedTransactionDocumentType(sourceDF: DataFrame, targetDF: Dat
   val documentTypeColumn = configMap("aggregatedTransactionDocumentTypeColumn").toString
   val documentTypeValue = configMap("aggregatedTransactionDocumentTypeValue").toString
 
-  // Apply the conditional transformation to create `aggregatedTransactionDocumentType`
   val source = sourceDF.withColumn(documentTypeColumn,
     when(col(sourceColumn).isNotNull, documentTypeValue).otherwise(null)
   ).select($"transaction_id".as("transactionId"), col(documentTypeColumn))
@@ -101,16 +90,46 @@ def validateAggregatedTransactionDocumentType(sourceDF: DataFrame, targetDF: Dat
   )
 }
 
-Step 4: Integrate the Functions into the Main Flow
+3. Aggregated Transaction ID Distinct Validation
+
+This validation checks for distinct values of aggregatedTransactionId in caseClass.
+
+Configuration
+
+[aggregated_transaction_id_validation]
+column=aggregatedTransactionId
+
+Parsing Logic
+
+Add this case to parseValidationConfig:
+
+case "aggregated_transaction_id_validation" =>
+  validationConfig += ("aggregatedTransactionIdColumn" -> configMap("column").trim)
+
+Validation Function: validateAggregatedTransactionIdDistinct
+
+def validateAggregatedTransactionIdDistinct(targetDF: DataFrame, configMap: Map[String, Any]): Seq[String] = {
+  val aggregatedTransactionIdColumn = configMap("aggregatedTransactionIdColumn").toString
+
+  val distinctIds = targetDF.select(aggregatedTransactionIdColumn).distinct().collect().map(_.getString(0))
+
+  Seq(
+    s"Distinct Aggregated Transaction IDs in $aggregatedTransactionIdColumn:",
+    distinctIds.mkString(", ")
+  )
+}
+
+Step 4: Integrate All Functions into the Main Flow
 
 In your main method, after parsing the configuration, call each validation function:
 
 validationResults = validationResults ++ validateSterlingEquivalent(transactionSource, caseClass, validationConfigMap)
 validationResults = validationResults ++ validateAggregatedTransactionDocumentType(transactionSource, caseClass, validationConfigMap)
+validationResults = validationResults ++ validateAggregatedTransactionIdDistinct(caseClass, validationConfigMap)
 
-Example Configuration File
+Complete Example Configuration File
 
-Here’s the configuration file with sections for sterlingEquivalent and aggregatedTransactionDocumentType:
+Here’s how your configuration file might look with all sections:
 
 [sterling_equivalent_validation]
 sourceColumn=sterling_equivalent
@@ -121,74 +140,14 @@ sourceColumn=aggregatedTransactionId
 documentTypeColumn=aggregatedTransactionDocumentType
 documentTypeValue=transaction
 
-Summary
-
-This setup:
-	•	Configures sterling_equivalent and amountGbp validation through validateSterlingEquivalent.
-	•	Sets aggregatedTransactionDocumentType based on aggregatedTransactionId using validateAggregatedTransactionDocumentType.
-	•	Provides flexible configuration for column names and values, making the validation adaptable.
-
-Let me know if you need any additional adjustments!
-
-Got it! To add an additional validation for aggregatedTransactionId using .distinct, we’ll create a new validation function that:
-	•	Checks for distinct values of aggregatedTransactionId in caseClass.
-	•	Reports the unique IDs.
-
-Here’s how to set it up.
-
-Step 1: Add Configuration Support
-
-Add a configuration section for aggregatedTransactionId validation. This configuration will specify the column name to be checked for distinct values.
-
-Example configuration:
-
-[aggregated_transaction_id_validation]
-column=aggregatedTransactionId
-
-Step 2: Add Parsing Logic to parseValidationConfig
-
-Add a case in parseValidationConfig to handle the aggregated_transaction_id_validation section:
-
-case "aggregated_transaction_id_validation" =>
-  validationConfig += ("aggregatedTransactionIdColumn" -> configMap("column").trim)
-
-This will store the column name for aggregatedTransactionId in validationConfig.
-
-Step 3: Define the Validation Function
-
-validateAggregatedTransactionIdDistinct
-
-This function checks for distinct values of aggregatedTransactionId and returns the unique IDs for reporting:
-
-def validateAggregatedTransactionIdDistinct(targetDF: DataFrame, configMap: Map[String, Any]): Seq[String] = {
-  val aggregatedTransactionIdColumn = configMap("aggregatedTransactionIdColumn").toString
-
-  // Select distinct values of `aggregatedTransactionId`
-  val distinctIds = targetDF.select(aggregatedTransactionIdColumn).distinct().collect().map(_.getString(0))
-
-  Seq(
-    s"Distinct Aggregated Transaction IDs in $aggregatedTransactionIdColumn:",
-    distinctIds.mkString(", ")
-  )
-}
-
-Step 4: Integrate the Function into the Main Flow
-
-In your main method, after parsing the configuration, call validateAggregatedTransactionIdDistinct:
-
-validationResults = validationResults ++ validateAggregatedTransactionIdDistinct(caseClass, validationConfigMap)
-
-Example Configuration File
-
-Include the aggregated_transaction_id_validation section in your configuration file:
-
 [aggregated_transaction_id_validation]
 column=aggregatedTransactionId
 
 Summary
 
 With this setup:
-	•	The validateAggregatedTransactionIdDistinct function checks for distinct values of aggregatedTransactionId in caseClass.
-	•	The configuration allows flexible specification of the column to check.
+	•	validateSterlingEquivalent compares sterling_equivalent with amountGbp.
+	•	validateAggregatedTransactionDocumentType checks if aggregatedTransactionId is not null and assigns “transaction” to aggregatedTransactionDocumentType.
+	•	validateAggregatedTransactionIdDistinct checks for distinct aggregatedTransactionId values in caseClass.
 
-This solution completes the validation for distinct aggregatedTransactionId. Let me know if you need further help!
+Each validation is now clearly separated and integrated into the main validation flow. Let me know if you need further customization!
