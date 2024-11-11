@@ -137,4 +137,22 @@ Example Configuration File
 Here’s the complete configuration with sections for aAccountType and bAccountType:
 
 [a_account_type_transform]
-bankAccountPrefixes=HK100,HK102,HK103,HK400,HK404,HKG00,KEFIX,KEPRM,MUBRN,MUPRM,OBBRN,SCBRN,SCVSP,SH403,SH404,SHG00,UGFLX,UGVSP,UKUBA,ZACAR,ZACHE,ZACTS,ZALOA,ZAMID,ZAMLO,ZANED
+bankAccountPrefixes=HK100,HK102,HK103,HK400,HK404,HKG00,KEFIX,KEPRM,MUBRN,MUPRM,OBBRN,SCBRN,SCVSP,SH403,SH404,SHG00,UGFLX,UGVSP,UKUBA,ZACAR,ZACHE,ZACTS,ZALOA,ZAMID,ZAMLO,ZANED,ZASAV,ZATDE,UKGTS
+creditCardPrefixes=UKPRM,UKPSP,UKTPE,UKBNC,UKBNW,UKBPA,UKBPF,UKCAM,UKCML,PTPSP,ITPSP,ESPSP
+mortgagePrefixes=UKTRN
+defaultType=BANK ACCOUNT
+
+[b_account_type_transform]
+bankAccountPrefixes=HK100,HK102,HK103,HK400,HK404,HKG00,KEFIX,KEPRM,MUBRN,MUPRM,OBBRN,SCBRN,SCVSP,SH403,SH404,SHG00,UGFLX,UGVSP,UKUBA,ZACAR,ZACHE,ZACTS,ZALOA,ZAMID,ZAMLO,ZANED,ZASAV,ZATDE,UKGTS
+creditCardPrefixes=UKPRM,UKPSP,UKTPE,UKBNC,UKBNW,UKBPA,UKBPF,UKCAM,UKCML,PTPSP,ITPSP,ESPSP
+mortgagePrefixes=UKTRN
+defaultType=BANK ACCOUNT
+
+Summary
+
+With this setup:
+	•	Each function applies the specified transformation logic.
+	•	Mismatches are identified using exceptAll and reported with transaction IDs.
+	•	The configuration allows flexible management of prefixes and default types.
+
+Let me know if you need further customization!
