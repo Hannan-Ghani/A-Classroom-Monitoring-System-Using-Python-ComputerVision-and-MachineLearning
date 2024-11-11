@@ -1,84 +1,82 @@
-To integrate this next validation, which involves creating aAccountId and bAccountId based on txn_direction_desc, we will:
-	1.	Add configuration support for each transformation.
-	2.	Define parsing logic.
-	3.	Create separate validation functions for aAccountId and bAccountId.
-	4.	Implement a check for distinct values in transactionClass.
+To implement this validation, which involves determining aAccountType and bAccountType based on the values of aAccountId and bAccountId, we’ll need:
+	1.	A configuration file to specify the list of identifiers for each account type (e.g., “BANK ACCOUNT,” “CREDIT CARD,” “MORTGAGE”).
+	2.	Parsing logic to handle these identifiers.
+	3.	A function to apply the conditional transformation for both aAccountType and bAccountType.
 
-Let’s proceed step by step.
+Here’s how we’ll set it up.
 
 Step 1: Add Configuration Support
 
-For aAccountId and bAccountId, add two separate sections in the configuration file specifying the columns and conditions for each transformation:
+Add configuration sections for aAccountType and bAccountType transformations. Each section will include the identifiers for each type:
 
-[a_account_id_transform]
-txnDirectionColumn=txn_direction_desc
-debitColumn=ACCOUNT_ID
-creditColumn=COUNTERPARTY_ID
+[a_account_type_transform]
+bankAccountPrefixes=HK100,HK102,HK103,HK400,HK404,HKG00,KEFIX,KEPRM,MUBRN,MUPRM,OBBRN,SCBRN,SCVSP,SH403,SH404,SHG00,UGFLX,UGVSP,UKUBA,ZACAR,ZACHE,ZACTS,ZALOA,ZAMID,ZAMLO,ZANED,ZASAV,ZATDE,UKGTS
+creditCardPrefixes=UKPRM,UKPSP,UKTPE,UKBNC,UKBNW,UKBPA,UKBPF,UKCAM,UKCML,PTPSP,ITPSP,ESPSP
+mortgagePrefixes=UKTRN
+defaultType=BANK ACCOUNT
 
-[b_account_id_transform]
-txnDirectionColumn=txn_direction_desc
-debitColumn=COUNTERPARTY_ID
-creditColumn=ACCOUNT_ID
+[b_account_type_transform]
+bankAccountPrefixes=HK100,HK102,HK103,HK400,HK404,HKG00,KEFIX,KEPRM,MUBRN,MUPRM,OBBRN,SCBRN,SCVSP,SH403,SH404,SHG00,UGFLX,UGVSP,UKUBA,ZACAR,ZACHE,ZACTS,ZALOA,ZAMID,ZAMLO,ZANED,ZASAV,ZATDE,UKGTS
+creditCardPrefixes=UKPRM,UKPSP,UKTPE,UKBNC,UKBNW,UKBPA,UKBPF,UKCAM,UKCML,PTPSP,ITPSP,ESPSP
+mortgagePrefixes=UKTRN
+defaultType=BANK ACCOUNT
 
-[transaction_class]
-column=transactionClass
-
-This configuration will specify:
-	•	a_account_id_transform and b_account_id_transform for creating aAccountId and bAccountId, respectively.
-	•	transaction_class to identify the column for distinct value checking.
+This configuration will allow us to:
+	•	Specify prefixes for each account type category.
+	•	Provide a default account type (BANK ACCOUNT) if no other type matches.
 
 Step 2: Add Parsing Logic to parseValidationConfig
 
-Add cases to handle a_account_id_transform, b_account_id_transform, and transaction_class:
+Update parseValidationConfig to parse these new sections:
 
-case "a_account_id_transform" =>
-  val columns = trimmedLine.split(",").map(_.trim)
-  if (columns.length == 3) {
-    validationConfig += ("txnDirectionColumnForAAccount" -> columns(0))
-    validationConfig += ("debitColumnForAAccountId" -> columns(1))
-    validationConfig += ("creditColumnForAAccountId" -> columns(2))
-  } else {
-    println(s"Warning: Invalid format for aAccountId transform - $trimmedLine")
-  }
+case "a_account_type_transform" =>
+  val bankAccountPrefixes = configMap("bankAccountPrefixes").split(",").map(_.trim)
+  val creditCardPrefixes = configMap("creditCardPrefixes").split(",").map(_.trim)
+  val mortgagePrefixes = configMap("mortgagePrefixes").split(",").map(_.trim)
+  val defaultType = configMap("defaultType").trim
+  validationConfig += ("aAccountBankPrefixes" -> bankAccountPrefixes)
+  validationConfig += ("aAccountCreditPrefixes" -> creditCardPrefixes)
+  validationConfig += ("aAccountMortgagePrefixes" -> mortgagePrefixes)
+  validationConfig += ("aAccountDefaultType" -> defaultType)
 
-case "b_account_id_transform" =>
-  val columns = trimmedLine.split(",").map(_.trim)
-  if (columns.length == 3) {
-    validationConfig += ("txnDirectionColumnForBAccount" -> columns(0))
-    validationConfig += ("debitColumnForBAccountId" -> columns(1))
-    validationConfig += ("creditColumnForBAccountId" -> columns(2))
-  } else {
-    println(s"Warning: Invalid format for bAccountId transform - $trimmedLine")
-  }
+case "b_account_type_transform" =>
+  val bankAccountPrefixes = configMap("bankAccountPrefixes").split(",").map(_.trim)
+  val creditCardPrefixes = configMap("creditCardPrefixes").split(",").map(_.trim)
+  val mortgagePrefixes = configMap("mortgagePrefixes").split(",").map(_.trim)
+  val defaultType = configMap("defaultType").trim
+  validationConfig += ("bAccountBankPrefixes" -> bankAccountPrefixes)
+  validationConfig += ("bAccountCreditPrefixes" -> creditCardPrefixes)
+  validationConfig += ("bAccountMortgagePrefixes" -> mortgagePrefixes)
+  validationConfig += ("bAccountDefaultType" -> defaultType)
 
-case "transaction_class" =>
-  validationConfig += ("transactionClassColumn" -> trimmedLine)
+This code will parse:
+	•	aAccountBankPrefixes, aAccountCreditPrefixes, and aAccountMortgagePrefixes for aAccountType.
+	•	bAccountBankPrefixes, bAccountCreditPrefixes, and bAccountMortgagePrefixes for bAccountType.
 
-This will add:
-	•	Columns for aAccountId as txnDirectionColumnForAAccount, debitColumnForAAccountId, and creditColumnForAAccountId.
-	•	Columns for bAccountId as txnDirectionColumnForBAccount, debitColumnForBAccountId, and creditColumnForBAccountId.
-	•	The column name for transactionClass as transactionClassColumn.
+Step 3: Define the Validation Functions
 
-Step 3: Define Validation Functions
+validateAAccountType
 
-validateAAccountId
+This function applies the transformation for aAccountType based on aAccountId:
 
-This function applies the transformation for aAccountId and compares it with the target data:
-
-def validateAAccountId(sourceDF: DataFrame, targetDF: DataFrame, configMap: Map[String, Any]): Seq[String] = {
+def validateAAccountType(sourceDF: DataFrame, targetDF: DataFrame, configMap: Map[String, Any]): Seq[String] = {
   import sourceDF.sparkSession.implicits._
 
-  val txnDirectionColumn = configMap.getOrElse("txnDirectionColumnForAAccount", "txn_direction_desc").toString
-  val debitColumn = configMap.getOrElse("debitColumnForAAccountId", "ACCOUNT_ID").toString
-  val creditColumn = configMap.getOrElse("creditColumnForAAccountId", "COUNTERPARTY_ID").toString
+  // Retrieve prefixes and default type from config
+  val bankPrefixes = configMap("aAccountBankPrefixes").asInstanceOf[Array[String]]
+  val creditCardPrefixes = configMap("aAccountCreditPrefixes").asInstanceOf[Array[String]]
+  val mortgagePrefixes = configMap("aAccountMortgagePrefixes").asInstanceOf[Array[String]]
+  val defaultType = configMap("aAccountDefaultType").toString
 
-  val source = sourceDF.withColumn("aAccountId",
-    when(col(txnDirectionColumn) === "DEBIT", col(debitColumn))
-      .when(col(txnDirectionColumn) === "CREDIT", col(creditColumn))
-      .otherwise(null)
-  ).select($"transaction_id".as("transactionId"), $"aAccountId")
+  // Define a conditional transformation for `aAccountType`
+  val source = sourceDF.withColumn("aAccountType",
+    when(substring($"aAccountId", 1, 5).isin(bankPrefixes: _*) && $"aAccountId".isNotNull, "BANK ACCOUNT")
+      .when(substring($"aAccountId", 1, 5).isin(creditCardPrefixes: _*) && $"aAccountId".isNotNull, "CREDIT CARD")
+      .when(substring($"aAccountId", 1, 5).isin(mortgagePrefixes: _*) && $"aAccountId".isNotNull, "MORTGAGE")
+      .otherwise(when($"aAccountId".isNotNull, defaultType).otherwise(null))
+  ).select($"transaction_id".as("transactionId"), $"aAccountType")
 
-  val target = targetDF.select($"transactionId", $"aAccountId")
+  val target = targetDF.select($"transactionId", $"aAccountType")
 
   val sourceToTargetDiff = source.exceptAll(target)
   val targetToSourceDiff = target.exceptAll(source)
@@ -87,30 +85,32 @@ def validateAAccountId(sourceDF: DataFrame, targetDF: DataFrame, configMap: Map[
   val targetToSourceIds = targetToSourceDiff.select($"transactionId").as[String].collect()
 
   Seq(
-    "A Account ID Validation Differences:",
+    "A Account Type Validation Differences:",
     s"Source to Target Differences: ${sourceToTargetIds.length} found with transaction IDs: ${sourceToTargetIds.mkString(", ")}",
     s"Target to Source Differences: ${targetToSourceIds.length} found with transaction IDs: ${targetToSourceIds.mkString(", ")}"
   )
 }
 
-validateBAccountId
+validateBAccountType
 
-Similarly, define a function for bAccountId transformation:
+Similarly, define a function for bAccountType transformation:
 
-def validateBAccountId(sourceDF: DataFrame, targetDF: DataFrame, configMap: Map[String, Any]): Seq[String] = {
+def validateBAccountType(sourceDF: DataFrame, targetDF: DataFrame, configMap: Map[String, Any]): Seq[String] = {
   import sourceDF.sparkSession.implicits._
 
-  val txnDirectionColumn = configMap.getOrElse("txnDirectionColumnForBAccount", "txn_direction_desc").toString
-  val debitColumn = configMap.getOrElse("debitColumnForBAccountId", "COUNTERPARTY_ID").toString
-  val creditColumn = configMap.getOrElse("creditColumnForBAccountId", "ACCOUNT_ID").toString
+  val bankPrefixes = configMap("bAccountBankPrefixes").asInstanceOf[Array[String]]
+  val creditCardPrefixes = configMap("bAccountCreditPrefixes").asInstanceOf[Array[String]]
+  val mortgagePrefixes = configMap("bAccountMortgagePrefixes").asInstanceOf[Array[String]]
+  val defaultType = configMap("bAccountDefaultType").toString
 
-  val source = sourceDF.withColumn("bAccountId",
-    when(col(txnDirectionColumn) === "DEBIT", col(debitColumn))
-      .when(col(txnDirectionColumn) === "CREDIT", col(creditColumn))
-      .otherwise(null)
-  ).select($"transaction_id".as("transactionId"), $"bAccountId")
+  val source = sourceDF.withColumn("bAccountType",
+    when(substring($"bAccountId", 1, 5).isin(bankPrefixes: _*) && $"bAccountId".isNotNull, "BANK ACCOUNT")
+      .when(substring($"bAccountId", 1, 5).isin(creditCardPrefixes: _*) && $"bAccountId".isNotNull, "CREDIT CARD")
+      .when(substring($"bAccountId", 1, 5).isin(mortgagePrefixes: _*) && $"bAccountId".isNotNull, "MORTGAGE")
+      .otherwise(when($"bAccountId".isNotNull, defaultType).otherwise(null))
+  ).select($"transaction_id".as("transactionId"), $"bAccountType")
 
-  val target = targetDF.select($"transactionId", $"bAccountId")
+  val target = targetDF.select($"transactionId", $"bAccountType")
 
   val sourceToTargetDiff = source.exceptAll(target)
   val targetToSourceDiff = target.exceptAll(source)
@@ -119,54 +119,22 @@ def validateBAccountId(sourceDF: DataFrame, targetDF: DataFrame, configMap: Map[
   val targetToSourceIds = targetToSourceDiff.select($"transactionId").as[String].collect()
 
   Seq(
-    "B Account ID Validation Differences:",
+    "B Account Type Validation Differences:",
     s"Source to Target Differences: ${sourceToTargetIds.length} found with transaction IDs: ${sourceToTargetIds.mkString(", ")}",
     s"Target to Source Differences: ${targetToSourceIds.length} found with transaction IDs: ${targetToSourceIds.mkString(", ")}"
   )
 }
 
-validateTransactionClass
-
-This function checks for distinct values in transactionClass:
-
-def validateTransactionClass(targetDF: DataFrame, configMap: Map[String, Any]): Seq[String] = {
-  val transactionClassColumn = configMap.getOrElse("transactionClassColumn", "transactionClass").toString
-
-  val distinctValues = targetDF.select(transactionClassColumn).distinct().collect().map(_.getString(0))
-  
-  Seq(s"Distinct values in $transactionClassColumn:", distinctValues.mkString(", "))
-}
-
-Step 4: Integrate the Functions into the Main Flow
+Step 4: Integrate Functions into Main Flow
 
 In your main method, call each validation function after parsing the configuration:
 
-validationResults = validationResults ++ validateAAccountId(transactionSource, caseClass, validationConfigMap)
-validationResults = validationResults ++ validateBAccountId(transactionSource, caseClass, validationConfigMap)
-validationResults = validationResults ++ validateTransactionClass(caseClass, validationConfigMap)
+validationResults = validationResults ++ validateAAccountType(transactionSource, caseClass, validationConfigMap)
+validationResults = validationResults ++ validateBAccountType(transactionSource, caseClass, validationConfigMap)
 
 Example Configuration File
 
-Include the new sections for aAccountId, bAccountId, and transactionClass:
+Here’s the complete configuration with sections for aAccountType and bAccountType:
 
-[a_account_id_transform]
-txnDirectionColumn=txn_direction_desc
-debitColumn=ACCOUNT_ID
-creditColumn=COUNTERPARTY_ID
-
-[b_account_id_transform]
-txnDirectionColumn=txn_direction_desc
-debitColumn=COUNTERPARTY_ID
-creditColumn=ACCOUNT_ID
-
-[transaction_class]
-column=transactionClass
-
-Summary
-
-With these additions:
-	•	validateAAccountId and validateBAccountId will apply transformations based on txn_direction_desc and identify mismatches.
-	•	validateTransactionClass will check for distinct values in transactionClass.
-	•	The configuration makes these validations flexible and adaptable.
-
-Let me know if you have additional requirements!
+[a_account_type_transform]
+bankAccountPrefixes=HK100,HK102,HK103,HK400,HK404,HKG00,KEFIX,KEPRM,MUBRN,MUPRM,OBBRN,SCBRN,SCVSP,SH403,SH404,SHG00,UGFLX,UGVSP,UKUBA,ZACAR,ZACHE,ZACTS,ZALOA,ZAMID,ZAMLO,ZANED
