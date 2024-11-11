@@ -1,83 +1,59 @@
-To implement this validation, where aAccountId and bAccountId are transformed into aSortCode and bSortCode based on specific conditions, we’ll follow the same approach as before:
-	1.	Add configuration sections to specify the prefixes and substring rules.
-	2.	Define parsing logic to handle these configurations.
-	3.	Create two validation functions for aSortCode and bSortCode.
+It seems like there are two validations in this OCR-scanned code. Here’s my interpretation and breakdown of each validation:
+
+1. Sterling Equivalent Validation
+
+	•	This validation compares sterling_equivalent from transactionSource with amountGbp in caseClass.
+	•	The code selects the columns transaction_id and sterling_equivalent from transactionSource and compares them to transactionId and amountGbp in caseClass.
+
+2. Aggregated Transaction Document Type Validation
+
+	•	This validation checks if there’s an aggregatedTransactionId in caseClass. If aggregatedTransactionId is not null, it sets aggregatedTransactionDocumentType to “transaction”; otherwise, it is null.
+	•	The code also checks distinct values of aggregatedTransactionId in caseClass.
+
+Here’s how we can implement each of these validations.
 
 Step 1: Add Configuration Support
 
-Add configuration sections for aSortCode and bSortCode transformations. These sections should specify:
-	•	The transaction direction condition (DEBIT for aSortCode, CREDIT for bSortCode).
-	•	Prefixes for the account IDs.
-	•	The substring positions.
+Add configuration sections to specify the columns for each validation. This setup ensures that column names are flexible and easily configurable.
 
 Example configuration:
 
-[a_sort_code_transform]
-txnDirectionCondition=DEBIT
-prefixes=UKUBA,UKGTS
-substringStart=17
-substringLength=6
+[sterling_equivalent_validation]
+sourceColumn=sterling_equivalent
+targetColumn=amountGbp
 
-[b_sort_code_transform]
-txnDirectionCondition=CREDIT
-prefixes=UKUBA,UKGTS
-substringStart=17
-substringLength=6
-
-This configuration will:
-	•	Define the conditions for when to apply the substring transformation.
-	•	Specify the prefixes and substring parameters.
+[aggregated_transaction_document_type_validation]
+sourceColumn=aggregatedTransactionId
+documentTypeColumn=aggregatedTransactionDocumentType
+documentTypeValue=transaction
 
 Step 2: Add Parsing Logic to parseValidationConfig
 
-Add cases in parseValidationConfig to handle a_sort_code_transform and b_sort_code_transform sections:
+Add cases in parseValidationConfig to parse sterling_equivalent_validation and aggregated_transaction_document_type_validation sections:
 
-case "a_sort_code_transform" =>
-  val txnDirectionCondition = configMap("txnDirectionCondition").trim
-  val prefixes = configMap("prefixes").split(",").map(_.trim)
-  val substringStart = configMap("substringStart").toInt
-  val substringLength = configMap("substringLength").toInt
-  validationConfig += ("aSortCodeDirectionCondition" -> txnDirectionCondition)
-  validationConfig += ("aSortCodePrefixes" -> prefixes)
-  validationConfig += ("aSortCodeSubstringStart" -> substringStart)
-  validationConfig += ("aSortCodeSubstringLength" -> substringLength)
+case "sterling_equivalent_validation" =>
+  validationConfig += ("sterlingEquivalentSourceColumn" -> configMap("sourceColumn").trim)
+  validationConfig += ("sterlingEquivalentTargetColumn" -> configMap("targetColumn").trim)
 
-case "b_sort_code_transform" =>
-  val txnDirectionCondition = configMap("txnDirectionCondition").trim
-  val prefixes = configMap("prefixes").split(",").map(_.trim)
-  val substringStart = configMap("substringStart").toInt
-  val substringLength = configMap("substringLength").toInt
-  validationConfig += ("bSortCodeDirectionCondition" -> txnDirectionCondition)
-  validationConfig += ("bSortCodePrefixes" -> prefixes)
-  validationConfig += ("bSortCodeSubstringStart" -> substringStart)
-  validationConfig += ("bSortCodeSubstringLength" -> substringLength)
+case "aggregated_transaction_document_type_validation" =>
+  validationConfig += ("aggregatedTransactionSourceColumn" -> configMap("sourceColumn").trim)
+  validationConfig += ("aggregatedTransactionDocumentTypeColumn" -> configMap("documentTypeColumn").trim)
+  validationConfig += ("aggregatedTransactionDocumentTypeValue" -> configMap("documentTypeValue").trim)
 
-This parsing logic stores:
-	•	The direction condition, prefixes, and substring parameters for each transformation.
+Step 3: Define the Validation Functions
 
-Step 3: Define Validation Functions
+Sterling Equivalent Validation (validateSterlingEquivalent)
 
-validateASortCode
+This function compares sterling_equivalent in transactionSource to amountGbp in caseClass.
 
-This function applies the transformation for aSortCode based on the aAccountId condition:
-
-def validateASortCode(sourceDF: DataFrame, targetDF: DataFrame, configMap: Map[String, Any]): Seq[String] = {
+def validateSterlingEquivalent(sourceDF: DataFrame, targetDF: DataFrame, configMap: Map[String, Any]): Seq[String] = {
   import sourceDF.sparkSession.implicits._
 
-  // Retrieve settings from config
-  val directionCondition = configMap("aSortCodeDirectionCondition").toString
-  val prefixes = configMap("aSortCodePrefixes").asInstanceOf[Array[String]]
-  val substringStart = configMap("aSortCodeSubstringStart").asInstanceOf[Int]
-  val substringLength = configMap("aSortCodeSubstringLength").asInstanceOf[Int]
+  val sourceColumn = configMap("sterlingEquivalentSourceColumn").toString
+  val targetColumn = configMap("sterlingEquivalentTargetColumn").toString
 
-  // Apply the conditional transformation for `aSortCode`
-  val source = sourceDF.withColumn("aSortCode",
-    when($"txn_direction_desc" === directionCondition && substring($"aAccountId", 1, 5).isin(prefixes: _*), 
-         substring($"aAccountId", substringStart, substringLength))
-      .otherwise(null)
-  ).select($"transaction_id".as("transactionId"), $"aSortCode")
-
-  val target = targetDF.select($"transactionId", $"aSortCode")
+  val source = sourceDF.select($"transaction_id".as("transactionId"), col(sourceColumn).as("sterlingEquivalent"))
+  val target = targetDF.select($"transactionId", col(targetColumn).as("sterlingEquivalent"))
 
   val sourceToTargetDiff = source.exceptAll(target)
   val targetToSourceDiff = target.exceptAll(source)
@@ -86,31 +62,31 @@ def validateASortCode(sourceDF: DataFrame, targetDF: DataFrame, configMap: Map[S
   val targetToSourceIds = targetToSourceDiff.select($"transactionId").as[String].collect()
 
   Seq(
-    "A Sort Code Validation Differences:",
+    "Sterling Equivalent Validation Differences:",
     s"Source to Target Differences: ${sourceToTargetIds.length} found with transaction IDs: ${sourceToTargetIds.mkString(", ")}",
     s"Target to Source Differences: ${targetToSourceIds.length} found with transaction IDs: ${targetToSourceIds.mkString(", ")}"
   )
 }
 
-validateBSortCode
+Aggregated Transaction Document Type Validation (validateAggregatedTransactionDocumentType)
 
-Similarly, define a function for bSortCode transformation:
+This function:
+	•	Sets aggregatedTransactionDocumentType to “transaction” if aggregatedTransactionId is not null.
+	•	Compares this column between transactionSource and caseClass.
 
-def validateBSortCode(sourceDF: DataFrame, targetDF: DataFrame, configMap: Map[String, Any]): Seq[String] = {
+def validateAggregatedTransactionDocumentType(sourceDF: DataFrame, targetDF: DataFrame, configMap: Map[String, Any]): Seq[String] = {
   import sourceDF.sparkSession.implicits._
 
-  val directionCondition = configMap("bSortCodeDirectionCondition").toString
-  val prefixes = configMap("bSortCodePrefixes").asInstanceOf[Array[String]]
-  val substringStart = configMap("bSortCodeSubstringStart").asInstanceOf[Int]
-  val substringLength = configMap("bSortCodeSubstringLength").asInstanceOf[Int]
+  val sourceColumn = configMap("aggregatedTransactionSourceColumn").toString
+  val documentTypeColumn = configMap("aggregatedTransactionDocumentTypeColumn").toString
+  val documentTypeValue = configMap("aggregatedTransactionDocumentTypeValue").toString
 
-  val source = sourceDF.withColumn("bSortCode",
-    when($"txn_direction_desc" === directionCondition && substring($"bAccountId", 1, 5).isin(prefixes: _*), 
-         substring($"bAccountId", substringStart, substringLength))
-      .otherwise(null)
-  ).select($"transaction_id".as("transactionId"), $"bSortCode")
+  // Apply the conditional transformation to create `aggregatedTransactionDocumentType`
+  val source = sourceDF.withColumn(documentTypeColumn,
+    when(col(sourceColumn).isNotNull, documentTypeValue).otherwise(null)
+  ).select($"transaction_id".as("transactionId"), col(documentTypeColumn))
 
-  val target = targetDF.select($"transactionId", $"bSortCode")
+  val target = targetDF.select($"transactionId", col(documentTypeColumn))
 
   val sourceToTargetDiff = source.exceptAll(target)
   val targetToSourceDiff = target.exceptAll(source)
@@ -119,7 +95,7 @@ def validateBSortCode(sourceDF: DataFrame, targetDF: DataFrame, configMap: Map[S
   val targetToSourceIds = targetToSourceDiff.select($"transactionId").as[String].collect()
 
   Seq(
-    "B Sort Code Validation Differences:",
+    "Aggregated Transaction Document Type Validation Differences:",
     s"Source to Target Differences: ${sourceToTargetIds.length} found with transaction IDs: ${sourceToTargetIds.mkString(", ")}",
     s"Target to Source Differences: ${targetToSourceIds.length} found with transaction IDs: ${targetToSourceIds.mkString(", ")}"
   )
@@ -129,30 +105,90 @@ Step 4: Integrate the Functions into the Main Flow
 
 In your main method, after parsing the configuration, call each validation function:
 
-validationResults = validationResults ++ validateASortCode(transactionSource, caseClass, validationConfigMap)
-validationResults = validationResults ++ validateBSortCode(transactionSource, caseClass, validationConfigMap)
+validationResults = validationResults ++ validateSterlingEquivalent(transactionSource, caseClass, validationConfigMap)
+validationResults = validationResults ++ validateAggregatedTransactionDocumentType(transactionSource, caseClass, validationConfigMap)
 
 Example Configuration File
 
-Here’s the complete configuration with sections for aSortCode and bSortCode:
+Here’s the configuration file with sections for sterlingEquivalent and aggregatedTransactionDocumentType:
 
-[a_sort_code_transform]
-txnDirectionCondition=DEBIT
-prefixes=UKUBA,UKGTS
-substringStart=17
-substringLength=6
+[sterling_equivalent_validation]
+sourceColumn=sterling_equivalent
+targetColumn=amountGbp
 
-[b_sort_code_transform]
-txnDirectionCondition=CREDIT
-prefixes=UKUBA,UKGTS
-substringStart=17
-substringLength=6
+[aggregated_transaction_document_type_validation]
+sourceColumn=aggregatedTransactionId
+documentTypeColumn=aggregatedTransactionDocumentType
+documentTypeValue=transaction
 
 Summary
 
-With these additions:
-	•	validateASortCode and validateBSortCode functions apply substring transformations based on the specified conditions.
-	•	Mismatches between source and target are identified and reported.
-	•	Configuration allows flexibility in defining prefixes, conditions, and substring parameters.
+This setup:
+	•	Configures sterling_equivalent and amountGbp validation through validateSterlingEquivalent.
+	•	Sets aggregatedTransactionDocumentType based on aggregatedTransactionId using validateAggregatedTransactionDocumentType.
+	•	Provides flexible configuration for column names and values, making the validation adaptable.
 
-Let me know if further customization is needed!
+Let me know if you need any additional adjustments!
+
+Got it! To add an additional validation for aggregatedTransactionId using .distinct, we’ll create a new validation function that:
+	•	Checks for distinct values of aggregatedTransactionId in caseClass.
+	•	Reports the unique IDs.
+
+Here’s how to set it up.
+
+Step 1: Add Configuration Support
+
+Add a configuration section for aggregatedTransactionId validation. This configuration will specify the column name to be checked for distinct values.
+
+Example configuration:
+
+[aggregated_transaction_id_validation]
+column=aggregatedTransactionId
+
+Step 2: Add Parsing Logic to parseValidationConfig
+
+Add a case in parseValidationConfig to handle the aggregated_transaction_id_validation section:
+
+case "aggregated_transaction_id_validation" =>
+  validationConfig += ("aggregatedTransactionIdColumn" -> configMap("column").trim)
+
+This will store the column name for aggregatedTransactionId in validationConfig.
+
+Step 3: Define the Validation Function
+
+validateAggregatedTransactionIdDistinct
+
+This function checks for distinct values of aggregatedTransactionId and returns the unique IDs for reporting:
+
+def validateAggregatedTransactionIdDistinct(targetDF: DataFrame, configMap: Map[String, Any]): Seq[String] = {
+  val aggregatedTransactionIdColumn = configMap("aggregatedTransactionIdColumn").toString
+
+  // Select distinct values of `aggregatedTransactionId`
+  val distinctIds = targetDF.select(aggregatedTransactionIdColumn).distinct().collect().map(_.getString(0))
+
+  Seq(
+    s"Distinct Aggregated Transaction IDs in $aggregatedTransactionIdColumn:",
+    distinctIds.mkString(", ")
+  )
+}
+
+Step 4: Integrate the Function into the Main Flow
+
+In your main method, after parsing the configuration, call validateAggregatedTransactionIdDistinct:
+
+validationResults = validationResults ++ validateAggregatedTransactionIdDistinct(caseClass, validationConfigMap)
+
+Example Configuration File
+
+Include the aggregated_transaction_id_validation section in your configuration file:
+
+[aggregated_transaction_id_validation]
+column=aggregatedTransactionId
+
+Summary
+
+With this setup:
+	•	The validateAggregatedTransactionIdDistinct function checks for distinct values of aggregatedTransactionId in caseClass.
+	•	The configuration allows flexible specification of the column to check.
+
+This solution completes the validation for distinct aggregatedTransactionId. Let me know if you need further help!
