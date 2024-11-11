@@ -1,109 +1,160 @@
-def parseIso3Mapping(configLines: Seq[String]): Map[String, String] = {
-  configLines.flatMap { line =>
-    val trimmedLine = line.trim.stripSuffix(",")  // Remove trailing comma if present
-    if (trimmedLine.nonEmpty) {
-      val Array(code2, code3) = trimmedLine.split(":").map(_.trim)
-      Some(code2 -> code3)
-    } else {
-      None
-    }
-  }.toMap
+To add this validation, which checks for differences between TRANSACTION_DATE in transactionSource and transactionDate in caseClass, you can follow these steps:
+
+1. Add Configuration Support
+
+	•	Add a new section in the configuration file to specify the date columns for comparison, which will make the validation flexible. For example:
+
+[transaction_date_validation_source]
+TRANSACTION_DATE
+
+[transaction_date_validation_target]
+transactionDate
+
+
+	•	This will allow you to easily modify the source and target columns in the future if needed.
+
+2. Define a New Validation Function
+
+	•	Create a function validateTransactionDate that:
+	•	Retrieves the source and target columns from the configuration.
+	•	Selects the relevant columns (TRANSACTION_ID and TRANSACTION_DATE in transactionSource and transactionId and transactionDate in caseClass).
+	•	Uses exceptAll to identify mismatches between the two DataFrames.
+	•	Collects and formats the transaction IDs of mismatched records for reporting.
+
+Sample Code for validateTransactionDate
+
+Here’s how to define the validateTransactionDate function:
+
+def validateTransactionDate(sourceDF: DataFrame, targetDF: DataFrame, configMap: Map[String, Any]): Seq[String] = {
+  import sourceDF.sparkSession.implicits._
+
+  // Retrieve column names from the configuration
+  val sourceColumn = configMap.getOrElse("transactionDateValidationSource", "TRANSACTION_DATE").toString
+  val targetColumn = configMap.getOrElse("transactionDateValidationTarget", "transactionDate").toString
+
+  // Select transaction ID and date columns from both source and target DataFrames
+  val sourceData = sourceDF.select($"TRANSACTION_ID", col(sourceColumn).as("transactionDate"))
+  val targetData = targetDF.select($"transactionId", col(targetColumn).as("transactionDate"))
+
+  // Find mismatches using exceptAll
+  val sourceToTargetDiff = sourceData.exceptAll(targetData)
+  val targetToSourceDiff = targetData.exceptAll(sourceData)
+
+  // Collect transaction IDs for reporting
+  val sourceToTargetIds = sourceToTargetDiff.select($"TRANSACTION_ID").as[String].collect()
+  val targetToSourceIds = targetToSourceDiff.select($"transactionId").as[String].collect()
+
+  val sourceToTargetCount = sourceToTargetIds.length
+  val targetToSourceCount = targetToSourceIds.length
+
+  Seq(
+    "Transaction Date Validation Differences:",
+    s"Source to Target Differences: $sourceToTargetCount found with transaction IDs: " + sourceToTargetIds.mkString(", "),
+    s"Target to Source Differences: $targetToSourceCount found with transaction IDs: " + targetToSourceIds.mkString(", ")
+  )
 }
 
-def parseValidationConfig(configPath: String, sparkSession: SparkSession): Map[String, Any] = {
-  import sparkSession.implicits._
-  var currentSection = ""
-  var validationConfig = Map[String, Any]()
-  var mappingLines = Seq[String]()  // Collect lines for the mapping section
+Explanation of the Code
 
-  sparkSession.read.text(configPath).as[String].collect().foreach { line =>
-    val trimmedLine = line.trim
+	•	Dynamic Column Names: The function retrieves sourceColumn and targetColumn from configMap, making it adaptable to any column names you specify in the configuration.
+	•	Data Selection: sourceData and targetData are created by selecting TRANSACTION_ID and TRANSACTION_DATE from transactionSource and transactionId and transactionDate from caseClass.
+	•	exceptAll Comparison:
+	•	exceptAll is used to find mismatches between the two DataFrames.
+	•	Formatted Output: Collects the mismatched transaction IDs, counts them, and formats the output for easy readability.
 
-    if (trimmedLine.startsWith("[") && trimmedLine.endsWith("]")) {
-      // Parse mapping if we leave [mapping] section
-      if (currentSection == "mapping" && mappingLines.nonEmpty) {
-        validationConfig += ("iso3Mapping" -> parseIso3Mapping(mappingLines))
-        mappingLines = Seq.empty  // Reset for next section
-      }
-      // Update the current section
-      currentSection = trimmedLine.substring(1, trimmedLine.length - 1)
-    } else if (trimmedLine.nonEmpty) {
-      currentSection match {
-        case "transaction_country_iso3_validation_source" =>
-          validationConfig += ("sourceColumn" -> trimmedLine)
-        
-        case "transaction_country_iso3_validation_target" =>
-          validationConfig += ("targetColumn" -> trimmedLine)
-        
-        case "mapping" =>
-          mappingLines :+= trimmedLine  // Collect each line for the mapping
+3. Integrate the Function in Your Main Validation Flow
 
-        case "amount_validation" =>
-          // Parse amount validation source and target columns
-          val columns = trimmedLine.split(",").map(_.trim)
-          if (columns.length == 2) {
-            validationConfig += ("amountValidationSource" -> columns(0))
-            validationConfig += ("amountValidationTarget" -> columns(1))
-          } else {
-            println(s"Warning: Invalid format for amount validation - $trimmedLine")
-          }
+Call validateTransactionDate in your main function, adding the results to validationResults:
 
-        case "non_null_validation" =>
-          // Parse columns for non-null validation
-          val columns = trimmedLine.split(",").map(_.trim)
-          validationConfig += ("nonNullValidationColumns" -> columns.toSeq)
+validationResults = validationResults ++ validateTransactionDate(transactionSource, caseClass, validationConfigMap)
 
-        case "null_validation" =>
-          // Parse columns for null validation
-          val columns = trimmedLine.split(",").map(_.trim)
-          validationConfig += ("nullValidationColumns" -> columns.toSeq)
+Example Configuration File
 
-        case "direct_column_validation_source" =>
-          // Parse source columns for direct column validation
-          val columns = trimmedLine.split(",").map(_.trim)
-          validationConfig += ("directColumnValidationSource" -> columns.toSeq)
+Here’s how your configuration file might look with this new section added:
 
-        case "direct_column_validation_target" =>
-          // Parse target columns for direct column validation
-          val columns = trimmedLine.split(",").map(_.trim)
-          validationConfig += ("directColumnValidationTarget" -> columns.toSeq)
+[transaction_date_validation_source]
+TRANSACTION_DATE
 
-        case "narrative_validation_source" =>
-          // Parse source column for narrative validation
-          validationConfig += ("narrativeValidationSource" -> trimmedLine)
+[transaction_date_validation_target]
+transactionDate
 
-        case "narrative_validation_target" =>
-          // Parse target column for narrative validation
-          validationConfig += ("narrativeValidationTarget" -> trimmedLine)
+This will allow you to perform date validation with flexibility in column names, and mismatched records will be clearly reported with their transaction IDs. Let me know if you have any other requirements!
 
-        case "account_number_transform" =>
-          // Parse columns for account number transformations
-          val columns = trimmedLine.split(",").map(_.trim)
-          if (columns.length == 6) {
-            validationConfig += ("accountNumberTransform" -> columns)
-          } else {
-            println(s"Warning: Invalid format for account number transform - $trimmedLine")
-          }
 
-        case "second_account_number_transform" =>
-          // Parse columns for secondary account number transformations
-          val columns = trimmedLine.split(",").map(_.trim)
-          if (columns.length == 6) {
-            validationConfig += ("secondAccountNumberTransform" -> columns)
-          } else {
-            println(s"Warning: Invalid format for second account number transform - $trimmedLine")
-          }
 
-        case _ =>
-          println(s"Unknown section or configuration item: [$currentSection] - $trimmedLine")
-      }
-    }
-  }
 
-  // Final check for remaining mapping lines at end of file
-  if (currentSection == "mapping" && mappingLines.nonEmpty) {
-    validationConfig += ("iso3Mapping" -> parseIso3Mapping(mappingLines))
-  }
 
-  validationConfig
-}
+
+
+
+
+----------------)()&;&;&/&/:££:£:££:£:£:£
+
+
+
+
+
+
+
+
+To fully integrate this new validateTransactionDate function into your code, here’s a checklist of what else you’ll need to add:
+
+1. Update parseValidationConfig to Parse Date Validation Configuration
+
+Ensure parseValidationConfig includes support for the new [transaction_date_validation_source] and [transaction_date_validation_target] sections in the configuration file. Here’s how to extend parseValidationConfig:
+
+Add the following cases in parseValidationConfig:
+
+case "transaction_date_validation_source" =>
+  validationConfig += ("transactionDateValidationSource" -> trimmedLine)
+
+case "transaction_date_validation_target" =>
+  validationConfig += ("transactionDateValidationTarget" -> trimmedLine)
+
+This will add the source and target date columns to validationConfig as transactionDateValidationSource and transactionDateValidationTarget, making them accessible to validateTransactionDate.
+
+2. Update Configuration File to Include Date Validation Sections
+
+Ensure your configuration file has these sections for date validation:
+
+[transaction_date_validation_source]
+TRANSACTION_DATE
+
+[transaction_date_validation_target]
+transactionDate
+
+This configuration will allow the validateTransactionDate function to dynamically retrieve the correct column names.
+
+3. Add validateTransactionDate to the Main Validation Flow
+
+In your main method, after parsing the configuration, call validateTransactionDate and add its output to validationResults. For example:
+
+// Main validation results accumulator
+var validationResults = Seq[String]()
+
+// Call each validation function, including the new date validation
+validationResults = validationResults ++ validateTransactionDate(transactionSource, caseClass, validationConfigMap)
+
+// Other validation function calls go here, e.g., validateNonNullColumns, validateAmountDifferences, etc.
+
+4. Ensure All Required Imports Are Present
+
+The validateTransactionDate function relies on certain Spark SQL functions. Ensure the following imports are present at the top of your file:
+
+import org.apache.spark.sql.{DataFrame, SparkSession}
+import org.apache.spark.sql.functions._
+
+5. Run the Glue Job or Spark Application
+
+Once the above adjustments are made:
+	•	Load the configuration file into validationConfigMap.
+	•	Run the job in your Spark or AWS Glue environment.
+
+Final Code Integration Summary
+
+With these additions, the validateTransactionDate function will be fully integrated into your application. You’ll have:
+	•	A configuration file specifying the source and target date columns.
+	•	An updated parseValidationConfig function to read these columns.
+	•	A call to validateTransactionDate in the main validation flow, accumulating its results.
+
+These steps will ensure your code runs successfully with the new date validation. Let me know if you need any further assistance!
