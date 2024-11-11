@@ -1,54 +1,90 @@
-To add this validation, which checks for differences between TRANSACTION_DATE in transactionSource and transactionDate in caseClass, you can follow these steps:
+To integrate this case, which involves deriving a new column aAccountUniqueId based on conditional transformations of ACCOUNT_KEY and COUNTERPARTY_PRODUCT_KEY, you can follow these steps:
 
 1. Add Configuration Support
 
-	•	Add a new section in the configuration file to specify the date columns for comparison, which will make the validation flexible. For example:
+Add sections to the configuration file for the columns involved in this transformation. This configuration should specify:
+	•	The column used for joining (transaction_id in transactionSource and transactionId in caseClass).
+	•	Columns for conditional transformation (txn_direction_desc, ACCOUNT_KEY, and COUNTERPARTY_PRODUCT_KEY).
+	•	Conditions for each transformation (e.g., “DEBIT” and “CREDIT”).
 
-[transaction_date_validation_source]
-TRANSACTION_DATE
+Your configuration might look like this:
 
-[transaction_date_validation_target]
-transactionDate
+[unique_account_id_join_columns]
+transactionSourceId=transaction_id
+caseClassId=transactionId
 
+[unique_account_id_transform]
+txnDirectionColumn=txn_direction_desc
+debitColumn=ACCOUNT_KEY
+creditColumn=COUNTERPARTY_PRODUCT_KEY
 
-	•	This will allow you to easily modify the source and target columns in the future if needed.
+2. Add Parsing Logic to parseValidationConfig
 
-2. Define a New Validation Function
+Add cases in parseValidationConfig to handle these new sections. Here’s the code to parse the sections:
 
-	•	Create a function validateTransactionDate that:
-	•	Retrieves the source and target columns from the configuration.
-	•	Selects the relevant columns (TRANSACTION_ID and TRANSACTION_DATE in transactionSource and transactionId and transactionDate in caseClass).
-	•	Uses exceptAll to identify mismatches between the two DataFrames.
-	•	Collects and formats the transaction IDs of mismatched records for reporting.
+case "unique_account_id_join_columns" =>
+  val Array(sourceId, targetId) = trimmedLine.split(",").map(_.trim)
+  validationConfig += ("uniqueAccountIdSourceId" -> sourceId)
+  validationConfig += ("uniqueAccountIdTargetId" -> targetId)
 
-Sample Code for validateTransactionDate
+case "unique_account_id_transform" =>
+  val columns = trimmedLine.split(",").map(_.trim)
+  if (columns.length == 3) {
+    validationConfig += ("txnDirectionColumn" -> columns(0))
+    validationConfig += ("debitColumn" -> columns(1))
+    validationConfig += ("creditColumn" -> columns(2))
+  } else {
+    println(s"Warning: Invalid format for unique account ID transform - $trimmedLine")
+  }
 
-Here’s how to define the validateTransactionDate function:
+This will add the join columns (uniqueAccountIdSourceId and uniqueAccountIdTargetId) and the columns for conditional transformation (txnDirectionColumn, debitColumn, and creditColumn) to validationConfig.
 
-def validateTransactionDate(sourceDF: DataFrame, targetDF: DataFrame, configMap: Map[String, Any]): Seq[String] = {
+3. Define the New Validation Function
+
+Now, create a function validateUniqueAccountId that:
+	•	Joins transactionSource and caseClass on the specified columns.
+	•	Creates the derived aAccountUniqueId column based on the conditions.
+	•	Uses exceptAll to identify mismatches between the transformed source and the target DataFrame.
+	•	Collects and formats the mismatched transaction IDs for reporting.
+
+Here’s the function code:
+
+def validateUniqueAccountId(sourceDF: DataFrame, targetDF: DataFrame, configMap: Map[String, Any]): Seq[String] = {
   import sourceDF.sparkSession.implicits._
 
   // Retrieve column names from the configuration
-  val sourceColumn = configMap.getOrElse("transactionDateValidationSource", "TRANSACTION_DATE").toString
-  val targetColumn = configMap.getOrElse("transactionDateValidationTarget", "transactionDate").toString
+  val sourceId = configMap.getOrElse("uniqueAccountIdSourceId", "transaction_id").toString
+  val targetId = configMap.getOrElse("uniqueAccountIdTargetId", "transactionId").toString
+  val txnDirectionColumn = configMap.getOrElse("txnDirectionColumn", "txn_direction_desc").toString
+  val debitColumn = configMap.getOrElse("debitColumn", "ACCOUNT_KEY").toString
+  val creditColumn = configMap.getOrElse("creditColumn", "COUNTERPARTY_PRODUCT_KEY").toString
 
-  // Select transaction ID and date columns from both source and target DataFrames
-  val sourceData = sourceDF.select($"TRANSACTION_ID", col(sourceColumn).as("transactionDate"))
-  val targetData = targetDF.select($"transactionId", col(targetColumn).as("transactionDate"))
+  // Perform the join on the specified ID columns
+  val data = sourceDF.join(targetDF, sourceDF(sourceId) === targetDF(targetId), "inner")
+
+  // Apply the conditional transformation to create `aAccountUniqueId`
+  val source = data.withColumn("aAccountUniqueId",
+    when(col(txnDirectionColumn) === "DEBIT", split(col(debitColumn), "-").getItem(1))
+      .when(col(txnDirectionColumn) === "CREDIT", split(col(creditColumn), "-").getItem(1))
+      .otherwise(null)
+  ).select(col(sourceId).as("transactionId"), $"aAccountUniqueId")
+
+  // Select the target data directly
+  val target = targetDF.select($"transactionId", $"aAccountUniqueId")
 
   // Find mismatches using exceptAll
-  val sourceToTargetDiff = sourceData.exceptAll(targetData)
-  val targetToSourceDiff = targetData.exceptAll(sourceData)
+  val sourceToTargetDiff = source.exceptAll(target)
+  val targetToSourceDiff = target.exceptAll(source)
 
   // Collect transaction IDs for reporting
-  val sourceToTargetIds = sourceToTargetDiff.select($"TRANSACTION_ID").as[String].collect()
+  val sourceToTargetIds = sourceToTargetDiff.select($"transactionId").as[String].collect()
   val targetToSourceIds = targetToSourceDiff.select($"transactionId").as[String].collect()
 
   val sourceToTargetCount = sourceToTargetIds.length
   val targetToSourceCount = targetToSourceIds.length
 
   Seq(
-    "Transaction Date Validation Differences:",
+    "Unique Account ID Validation Differences:",
     s"Source to Target Differences: $sourceToTargetCount found with transaction IDs: " + sourceToTargetIds.mkString(", "),
     s"Target to Source Differences: $targetToSourceCount found with transaction IDs: " + targetToSourceIds.mkString(", ")
   )
@@ -56,105 +92,37 @@ def validateTransactionDate(sourceDF: DataFrame, targetDF: DataFrame, configMap:
 
 Explanation of the Code
 
-	•	Dynamic Column Names: The function retrieves sourceColumn and targetColumn from configMap, making it adaptable to any column names you specify in the configuration.
-	•	Data Selection: sourceData and targetData are created by selecting TRANSACTION_ID and TRANSACTION_DATE from transactionSource and transactionId and transactionDate from caseClass.
-	•	exceptAll Comparison:
-	•	exceptAll is used to find mismatches between the two DataFrames.
-	•	Formatted Output: Collects the mismatched transaction IDs, counts them, and formats the output for easy readability.
+	1.	Dynamic Column Names:
+	•	Retrieves the source and target ID columns and transformation columns from configMap.
+	2.	Join Operation:
+	•	Joins transactionSource and caseClass on the specified ID columns.
+	3.	Conditional Transformation:
+	•	Creates aAccountUniqueId based on txnDirectionColumn.
+	•	Splits the value of debitColumn for “DEBIT” or creditColumn for “CREDIT” and extracts the second part.
+	4.	exceptAll Comparison:
+	•	Uses exceptAll to identify mismatches.
+	5.	Formatted Output:
+	•	Collects and counts the mismatched transaction IDs and formats them for reporting.
 
-3. Integrate the Function in Your Main Validation Flow
+4. Add the Validation Function to the Main Flow
 
-Call validateTransactionDate in your main function, adding the results to validationResults:
+In your main function, after parsing the configuration, call validateUniqueAccountId and add its output to validationResults:
 
-validationResults = validationResults ++ validateTransactionDate(transactionSource, caseClass, validationConfigMap)
+validationResults = validationResults ++ validateUniqueAccountId(transactionSource, caseClass, validationConfigMap)
 
 Example Configuration File
 
-Here’s how your configuration file might look with this new section added:
+Here’s an example configuration file with the sections for unique_account_id_join_columns and unique_account_id_transform:
 
-[transaction_date_validation_source]
-TRANSACTION_DATE
+[unique_account_id_join_columns]
+transactionSourceId=transaction_id
+caseClassId=transactionId
 
-[transaction_date_validation_target]
-transactionDate
+[unique_account_id_transform]
+txnDirectionColumn=txn_direction_desc
+debitColumn=ACCOUNT_KEY
+creditColumn=COUNTERPARTY_PRODUCT_KEY
 
-This will allow you to perform date validation with flexibility in column names, and mismatched records will be clearly reported with their transaction IDs. Let me know if you have any other requirements!
+This configuration will enable flexible specification of columns for joining and transformation, making it easy to adapt if the column names change.
 
-
-
-
-
-
-
-
-
-----------------)()&;&;&/&/:££:£:££:£:£:£
-
-
-
-
-
-
-
-
-To fully integrate this new validateTransactionDate function into your code, here’s a checklist of what else you’ll need to add:
-
-1. Update parseValidationConfig to Parse Date Validation Configuration
-
-Ensure parseValidationConfig includes support for the new [transaction_date_validation_source] and [transaction_date_validation_target] sections in the configuration file. Here’s how to extend parseValidationConfig:
-
-Add the following cases in parseValidationConfig:
-
-case "transaction_date_validation_source" =>
-  validationConfig += ("transactionDateValidationSource" -> trimmedLine)
-
-case "transaction_date_validation_target" =>
-  validationConfig += ("transactionDateValidationTarget" -> trimmedLine)
-
-This will add the source and target date columns to validationConfig as transactionDateValidationSource and transactionDateValidationTarget, making them accessible to validateTransactionDate.
-
-2. Update Configuration File to Include Date Validation Sections
-
-Ensure your configuration file has these sections for date validation:
-
-[transaction_date_validation_source]
-TRANSACTION_DATE
-
-[transaction_date_validation_target]
-transactionDate
-
-This configuration will allow the validateTransactionDate function to dynamically retrieve the correct column names.
-
-3. Add validateTransactionDate to the Main Validation Flow
-
-In your main method, after parsing the configuration, call validateTransactionDate and add its output to validationResults. For example:
-
-// Main validation results accumulator
-var validationResults = Seq[String]()
-
-// Call each validation function, including the new date validation
-validationResults = validationResults ++ validateTransactionDate(transactionSource, caseClass, validationConfigMap)
-
-// Other validation function calls go here, e.g., validateNonNullColumns, validateAmountDifferences, etc.
-
-4. Ensure All Required Imports Are Present
-
-The validateTransactionDate function relies on certain Spark SQL functions. Ensure the following imports are present at the top of your file:
-
-import org.apache.spark.sql.{DataFrame, SparkSession}
-import org.apache.spark.sql.functions._
-
-5. Run the Glue Job or Spark Application
-
-Once the above adjustments are made:
-	•	Load the configuration file into validationConfigMap.
-	•	Run the job in your Spark or AWS Glue environment.
-
-Final Code Integration Summary
-
-With these additions, the validateTransactionDate function will be fully integrated into your application. You’ll have:
-	•	A configuration file specifying the source and target date columns.
-	•	An updated parseValidationConfig function to read these columns.
-	•	A call to validateTransactionDate in the main validation flow, accumulating its results.
-
-These steps will ensure your code runs successfully with the new date validation. Let me know if you need any further assistance!
+This integration should now allow the validateUniqueAccountId function to work as part of your overall validation framework. Let me know if further customization is needed!
