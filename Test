@@ -1,76 +1,81 @@
-To integrate this case, which involves deriving a new column aAccountUniqueId based on conditional transformations of ACCOUNT_KEY and COUNTERPARTY_PRODUCT_KEY, you can follow these steps:
+The code you posted appears to be almost identical to the previous example you shared for generating bAccountUniqueId based on the values of COUNTERPARTY_PRODUCT_KEY and ACCOUNT_KEY. However, since you’ve asked to “do the same,” I’ll provide a structured approach just in case there’s a subtle variation in the requirements that may require a new setup or if this is intended as a similar yet distinct validation.
+
+Here’s a structured approach to replicate this validation in your codebase.
 
 1. Add Configuration Support
 
-Add sections to the configuration file for the columns involved in this transformation. This configuration should specify:
-	•	The column used for joining (transaction_id in transactionSource and transactionId in caseClass).
-	•	Columns for conditional transformation (txn_direction_desc, ACCOUNT_KEY, and COUNTERPARTY_PRODUCT_KEY).
-	•	Conditions for each transformation (e.g., “DEBIT” and “CREDIT”).
+If this validation differs from the previous bAccountUniqueId logic (perhaps due to different columns or conditions), specify the unique configurations in a new section. Here’s an example:
 
-Your configuration might look like this:
-
-[unique_account_id_join_columns]
+[unique_b_account_id_2_join_columns]
 transactionSourceId=transaction_id
 caseClassId=transactionId
 
-[unique_account_id_transform]
+[unique_b_account_id_2_transform]
 txnDirectionColumn=txn_direction_desc
-debitColumn=ACCOUNT_KEY
-creditColumn=COUNTERPARTY_PRODUCT_KEY
+debitColumn=COUNTERPARTY_PRODUCT_KEY
+creditColumn=ACCOUNT_KEY
+
+This configuration will:
+	•	Use unique_b_account_id_2_join_columns for join columns (transactionSourceId and caseClassId).
+	•	Use unique_b_account_id_2_transform for transformation columns and conditions, where:
+	•	txnDirectionColumn indicates the transaction direction column.
+	•	debitColumn indicates the column to use if the transaction direction is “DEBIT.”
+	•	creditColumn indicates the column to use otherwise.
 
 2. Add Parsing Logic to parseValidationConfig
 
-Add cases in parseValidationConfig to handle these new sections. Here’s the code to parse the sections:
+Add cases to parseValidationConfig to handle these new sections:
 
-case "unique_account_id_join_columns" =>
+case "unique_b_account_id_2_join_columns" =>
   val Array(sourceId, targetId) = trimmedLine.split(",").map(_.trim)
-  validationConfig += ("uniqueAccountIdSourceId" -> sourceId)
-  validationConfig += ("uniqueAccountIdTargetId" -> targetId)
+  validationConfig += ("uniqueBAccountId2SourceId" -> sourceId)
+  validationConfig += ("uniqueBAccountId2TargetId" -> targetId)
 
-case "unique_account_id_transform" =>
+case "unique_b_account_id_2_transform" =>
   val columns = trimmedLine.split(",").map(_.trim)
   if (columns.length == 3) {
-    validationConfig += ("txnDirectionColumn" -> columns(0))
-    validationConfig += ("debitColumn" -> columns(1))
-    validationConfig += ("creditColumn" -> columns(2))
+    validationConfig += ("txnDirectionColumnForB2" -> columns(0))
+    validationConfig += ("debitColumnForB2" -> columns(1))
+    validationConfig += ("creditColumnForB2" -> columns(2))
   } else {
-    println(s"Warning: Invalid format for unique account ID transform - $trimmedLine")
+    println(s"Warning: Invalid format for unique B account ID transform - $trimmedLine")
   }
 
-This will add the join columns (uniqueAccountIdSourceId and uniqueAccountIdTargetId) and the columns for conditional transformation (txnDirectionColumn, debitColumn, and creditColumn) to validationConfig.
+This parsing logic adds the configuration for:
+	•	Join columns: uniqueBAccountId2SourceId and uniqueBAccountId2TargetId.
+	•	Transformation columns: txnDirectionColumnForB2, debitColumnForB2, and creditColumnForB2.
 
-3. Define the New Validation Function
+3. Define the Validation Function
 
-Now, create a function validateUniqueAccountId that:
+Next, create a function validateBAccountUniqueId2 that:
 	•	Joins transactionSource and caseClass on the specified columns.
-	•	Creates the derived aAccountUniqueId column based on the conditions.
-	•	Uses exceptAll to identify mismatches between the transformed source and the target DataFrame.
-	•	Collects and formats the mismatched transaction IDs for reporting.
+	•	Creates bAccountUniqueId based on conditions in txn_direction_desc.
+	•	Uses exceptAll to find mismatches.
+	•	Collects mismatched transactionIds for reporting.
 
 Here’s the function code:
 
-def validateUniqueAccountId(sourceDF: DataFrame, targetDF: DataFrame, configMap: Map[String, Any]): Seq[String] = {
+def validateBAccountUniqueId2(sourceDF: DataFrame, targetDF: DataFrame, configMap: Map[String, Any]): Seq[String] = {
   import sourceDF.sparkSession.implicits._
 
   // Retrieve column names from the configuration
-  val sourceId = configMap.getOrElse("uniqueAccountIdSourceId", "transaction_id").toString
-  val targetId = configMap.getOrElse("uniqueAccountIdTargetId", "transactionId").toString
-  val txnDirectionColumn = configMap.getOrElse("txnDirectionColumn", "txn_direction_desc").toString
-  val debitColumn = configMap.getOrElse("debitColumn", "ACCOUNT_KEY").toString
-  val creditColumn = configMap.getOrElse("creditColumn", "COUNTERPARTY_PRODUCT_KEY").toString
+  val sourceId = configMap.getOrElse("uniqueBAccountId2SourceId", "transaction_id").toString
+  val targetId = configMap.getOrElse("uniqueBAccountId2TargetId", "transactionId").toString
+  val txnDirectionColumn = configMap.getOrElse("txnDirectionColumnForB2", "txn_direction_desc").toString
+  val debitColumn = configMap.getOrElse("debitColumnForB2", "COUNTERPARTY_PRODUCT_KEY").toString
+  val creditColumn = configMap.getOrElse("creditColumnForB2", "ACCOUNT_KEY").toString
 
   // Perform the join on the specified ID columns
   val data = sourceDF.join(targetDF, sourceDF(sourceId) === targetDF(targetId), "inner")
 
-  // Apply the conditional transformation to create `aAccountUniqueId`
-  val source = data.withColumn("aAccountUniqueId",
+  // Apply the conditional transformation to create `bAccountUniqueId`
+  val source = data.withColumn("bAccountUniqueId",
     when(col(txnDirectionColumn) === "DEBIT", split(col(debitColumn), "-").getItem(1))
-      .when(col(txnDirectionColumn) === "CREDIT", split(col(creditColumn), "-").getItem(1))
-      .otherwise(null)
-  ).select(col(sourceId).as("transactionId"), $"aAccountUniqueId")
+      .otherwise(split(col(creditColumn), "-").getItem(1))
+  ).select(col(sourceId).as("transactionId"), $"bAccountUniqueId")
 
   // Select the target data directly
-  val target = targetDF.select($"transactionId", $"aAccountUniqueId")
+  val target = targetDF.select($"transactionId", $"bAccountUniqueId")
 
   // Find mismatches using exceptAll
   val sourceToTargetDiff = source.exceptAll(target)
@@ -84,45 +89,49 @@ def validateUniqueAccountId(sourceDF: DataFrame, targetDF: DataFrame, configMap:
   val targetToSourceCount = targetToSourceIds.length
 
   Seq(
-    "Unique Account ID Validation Differences:",
+    "B Account Unique ID Validation 2 Differences:",
     s"Source to Target Differences: $sourceToTargetCount found with transaction IDs: " + sourceToTargetIds.mkString(", "),
     s"Target to Source Differences: $targetToSourceCount found with transaction IDs: " + targetToSourceIds.mkString(", ")
   )
 }
 
-Explanation of the Code
+Explanation
 
-	1.	Dynamic Column Names:
-	•	Retrieves the source and target ID columns and transformation columns from configMap.
-	2.	Join Operation:
-	•	Joins transactionSource and caseClass on the specified ID columns.
-	3.	Conditional Transformation:
-	•	Creates aAccountUniqueId based on txnDirectionColumn.
-	•	Splits the value of debitColumn for “DEBIT” or creditColumn for “CREDIT” and extracts the second part.
-	4.	exceptAll Comparison:
-	•	Uses exceptAll to identify mismatches.
-	5.	Formatted Output:
-	•	Collects and counts the mismatched transaction IDs and formats them for reporting.
+	•	Dynamic Column Retrieval: Uses configMap to fetch the join and transformation column names.
+	•	Join Operation: Joins transactionSource and caseClass on the specified ID columns.
+	•	Conditional Transformation:
+	•	If txn_direction_desc is “DEBIT”, bAccountUniqueId is derived from COUNTERPARTY_PRODUCT_KEY.
+	•	Otherwise, bAccountUniqueId is derived from ACCOUNT_KEY.
+	•	Comparison with exceptAll:
+	•	Finds mismatches between source and target.
+	•	Result Formatting:
+	•	Collects the mismatched transaction IDs, counts them, and formats the results for reporting.
 
 4. Add the Validation Function to the Main Flow
 
-In your main function, after parsing the configuration, call validateUniqueAccountId and add its output to validationResults:
+In your main method, after parsing the configuration, call validateBAccountUniqueId2 and add its output to validationResults:
 
-validationResults = validationResults ++ validateUniqueAccountId(transactionSource, caseClass, validationConfigMap)
+validationResults = validationResults ++ validateBAccountUniqueId2(transactionSource, caseClass, validationConfigMap)
 
 Example Configuration File
 
-Here’s an example configuration file with the sections for unique_account_id_join_columns and unique_account_id_transform:
+Here’s how to structure your configuration file with this new validation:
 
-[unique_account_id_join_columns]
+[unique_b_account_id_2_join_columns]
 transactionSourceId=transaction_id
 caseClassId=transactionId
 
-[unique_account_id_transform]
+[unique_b_account_id_2_transform]
 txnDirectionColumn=txn_direction_desc
-debitColumn=ACCOUNT_KEY
-creditColumn=COUNTERPARTY_PRODUCT_KEY
+debitColumn=COUNTERPARTY_PRODUCT_KEY
+creditColumn=ACCOUNT_KEY
 
-This configuration will enable flexible specification of columns for joining and transformation, making it easy to adapt if the column names change.
+Summary
 
-This integration should now allow the validateUniqueAccountId function to work as part of your overall validation framework. Let me know if further customization is needed!
+With this setup, the validateBAccountUniqueId2 function will:
+	•	Join transactionSource and caseClass on the specified ID columns.
+	•	Transform bAccountUniqueId based on txn_direction_desc.
+	•	Identify mismatches using exceptAll.
+	•	Report mismatched transaction IDs.
+
+This makes the validation adaptable to changes in column names or conditions. Let me know if any additional adjustments are needed!
