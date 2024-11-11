@@ -1,82 +1,83 @@
-To implement this validation, which involves determining aAccountType and bAccountType based on the values of aAccountId and bAccountId, we’ll need:
-	1.	A configuration file to specify the list of identifiers for each account type (e.g., “BANK ACCOUNT,” “CREDIT CARD,” “MORTGAGE”).
-	2.	Parsing logic to handle these identifiers.
-	3.	A function to apply the conditional transformation for both aAccountType and bAccountType.
-
-Here’s how we’ll set it up.
+To implement this validation, where aAccountId and bAccountId are transformed into aSortCode and bSortCode based on specific conditions, we’ll follow the same approach as before:
+	1.	Add configuration sections to specify the prefixes and substring rules.
+	2.	Define parsing logic to handle these configurations.
+	3.	Create two validation functions for aSortCode and bSortCode.
 
 Step 1: Add Configuration Support
 
-Add configuration sections for aAccountType and bAccountType transformations. Each section will include the identifiers for each type:
+Add configuration sections for aSortCode and bSortCode transformations. These sections should specify:
+	•	The transaction direction condition (DEBIT for aSortCode, CREDIT for bSortCode).
+	•	Prefixes for the account IDs.
+	•	The substring positions.
 
-[a_account_type_transform]
-bankAccountPrefixes=HK100,HK102,HK103,HK400,HK404,HKG00,KEFIX,KEPRM,MUBRN,MUPRM,OBBRN,SCBRN,SCVSP,SH403,SH404,SHG00,UGFLX,UGVSP,UKUBA,ZACAR,ZACHE,ZACTS,ZALOA,ZAMID,ZAMLO,ZANED,ZASAV,ZATDE,UKGTS
-creditCardPrefixes=UKPRM,UKPSP,UKTPE,UKBNC,UKBNW,UKBPA,UKBPF,UKCAM,UKCML,PTPSP,ITPSP,ESPSP
-mortgagePrefixes=UKTRN
-defaultType=BANK ACCOUNT
+Example configuration:
 
-[b_account_type_transform]
-bankAccountPrefixes=HK100,HK102,HK103,HK400,HK404,HKG00,KEFIX,KEPRM,MUBRN,MUPRM,OBBRN,SCBRN,SCVSP,SH403,SH404,SHG00,UGFLX,UGVSP,UKUBA,ZACAR,ZACHE,ZACTS,ZALOA,ZAMID,ZAMLO,ZANED,ZASAV,ZATDE,UKGTS
-creditCardPrefixes=UKPRM,UKPSP,UKTPE,UKBNC,UKBNW,UKBPA,UKBPF,UKCAM,UKCML,PTPSP,ITPSP,ESPSP
-mortgagePrefixes=UKTRN
-defaultType=BANK ACCOUNT
+[a_sort_code_transform]
+txnDirectionCondition=DEBIT
+prefixes=UKUBA,UKGTS
+substringStart=17
+substringLength=6
 
-This configuration will allow us to:
-	•	Specify prefixes for each account type category.
-	•	Provide a default account type (BANK ACCOUNT) if no other type matches.
+[b_sort_code_transform]
+txnDirectionCondition=CREDIT
+prefixes=UKUBA,UKGTS
+substringStart=17
+substringLength=6
+
+This configuration will:
+	•	Define the conditions for when to apply the substring transformation.
+	•	Specify the prefixes and substring parameters.
 
 Step 2: Add Parsing Logic to parseValidationConfig
 
-Update parseValidationConfig to parse these new sections:
+Add cases in parseValidationConfig to handle a_sort_code_transform and b_sort_code_transform sections:
 
-case "a_account_type_transform" =>
-  val bankAccountPrefixes = configMap("bankAccountPrefixes").split(",").map(_.trim)
-  val creditCardPrefixes = configMap("creditCardPrefixes").split(",").map(_.trim)
-  val mortgagePrefixes = configMap("mortgagePrefixes").split(",").map(_.trim)
-  val defaultType = configMap("defaultType").trim
-  validationConfig += ("aAccountBankPrefixes" -> bankAccountPrefixes)
-  validationConfig += ("aAccountCreditPrefixes" -> creditCardPrefixes)
-  validationConfig += ("aAccountMortgagePrefixes" -> mortgagePrefixes)
-  validationConfig += ("aAccountDefaultType" -> defaultType)
+case "a_sort_code_transform" =>
+  val txnDirectionCondition = configMap("txnDirectionCondition").trim
+  val prefixes = configMap("prefixes").split(",").map(_.trim)
+  val substringStart = configMap("substringStart").toInt
+  val substringLength = configMap("substringLength").toInt
+  validationConfig += ("aSortCodeDirectionCondition" -> txnDirectionCondition)
+  validationConfig += ("aSortCodePrefixes" -> prefixes)
+  validationConfig += ("aSortCodeSubstringStart" -> substringStart)
+  validationConfig += ("aSortCodeSubstringLength" -> substringLength)
 
-case "b_account_type_transform" =>
-  val bankAccountPrefixes = configMap("bankAccountPrefixes").split(",").map(_.trim)
-  val creditCardPrefixes = configMap("creditCardPrefixes").split(",").map(_.trim)
-  val mortgagePrefixes = configMap("mortgagePrefixes").split(",").map(_.trim)
-  val defaultType = configMap("defaultType").trim
-  validationConfig += ("bAccountBankPrefixes" -> bankAccountPrefixes)
-  validationConfig += ("bAccountCreditPrefixes" -> creditCardPrefixes)
-  validationConfig += ("bAccountMortgagePrefixes" -> mortgagePrefixes)
-  validationConfig += ("bAccountDefaultType" -> defaultType)
+case "b_sort_code_transform" =>
+  val txnDirectionCondition = configMap("txnDirectionCondition").trim
+  val prefixes = configMap("prefixes").split(",").map(_.trim)
+  val substringStart = configMap("substringStart").toInt
+  val substringLength = configMap("substringLength").toInt
+  validationConfig += ("bSortCodeDirectionCondition" -> txnDirectionCondition)
+  validationConfig += ("bSortCodePrefixes" -> prefixes)
+  validationConfig += ("bSortCodeSubstringStart" -> substringStart)
+  validationConfig += ("bSortCodeSubstringLength" -> substringLength)
 
-This code will parse:
-	•	aAccountBankPrefixes, aAccountCreditPrefixes, and aAccountMortgagePrefixes for aAccountType.
-	•	bAccountBankPrefixes, bAccountCreditPrefixes, and bAccountMortgagePrefixes for bAccountType.
+This parsing logic stores:
+	•	The direction condition, prefixes, and substring parameters for each transformation.
 
-Step 3: Define the Validation Functions
+Step 3: Define Validation Functions
 
-validateAAccountType
+validateASortCode
 
-This function applies the transformation for aAccountType based on aAccountId:
+This function applies the transformation for aSortCode based on the aAccountId condition:
 
-def validateAAccountType(sourceDF: DataFrame, targetDF: DataFrame, configMap: Map[String, Any]): Seq[String] = {
+def validateASortCode(sourceDF: DataFrame, targetDF: DataFrame, configMap: Map[String, Any]): Seq[String] = {
   import sourceDF.sparkSession.implicits._
 
-  // Retrieve prefixes and default type from config
-  val bankPrefixes = configMap("aAccountBankPrefixes").asInstanceOf[Array[String]]
-  val creditCardPrefixes = configMap("aAccountCreditPrefixes").asInstanceOf[Array[String]]
-  val mortgagePrefixes = configMap("aAccountMortgagePrefixes").asInstanceOf[Array[String]]
-  val defaultType = configMap("aAccountDefaultType").toString
+  // Retrieve settings from config
+  val directionCondition = configMap("aSortCodeDirectionCondition").toString
+  val prefixes = configMap("aSortCodePrefixes").asInstanceOf[Array[String]]
+  val substringStart = configMap("aSortCodeSubstringStart").asInstanceOf[Int]
+  val substringLength = configMap("aSortCodeSubstringLength").asInstanceOf[Int]
 
-  // Define a conditional transformation for `aAccountType`
-  val source = sourceDF.withColumn("aAccountType",
-    when(substring($"aAccountId", 1, 5).isin(bankPrefixes: _*) && $"aAccountId".isNotNull, "BANK ACCOUNT")
-      .when(substring($"aAccountId", 1, 5).isin(creditCardPrefixes: _*) && $"aAccountId".isNotNull, "CREDIT CARD")
-      .when(substring($"aAccountId", 1, 5).isin(mortgagePrefixes: _*) && $"aAccountId".isNotNull, "MORTGAGE")
-      .otherwise(when($"aAccountId".isNotNull, defaultType).otherwise(null))
-  ).select($"transaction_id".as("transactionId"), $"aAccountType")
+  // Apply the conditional transformation for `aSortCode`
+  val source = sourceDF.withColumn("aSortCode",
+    when($"txn_direction_desc" === directionCondition && substring($"aAccountId", 1, 5).isin(prefixes: _*), 
+         substring($"aAccountId", substringStart, substringLength))
+      .otherwise(null)
+  ).select($"transaction_id".as("transactionId"), $"aSortCode")
 
-  val target = targetDF.select($"transactionId", $"aAccountType")
+  val target = targetDF.select($"transactionId", $"aSortCode")
 
   val sourceToTargetDiff = source.exceptAll(target)
   val targetToSourceDiff = target.exceptAll(source)
@@ -85,32 +86,31 @@ def validateAAccountType(sourceDF: DataFrame, targetDF: DataFrame, configMap: Ma
   val targetToSourceIds = targetToSourceDiff.select($"transactionId").as[String].collect()
 
   Seq(
-    "A Account Type Validation Differences:",
+    "A Sort Code Validation Differences:",
     s"Source to Target Differences: ${sourceToTargetIds.length} found with transaction IDs: ${sourceToTargetIds.mkString(", ")}",
     s"Target to Source Differences: ${targetToSourceIds.length} found with transaction IDs: ${targetToSourceIds.mkString(", ")}"
   )
 }
 
-validateBAccountType
+validateBSortCode
 
-Similarly, define a function for bAccountType transformation:
+Similarly, define a function for bSortCode transformation:
 
-def validateBAccountType(sourceDF: DataFrame, targetDF: DataFrame, configMap: Map[String, Any]): Seq[String] = {
+def validateBSortCode(sourceDF: DataFrame, targetDF: DataFrame, configMap: Map[String, Any]): Seq[String] = {
   import sourceDF.sparkSession.implicits._
 
-  val bankPrefixes = configMap("bAccountBankPrefixes").asInstanceOf[Array[String]]
-  val creditCardPrefixes = configMap("bAccountCreditPrefixes").asInstanceOf[Array[String]]
-  val mortgagePrefixes = configMap("bAccountMortgagePrefixes").asInstanceOf[Array[String]]
-  val defaultType = configMap("bAccountDefaultType").toString
+  val directionCondition = configMap("bSortCodeDirectionCondition").toString
+  val prefixes = configMap("bSortCodePrefixes").asInstanceOf[Array[String]]
+  val substringStart = configMap("bSortCodeSubstringStart").asInstanceOf[Int]
+  val substringLength = configMap("bSortCodeSubstringLength").asInstanceOf[Int]
 
-  val source = sourceDF.withColumn("bAccountType",
-    when(substring($"bAccountId", 1, 5).isin(bankPrefixes: _*) && $"bAccountId".isNotNull, "BANK ACCOUNT")
-      .when(substring($"bAccountId", 1, 5).isin(creditCardPrefixes: _*) && $"bAccountId".isNotNull, "CREDIT CARD")
-      .when(substring($"bAccountId", 1, 5).isin(mortgagePrefixes: _*) && $"bAccountId".isNotNull, "MORTGAGE")
-      .otherwise(when($"bAccountId".isNotNull, defaultType).otherwise(null))
-  ).select($"transaction_id".as("transactionId"), $"bAccountType")
+  val source = sourceDF.withColumn("bSortCode",
+    when($"txn_direction_desc" === directionCondition && substring($"bAccountId", 1, 5).isin(prefixes: _*), 
+         substring($"bAccountId", substringStart, substringLength))
+      .otherwise(null)
+  ).select($"transaction_id".as("transactionId"), $"bSortCode")
 
-  val target = targetDF.select($"transactionId", $"bAccountType")
+  val target = targetDF.select($"transactionId", $"bSortCode")
 
   val sourceToTargetDiff = source.exceptAll(target)
   val targetToSourceDiff = target.exceptAll(source)
@@ -119,40 +119,40 @@ def validateBAccountType(sourceDF: DataFrame, targetDF: DataFrame, configMap: Ma
   val targetToSourceIds = targetToSourceDiff.select($"transactionId").as[String].collect()
 
   Seq(
-    "B Account Type Validation Differences:",
+    "B Sort Code Validation Differences:",
     s"Source to Target Differences: ${sourceToTargetIds.length} found with transaction IDs: ${sourceToTargetIds.mkString(", ")}",
     s"Target to Source Differences: ${targetToSourceIds.length} found with transaction IDs: ${targetToSourceIds.mkString(", ")}"
   )
 }
 
-Step 4: Integrate Functions into Main Flow
+Step 4: Integrate the Functions into the Main Flow
 
-In your main method, call each validation function after parsing the configuration:
+In your main method, after parsing the configuration, call each validation function:
 
-validationResults = validationResults ++ validateAAccountType(transactionSource, caseClass, validationConfigMap)
-validationResults = validationResults ++ validateBAccountType(transactionSource, caseClass, validationConfigMap)
+validationResults = validationResults ++ validateASortCode(transactionSource, caseClass, validationConfigMap)
+validationResults = validationResults ++ validateBSortCode(transactionSource, caseClass, validationConfigMap)
 
 Example Configuration File
 
-Here’s the complete configuration with sections for aAccountType and bAccountType:
+Here’s the complete configuration with sections for aSortCode and bSortCode:
 
-[a_account_type_transform]
-bankAccountPrefixes=HK100,HK102,HK103,HK400,HK404,HKG00,KEFIX,KEPRM,MUBRN,MUPRM,OBBRN,SCBRN,SCVSP,SH403,SH404,SHG00,UGFLX,UGVSP,UKUBA,ZACAR,ZACHE,ZACTS,ZALOA,ZAMID,ZAMLO,ZANED,ZASAV,ZATDE,UKGTS
-creditCardPrefixes=UKPRM,UKPSP,UKTPE,UKBNC,UKBNW,UKBPA,UKBPF,UKCAM,UKCML,PTPSP,ITPSP,ESPSP
-mortgagePrefixes=UKTRN
-defaultType=BANK ACCOUNT
+[a_sort_code_transform]
+txnDirectionCondition=DEBIT
+prefixes=UKUBA,UKGTS
+substringStart=17
+substringLength=6
 
-[b_account_type_transform]
-bankAccountPrefixes=HK100,HK102,HK103,HK400,HK404,HKG00,KEFIX,KEPRM,MUBRN,MUPRM,OBBRN,SCBRN,SCVSP,SH403,SH404,SHG00,UGFLX,UGVSP,UKUBA,ZACAR,ZACHE,ZACTS,ZALOA,ZAMID,ZAMLO,ZANED,ZASAV,ZATDE,UKGTS
-creditCardPrefixes=UKPRM,UKPSP,UKTPE,UKBNC,UKBNW,UKBPA,UKBPF,UKCAM,UKCML,PTPSP,ITPSP,ESPSP
-mortgagePrefixes=UKTRN
-defaultType=BANK ACCOUNT
+[b_sort_code_transform]
+txnDirectionCondition=CREDIT
+prefixes=UKUBA,UKGTS
+substringStart=17
+substringLength=6
 
 Summary
 
-With this setup:
-	•	Each function applies the specified transformation logic.
-	•	Mismatches are identified using exceptAll and reported with transaction IDs.
-	•	The configuration allows flexible management of prefixes and default types.
+With these additions:
+	•	validateASortCode and validateBSortCode functions apply substring transformations based on the specified conditions.
+	•	Mismatches between source and target are identified and reported.
+	•	Configuration allows flexibility in defining prefixes, conditions, and substring parameters.
 
-Let me know if you need further customization!
+Let me know if further customization is needed!
