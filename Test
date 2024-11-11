@@ -1,5 +1,109 @@
-[account_number_transform]
-aAccountId, aAccountNumber, UKUBA, UKGTS, 9, 8
+def parseIso3Mapping(configLines: Seq[String]): Map[String, String] = {
+  configLines.flatMap { line =>
+    val trimmedLine = line.trim.stripSuffix(",")  // Remove trailing comma if present
+    if (trimmedLine.nonEmpty) {
+      val Array(code2, code3) = trimmedLine.split(":").map(_.trim)
+      Some(code2 -> code3)
+    } else {
+      None
+    }
+  }.toMap
+}
 
-[second_account_number_transform]
-bAccountId, bAccountNumber, UKUBA, UKGTS, 9, 8
+def parseValidationConfig(configPath: String, sparkSession: SparkSession): Map[String, Any] = {
+  import sparkSession.implicits._
+  var currentSection = ""
+  var validationConfig = Map[String, Any]()
+  var mappingLines = Seq[String]()  // Collect lines for the mapping section
+
+  sparkSession.read.text(configPath).as[String].collect().foreach { line =>
+    val trimmedLine = line.trim
+
+    if (trimmedLine.startsWith("[") && trimmedLine.endsWith("]")) {
+      // Parse mapping if we leave [mapping] section
+      if (currentSection == "mapping" && mappingLines.nonEmpty) {
+        validationConfig += ("iso3Mapping" -> parseIso3Mapping(mappingLines))
+        mappingLines = Seq.empty  // Reset for next section
+      }
+      // Update the current section
+      currentSection = trimmedLine.substring(1, trimmedLine.length - 1)
+    } else if (trimmedLine.nonEmpty) {
+      currentSection match {
+        case "transaction_country_iso3_validation_source" =>
+          validationConfig += ("sourceColumn" -> trimmedLine)
+        
+        case "transaction_country_iso3_validation_target" =>
+          validationConfig += ("targetColumn" -> trimmedLine)
+        
+        case "mapping" =>
+          mappingLines :+= trimmedLine  // Collect each line for the mapping
+
+        case "amount_validation" =>
+          // Parse amount validation source and target columns
+          val columns = trimmedLine.split(",").map(_.trim)
+          if (columns.length == 2) {
+            validationConfig += ("amountValidationSource" -> columns(0))
+            validationConfig += ("amountValidationTarget" -> columns(1))
+          } else {
+            println(s"Warning: Invalid format for amount validation - $trimmedLine")
+          }
+
+        case "non_null_validation" =>
+          // Parse columns for non-null validation
+          val columns = trimmedLine.split(",").map(_.trim)
+          validationConfig += ("nonNullValidationColumns" -> columns.toSeq)
+
+        case "null_validation" =>
+          // Parse columns for null validation
+          val columns = trimmedLine.split(",").map(_.trim)
+          validationConfig += ("nullValidationColumns" -> columns.toSeq)
+
+        case "direct_column_validation_source" =>
+          // Parse source columns for direct column validation
+          val columns = trimmedLine.split(",").map(_.trim)
+          validationConfig += ("directColumnValidationSource" -> columns.toSeq)
+
+        case "direct_column_validation_target" =>
+          // Parse target columns for direct column validation
+          val columns = trimmedLine.split(",").map(_.trim)
+          validationConfig += ("directColumnValidationTarget" -> columns.toSeq)
+
+        case "narrative_validation_source" =>
+          // Parse source column for narrative validation
+          validationConfig += ("narrativeValidationSource" -> trimmedLine)
+
+        case "narrative_validation_target" =>
+          // Parse target column for narrative validation
+          validationConfig += ("narrativeValidationTarget" -> trimmedLine)
+
+        case "account_number_transform" =>
+          // Parse columns for account number transformations
+          val columns = trimmedLine.split(",").map(_.trim)
+          if (columns.length == 6) {
+            validationConfig += ("accountNumberTransform" -> columns)
+          } else {
+            println(s"Warning: Invalid format for account number transform - $trimmedLine")
+          }
+
+        case "second_account_number_transform" =>
+          // Parse columns for secondary account number transformations
+          val columns = trimmedLine.split(",").map(_.trim)
+          if (columns.length == 6) {
+            validationConfig += ("secondAccountNumberTransform" -> columns)
+          } else {
+            println(s"Warning: Invalid format for second account number transform - $trimmedLine")
+          }
+
+        case _ =>
+          println(s"Unknown section or configuration item: [$currentSection] - $trimmedLine")
+      }
+    }
+  }
+
+  // Final check for remaining mapping lines at end of file
+  if (currentSection == "mapping" && mappingLines.nonEmpty) {
+    validationConfig += ("iso3Mapping" -> parseIso3Mapping(mappingLines))
+  }
+
+  validationConfig
+}
