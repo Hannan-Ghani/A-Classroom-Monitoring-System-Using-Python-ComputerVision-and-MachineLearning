@@ -1,62 +1,282 @@
-// Initialize the main validation results accumulator
-var validationResults = Seq[String]()
+To include a count of differences in the output, you can modify each validation function to calculate the count and format the output accordingly. Here’s how you can modify the functions to add the count of differences along with the IDs.
 
-// Sterling Equivalent Validation
-validationResults = validationResults ++ validateSterlingEquivalent(transactionSource, caseClass, validationConfigMap)
+Updated Validation Functions
 
-// Aggregated Transaction Document Type Validation
-validationResults = validationResults ++ validateAggregatedTransactionDocumentType(transactionSource, caseClass, validationConfigMap)
+For each validation type (Null Validation, Direct Column Validation, and Narrative Validation), we’ll:
+	1.	Calculate the count of mismatches.
+	2.	Format the output to include the count and IDs found.
 
-// Aggregated Transaction ID Distinct Validation
-validationResults = validationResults ++ validateAggregatedTransactionIdDistinct(caseClass, validationConfigMap)
+Here’s how to modify each function:
 
-// A Sort Code Validation (Derived from A Account ID)
-validationResults = validationResults ++ validateASortCode(transactionSource, caseClass, validationConfigMap)
+1. validateNullColumns with Count
 
-// B Sort Code Validation (Derived from B Account ID)
-validationResults = validationResults ++ validateBSortCode(transactionSource, caseClass, validationConfigMap)
+def validateNullColumns(df: DataFrame, nullColumns: Seq[String]): Seq[String] = {
+  import df.sparkSession.implicits._
+  val existingNullColumns = filterExistingColumns(df, nullColumns)
+  if (existingNullColumns.nonEmpty) {
+    val nonNullData = df.filter(existingNullColumns.map(col(_).isNotNull).reduce(_ || _))
+    val nonNullTransactionIds = nonNullData.select($"transactionId").as[String].collect()
+    val count = nonNullTransactionIds.length
+    Seq(
+      "Null Validation Differences:",
+      s"Non-null values found for columns expected to be null in $count rows: " + nonNullTransactionIds.mkString(", ")
+    )
+  } else {
+    Seq("Null Validation Differences: No relevant columns found for null validation.")
+  }
+}
 
-// A Account Type Validation
-validationResults = validationResults ++ validateAAccountType(transactionSource, caseClass, validationConfigMap)
+2. validateDirectColumns with Count
 
-// B Account Type Validation
-validationResults = validationResults ++ validateBAccountType(transactionSource, caseClass, validationConfigMap)
+def validateDirectColumns(sourceDF: DataFrame, targetDF: DataFrame, configMap: Map[String, Seq[String]]): Seq[String] = {
+  import sourceDF.sparkSession.implicits._
+  val sourceCols = configMap.getOrElse("direct_column_validation_source", Seq())
+  val targetCols = configMap.getOrElse("direct_column_validation_target", Seq())
 
-// A Customer ID Validation
-validationResults = validationResults ++ validateACustomerId(transactionSource, caseClass, validationConfigMap)
+  val (alignedSourceCols, alignedTargetCols) = filterExistingColumnPairs(sourceCols, targetCols, sourceDF, targetDF)
 
-// B Customer ID Validation
-validationResults = validationResults ++ validateBCustomerId(transactionSource, caseClass, validationConfigMap)
+  if (alignedSourceCols.nonEmpty && alignedTargetCols.nonEmpty) {
+    val sourceData = sourceDF.select(
+      col("TRANSACTION_ID") +: alignedSourceCols.zipWithIndex.map { case (column, i) => col(column).as(s"col_$i") }: _*
+    )
+    val targetData = targetDF.select(
+      col("transactionId") +: alignedTargetCols.zipWithIndex.map { case (column, i) => col(column).as(s"col_$i") }: _*
+    )
 
-// A Account ID Validation
-validationResults = validationResults ++ validateAAccountId(transactionSource, caseClass, validationConfigMap)
+    val sourceToTargetDiff = sourceData.except(targetData)
+    val targetToSourceDiff = targetData.except(sourceData)
 
-// B Account ID Validation
-validationResults = validationResults ++ validateBAccountId(transactionSource, caseClass, validationConfigMap)
+    val sourceToTargetIds = sourceToTargetDiff.select($"TRANSACTION_ID").as[String].collect()
+    val targetToSourceIds = targetToSourceDiff.select($"transactionId").as[String].collect()
 
-// A Branch Unique ID Validation
-validationResults = validationResults ++ validateABranchUniqueId(transactionSource, caseClass, validationConfigMap)
+    val sourceToTargetCount = sourceToTargetIds.length
+    val targetToSourceCount = targetToSourceIds.length
 
-// B Branch Unique ID Validation
-validationResults = validationResults ++ validateBBranchUniqueId(transactionSource, caseClass, validationConfigMap)
+    Seq(
+      "Direct Column Validation Differences:",
+      s"Source to Target Differences: $sourceToTargetCount found " + sourceToTargetIds.mkString(", "),
+      s"Target to Source Differences: $targetToSourceCount found " + targetToSourceIds.mkString(", ")
+    )
+  } else {
+    Seq("Direct Column Validation Differences: No relevant columns found for direct validation.")
+  }
+}
 
-// Transaction Country ISO3 Validation
-validationResults = validationResults ++ validateTransactionCountryISO3(transactionSource, caseClass, validationConfigMap)
+3. validateNarrativeColumns with Count
 
-// Amount Validation
-validationResults = validationResults ++ validateAmount(transactionSource, caseClass, validationConfigMap)
+def validateNarrativeColumns(sourceDF: DataFrame, targetDF: DataFrame, configMap: Map[String, Seq[String]]): Seq[String] = {
+  import sourceDF.sparkSession.implicits._
+  val sourceNarrativeCol = configMap.getOrElse("narrative_validation_source", Seq()).headOption.getOrElse("")
+  val targetNarrativeCol = configMap.getOrElse("narrative_validation_target", Seq()).headOption.getOrElse("")
 
-// Non-null Validation
-validationResults = validationResults ++ validateNonNullColumns(caseClass, validationConfigMap)
+  val cleanedSourceNarrative = sourceDF.withColumn("cleaned_narrative", when(trim(col(sourceNarrativeCol)) === "" || trim(col(sourceNarrativeCol)) === "*", null)
+    .otherwise(col(sourceNarrativeCol))
+  ).select($"TRANSACTION_ID", $"cleaned_narrative")
 
-// Null Validation
-validationResults = validationResults ++ validateNullColumns(caseClass, validationConfigMap)
+  val targetNarrative = targetDF.select($"transactionId", col(targetNarrativeCol).as("cleaned_narrative"))
 
-// Direct Column Validation
-validationResults = validationResults ++ validateDirectColumns(transactionSource, caseClass, validationConfigMap)
+  val narrativeSourceToTargetDiff = cleanedSourceNarrative.except(targetNarrative)
+  val narrativeTargetToSourceDiff = targetNarrative.except(cleanedSourceNarrative)
 
-// Narrative Validation
-validationResults = validationResults ++ validateNarrativeColumns(transactionSource, caseClass, validationConfigMap)
+  val narrativeSourceToTargetIds = narrativeSourceToTargetDiff.select($"TRANSACTION_ID").as[String].collect()
+  val narrativeTargetToSourceIds = narrativeTargetToSourceDiff.select($"transactionId").as[String].collect()
 
-// Print or save all validation results
-validationResults.foreach(println)
+  val sourceToTargetCount = narrativeSourceToTargetIds.length
+  val targetToSourceCount = narrativeTargetToSourceIds.length
+
+  Seq(
+    "Narrative Validation Differences:",
+    s"Source to Target Differences: $sourceToTargetCount found " + narrativeSourceToTargetIds.mkString(", "),
+    s"Target to Source Differences: $targetToSourceCount found " + narrativeTargetToSourceIds.mkString(", ")
+  )
+}
+
+Explanation of Changes
+
+	•	Count Calculation: The .length method is used to count the number of IDs in each difference.
+	•	Formatted Output: Each validation result now includes the count of differences followed by the specific IDs.
+
+Example Output
+
+With these changes, an example output might look like:
+
+Null Validation Differences:
+Non-null values found for columns expected to be null in 2 rows: transaction_id_111, transaction_id_112
+
+Direct Column Validation Differences:
+Source to Target Differences: 4 found transaction_id_111, transaction_id_112, transaction_id_113, transaction_id_114
+Target to Source Differences: 3 found transaction_id_115, transaction_id_116, transaction_id_117
+
+Narrative Validation Differences:
+Source to Target Differences: 1 found transaction_id_118
+Target to Source Differences: 2 found transaction_id_119, transaction_id_120
+
+This updated code will generate the count along with the IDs for each type of difference found. Let me know if this meets your requirements or if any additional adjustments are needed!
+
+
+
+
+import com.amazonaws.services.glue.GlueContext
+import com.amazonaws.services.glue.util.Job
+import org.apache.spark.SparkContext
+import org.apache.spark.sql.{DataFrame, SparkSession, Row}
+import org.apache.spark.sql.functions._
+import org.apache.log4j.Logger
+import com.amazonaws.services.glue.util.GlueArgParser
+
+object CleanseCaseClass {
+
+  def main(sysArgs: Array[String]): Unit = {
+    val sparkSession: SparkSession = SparkSession.builder.getOrCreate()
+    val glueContext: GlueContext = new GlueContext(sparkSession.sparkContext)
+    import sparkSession.implicits._
+
+    val logger: Logger = Logger.getLogger("CleanseCaseClassLogger")
+
+    // Get Glue job parameters
+    val args = GlueArgParser.getResolvedOptions(sysArgs, Seq("s3PathConfig", "s3ValidationConfig").toArray)
+    val s3PathConfig = args("s3PathConfig")
+    val s3ValidationConfig = args("s3ValidationConfig")
+
+    // Read configuration files
+    val pathConfigMap = parseConfigFile(s3PathConfig, sparkSession)
+    val validationConfigMap = parseValidationConfig(s3ValidationConfig, sparkSession)
+
+    // Extract paths
+    val inputSourcePath = pathConfigMap("inputSourcePath")
+    val inputTargetPath = pathConfigMap("inputTargetPath")
+    val outputBasePath = pathConfigMap("outputBasePath")
+
+    // Load data
+    val transactionSource: DataFrame = sparkSession.read.parquet(inputSourcePath)
+    val caseClass: DataFrame = sparkSession.read.parquet(inputTargetPath)
+
+    // Initialize validation results
+    var validationResults = Seq[String]()
+
+    // Null Validation
+    validationResults = validationResults ++ validateNullColumns(caseClass, validationConfigMap.getOrElse("null_validation", Seq()))
+
+    // Direct Column Validation
+    validationResults = validationResults ++ validateDirectColumns(transactionSource, caseClass, validationConfigMap)
+
+    // Narrative Validation
+    validationResults = validationResults ++ validateNarrativeColumns(transactionSource, caseClass, validationConfigMap)
+
+    // Convert results to DataFrame and write to S3
+    val resultsDF = validationResults.toDF("validation_result")
+    resultsDF.write.mode("overwrite").text(s"$outputBasePath/validation_differences.txt")
+
+    Job.commit()
+  }
+
+  def parseConfigFile(configPath: String, sparkSession: SparkSession): Map[String, String] = {
+    import sparkSession.implicits._
+    sparkSession.read.text(configPath).as[String].collect().flatMap { line =>
+      val parts = line.split("=")
+      if (parts.length == 2) {
+        Some(parts(0).trim -> parts(1).trim)
+      } else {
+        println(s"Warning: Invalid config line - $line")
+        None
+      }
+    }.toMap
+  }
+
+  def parseValidationConfig(configPath: String, sparkSession: SparkSession): Map[String, Seq[String]] = {
+    import sparkSession.implicits._
+    var currentSection = ""
+    var validationConfig = Map[String, Seq[String]]()
+
+    sparkSession.read.text(configPath).as[String].collect().foreach { line =>
+      val trimmedLine = line.trim
+      if (trimmedLine.startsWith("[") && trimmedLine.endsWith("]")) {
+        currentSection = trimmedLine.substring(1, trimmedLine.length - 1)
+        validationConfig += (currentSection -> Seq())
+      } else if (trimmedLine.nonEmpty && currentSection.nonEmpty) {
+        val columns = trimmedLine.split(",").map(_.trim).toSeq
+        validationConfig += (currentSection -> columns)
+      }
+    }
+    validationConfig
+  }
+
+  def validateNullColumns(df: DataFrame, nullColumns: Seq[String]): Seq[String] = {
+    import df.sparkSession.implicits._
+    val existingNullColumns = filterExistingColumns(df, nullColumns)
+    if (existingNullColumns.nonEmpty) {
+      val nonNullData = df.filter(existingNullColumns.map(col(_).isNotNull).reduce(_ || _))
+      val nonNullTransactionIds = nonNullData.select($"transactionId").as[String].collect()
+      Seq("Null Validation Differences:", "Non-null values found for columns expected to be null in rows: " + nonNullTransactionIds.mkString(", "))
+    } else {
+      Seq("Null Validation Differences: No relevant columns found for null validation.")
+    }
+  }
+
+  def validateDirectColumns(sourceDF: DataFrame, targetDF: DataFrame, configMap: Map[String, Seq[String]]): Seq[String] = {
+    import sourceDF.sparkSession.implicits._
+    val sourceCols = configMap.getOrElse("direct_column_validation_source", Seq())
+    val targetCols = configMap.getOrElse("direct_column_validation_target", Seq())
+
+    val (alignedSourceCols, alignedTargetCols) = filterExistingColumnPairs(sourceCols, targetCols, sourceDF, targetDF)
+
+    if (alignedSourceCols.nonEmpty && alignedTargetCols.nonEmpty) {
+      val sourceData = sourceDF.select(
+        col("TRANSACTION_ID") +: alignedSourceCols.zipWithIndex.map { case (column, i) => col(column).as(s"col_$i") }: _*
+      )
+      val targetData = targetDF.select(
+        col("transactionId") +: alignedTargetCols.zipWithIndex.map { case (column, i) => col(column).as(s"col_$i") }: _*
+      )
+
+      val sourceToTargetDiff = sourceData.except(targetData)
+      val targetToSourceDiff = targetData.except(sourceData)
+
+      val sourceToTargetIds = sourceToTargetDiff.select($"TRANSACTION_ID").as[String].collect()
+      val targetToSourceIds = targetToSourceDiff.select($"transactionId").as[String].collect()
+
+      Seq(
+        "Direct Column Validation Differences:",
+        "Source to Target Differences: " + sourceToTargetIds.mkString(", "),
+        "Target to Source Differences: " + targetToSourceIds.mkString(", ")
+      )
+    } else {
+      Seq("Direct Column Validation Differences: No relevant columns found for direct validation.")
+    }
+  }
+
+  def validateNarrativeColumns(sourceDF: DataFrame, targetDF: DataFrame, configMap: Map[String, Seq[String]]): Seq[String] = {
+    import sourceDF.sparkSession.implicits._
+    val sourceNarrativeCol = configMap.getOrElse("narrative_validation_source", Seq()).headOption.getOrElse("")
+    val targetNarrativeCol = configMap.getOrElse("narrative_validation_target", Seq()).headOption.getOrElse("")
+
+    val cleanedSourceNarrative = sourceDF.withColumn("cleaned_narrative", when(trim(col(sourceNarrativeCol)) === "" || trim(col(sourceNarrativeCol)) === "*", null)
+      .otherwise(col(sourceNarrativeCol))
+    ).select($"TRANSACTION_ID", $"cleaned_narrative")
+
+    val targetNarrative = targetDF.select($"transactionId", col(targetNarrativeCol).as("cleaned_narrative"))
+
+    val narrativeSourceToTargetDiff = cleanedSourceNarrative.except(targetNarrative)
+    val narrativeTargetToSourceDiff = targetNarrative.except(cleanedSourceNarrative)
+
+    val narrativeSourceToTargetIds = narrativeSourceToTargetDiff.select($"TRANSACTION_ID").as[String].collect()
+    val narrativeTargetToSourceIds = narrativeTargetToSourceDiff.select($"transactionId").as[String].collect()
+
+    Seq(
+      "Narrative Validation Differences:",
+      "Source to Target Differences: " + narrativeSourceToTargetIds.mkString(", "),
+      "Target to Source Differences: " + narrativeTargetToSourceIds.mkString(", ")
+    )
+  }
+
+  def filterExistingColumns(df: DataFrame, columns: Seq[String]): Seq[String] = {
+    columns.filter(df.columns.contains)
+  }
+
+  def filterExistingColumnPairs(sourceColumns: Seq[String], targetColumns: Seq[String], sourceDF: DataFrame, targetDF: DataFrame): (Seq[String], Seq[String]) = {
+    val sourceExists = sourceColumns.filter(sourceDF.columns.contains)
+    val targetExists = targetColumns.filter(targetDF.columns.contains)
+    (sourceExists, targetExists)
+  }
+}
+
+
