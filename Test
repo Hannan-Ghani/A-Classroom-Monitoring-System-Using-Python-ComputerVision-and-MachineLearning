@@ -1,153 +1,62 @@
-Certainly! Here’s a breakdown of the three distinct validations, each with its own configuration, parsing logic, and validation function.
+// Initialize the main validation results accumulator
+var validationResults = Seq[String]()
 
-1. Sterling Equivalent Validation
-
-This validation checks for differences between sterling_equivalent in transactionSource and amountGbp in caseClass.
-
-Configuration
-
-[sterling_equivalent_validation]
-sourceColumn=sterling_equivalent
-targetColumn=amountGbp
-
-Parsing Logic
-
-Add this case to parseValidationConfig:
-
-case "sterling_equivalent_validation" =>
-  validationConfig += ("sterlingEquivalentSourceColumn" -> configMap("sourceColumn").trim)
-  validationConfig += ("sterlingEquivalentTargetColumn" -> configMap("targetColumn").trim)
-
-Validation Function: validateSterlingEquivalent
-
-def validateSterlingEquivalent(sourceDF: DataFrame, targetDF: DataFrame, configMap: Map[String, Any]): Seq[String] = {
-  import sourceDF.sparkSession.implicits._
-
-  val sourceColumn = configMap("sterlingEquivalentSourceColumn").toString
-  val targetColumn = configMap("sterlingEquivalentTargetColumn").toString
-
-  val source = sourceDF.select($"transaction_id".as("transactionId"), col(sourceColumn).as("sterlingEquivalent"))
-  val target = targetDF.select($"transactionId", col(targetColumn).as("sterlingEquivalent"))
-
-  val sourceToTargetDiff = source.exceptAll(target)
-  val targetToSourceDiff = target.exceptAll(source)
-
-  val sourceToTargetIds = sourceToTargetDiff.select($"transactionId").as[String].collect()
-  val targetToSourceIds = targetToSourceDiff.select($"transactionId").as[String].collect()
-
-  Seq(
-    "Sterling Equivalent Validation Differences:",
-    s"Source to Target Differences: ${sourceToTargetIds.length} found with transaction IDs: ${sourceToTargetIds.mkString(", ")}",
-    s"Target to Source Differences: ${targetToSourceIds.length} found with transaction IDs: ${targetToSourceIds.mkString(", ")}"
-  )
-}
-
-2. Aggregated Transaction Document Type Validation
-
-This validation sets aggregatedTransactionDocumentType to “transaction” if aggregatedTransactionId is not null and compares the transformed data with caseClass.
-
-Configuration
-
-[aggregated_transaction_document_type_validation]
-sourceColumn=aggregatedTransactionId
-documentTypeColumn=aggregatedTransactionDocumentType
-documentTypeValue=transaction
-
-Parsing Logic
-
-Add this case to parseValidationConfig:
-
-case "aggregated_transaction_document_type_validation" =>
-  validationConfig += ("aggregatedTransactionSourceColumn" -> configMap("sourceColumn").trim)
-  validationConfig += ("aggregatedTransactionDocumentTypeColumn" -> configMap("documentTypeColumn").trim)
-  validationConfig += ("aggregatedTransactionDocumentTypeValue" -> configMap("documentTypeValue").trim)
-
-Validation Function: validateAggregatedTransactionDocumentType
-
-def validateAggregatedTransactionDocumentType(sourceDF: DataFrame, targetDF: DataFrame, configMap: Map[String, Any]): Seq[String] = {
-  import sourceDF.sparkSession.implicits._
-
-  val sourceColumn = configMap("aggregatedTransactionSourceColumn").toString
-  val documentTypeColumn = configMap("aggregatedTransactionDocumentTypeColumn").toString
-  val documentTypeValue = configMap("aggregatedTransactionDocumentTypeValue").toString
-
-  val source = sourceDF.withColumn(documentTypeColumn,
-    when(col(sourceColumn).isNotNull, documentTypeValue).otherwise(null)
-  ).select($"transaction_id".as("transactionId"), col(documentTypeColumn))
-
-  val target = targetDF.select($"transactionId", col(documentTypeColumn))
-
-  val sourceToTargetDiff = source.exceptAll(target)
-  val targetToSourceDiff = target.exceptAll(source)
-
-  val sourceToTargetIds = sourceToTargetDiff.select($"transactionId").as[String].collect()
-  val targetToSourceIds = targetToSourceDiff.select($"transactionId").as[String].collect()
-
-  Seq(
-    "Aggregated Transaction Document Type Validation Differences:",
-    s"Source to Target Differences: ${sourceToTargetIds.length} found with transaction IDs: ${sourceToTargetIds.mkString(", ")}",
-    s"Target to Source Differences: ${targetToSourceIds.length} found with transaction IDs: ${targetToSourceIds.mkString(", ")}"
-  )
-}
-
-3. Aggregated Transaction ID Distinct Validation
-
-This validation checks for distinct values of aggregatedTransactionId in caseClass.
-
-Configuration
-
-[aggregated_transaction_id_validation]
-column=aggregatedTransactionId
-
-Parsing Logic
-
-Add this case to parseValidationConfig:
-
-case "aggregated_transaction_id_validation" =>
-  validationConfig += ("aggregatedTransactionIdColumn" -> configMap("column").trim)
-
-Validation Function: validateAggregatedTransactionIdDistinct
-
-def validateAggregatedTransactionIdDistinct(targetDF: DataFrame, configMap: Map[String, Any]): Seq[String] = {
-  val aggregatedTransactionIdColumn = configMap("aggregatedTransactionIdColumn").toString
-
-  val distinctIds = targetDF.select(aggregatedTransactionIdColumn).distinct().collect().map(_.getString(0))
-
-  Seq(
-    s"Distinct Aggregated Transaction IDs in $aggregatedTransactionIdColumn:",
-    distinctIds.mkString(", ")
-  )
-}
-
-Step 4: Integrate All Functions into the Main Flow
-
-In your main method, after parsing the configuration, call each validation function:
-
+// Sterling Equivalent Validation
 validationResults = validationResults ++ validateSterlingEquivalent(transactionSource, caseClass, validationConfigMap)
+
+// Aggregated Transaction Document Type Validation
 validationResults = validationResults ++ validateAggregatedTransactionDocumentType(transactionSource, caseClass, validationConfigMap)
+
+// Aggregated Transaction ID Distinct Validation
 validationResults = validationResults ++ validateAggregatedTransactionIdDistinct(caseClass, validationConfigMap)
 
-Complete Example Configuration File
+// A Sort Code Validation (Derived from A Account ID)
+validationResults = validationResults ++ validateASortCode(transactionSource, caseClass, validationConfigMap)
 
-Here’s how your configuration file might look with all sections:
+// B Sort Code Validation (Derived from B Account ID)
+validationResults = validationResults ++ validateBSortCode(transactionSource, caseClass, validationConfigMap)
 
-[sterling_equivalent_validation]
-sourceColumn=sterling_equivalent
-targetColumn=amountGbp
+// A Account Type Validation
+validationResults = validationResults ++ validateAAccountType(transactionSource, caseClass, validationConfigMap)
 
-[aggregated_transaction_document_type_validation]
-sourceColumn=aggregatedTransactionId
-documentTypeColumn=aggregatedTransactionDocumentType
-documentTypeValue=transaction
+// B Account Type Validation
+validationResults = validationResults ++ validateBAccountType(transactionSource, caseClass, validationConfigMap)
 
-[aggregated_transaction_id_validation]
-column=aggregatedTransactionId
+// A Customer ID Validation
+validationResults = validationResults ++ validateACustomerId(transactionSource, caseClass, validationConfigMap)
 
-Summary
+// B Customer ID Validation
+validationResults = validationResults ++ validateBCustomerId(transactionSource, caseClass, validationConfigMap)
 
-With this setup:
-	•	validateSterlingEquivalent compares sterling_equivalent with amountGbp.
-	•	validateAggregatedTransactionDocumentType checks if aggregatedTransactionId is not null and assigns “transaction” to aggregatedTransactionDocumentType.
-	•	validateAggregatedTransactionIdDistinct checks for distinct aggregatedTransactionId values in caseClass.
+// A Account ID Validation
+validationResults = validationResults ++ validateAAccountId(transactionSource, caseClass, validationConfigMap)
 
-Each validation is now clearly separated and integrated into the main validation flow. Let me know if you need further customization!
+// B Account ID Validation
+validationResults = validationResults ++ validateBAccountId(transactionSource, caseClass, validationConfigMap)
+
+// A Branch Unique ID Validation
+validationResults = validationResults ++ validateABranchUniqueId(transactionSource, caseClass, validationConfigMap)
+
+// B Branch Unique ID Validation
+validationResults = validationResults ++ validateBBranchUniqueId(transactionSource, caseClass, validationConfigMap)
+
+// Transaction Country ISO3 Validation
+validationResults = validationResults ++ validateTransactionCountryISO3(transactionSource, caseClass, validationConfigMap)
+
+// Amount Validation
+validationResults = validationResults ++ validateAmount(transactionSource, caseClass, validationConfigMap)
+
+// Non-null Validation
+validationResults = validationResults ++ validateNonNullColumns(caseClass, validationConfigMap)
+
+// Null Validation
+validationResults = validationResults ++ validateNullColumns(caseClass, validationConfigMap)
+
+// Direct Column Validation
+validationResults = validationResults ++ validateDirectColumns(transactionSource, caseClass, validationConfigMap)
+
+// Narrative Validation
+validationResults = validationResults ++ validateNarrativeColumns(transactionSource, caseClass, validationConfigMap)
+
+// Print or save all validation results
+validationResults.foreach(println)
