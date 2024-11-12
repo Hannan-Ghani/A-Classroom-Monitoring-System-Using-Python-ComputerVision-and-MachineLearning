@@ -1,1 +1,38 @@
-validationResults = validationResults ++ validateNullColumns(caseClass, validationConfigMap.getOrElse("null_validation", Seq.empty[String]).asInstanceOf[Seq[String]])
+The TypeMismatch error here occurs because validateDirectColumns expects configMap to be of type Map[String, Seq[String]], but validationConfigMap is a Map[String, Any]. This happens because parseValidationConfig stores different types of values (like Seq[String], String, etc.) as Any, making validationConfigMap a Map[String, Any].
+
+To resolve this, we need to:
+	1.	Extract and cast specific entries from validationConfigMap to the expected type (Map[String, Seq[String]]).
+	2.	Create a new Map[String, Seq[String]] to pass to validateDirectColumns.
+
+Solution: Create a Filtered Map[String, Seq[String]] for validateDirectColumns
+
+Here’s how to handle it for validateDirectColumns:
+	1.	Extract only the relevant entries for direct_column_validation_source and direct_column_validation_target from validationConfigMap.
+	2.	Cast each to Seq[String] and store it in a new map of type Map[String, Seq[String]].
+	3.	Pass this new map to validateDirectColumns.
+
+Code Implementation
+
+// Create a filtered map for validateDirectColumns with only the entries it needs
+val directColumnsConfig: Map[String, Seq[String]] = Map(
+  "direct_column_validation_source" -> validationConfigMap.getOrElse("direct_column_validation_source", Seq.empty[String]).asInstanceOf[Seq[String]],
+  "direct_column_validation_target" -> validationConfigMap.getOrElse("direct_column_validation_target", Seq.empty[String]).asInstanceOf[Seq[String]]
+)
+
+// Now call validateDirectColumns with the filtered map
+validationResults = validationResults ++ validateDirectColumns(transactionSource, caseClass, directColumnsConfig)
+
+Explanation
+
+	•	Extract Entries: We use getOrElse to fetch direct_column_validation_source and direct_column_validation_target from validationConfigMap. If they don’t exist, we provide an empty Seq[String] as a default.
+	•	Type Casting: We cast each entry to Seq[String] using .asInstanceOf[Seq[String]], ensuring that directColumnsConfig is correctly typed as Map[String, Seq[String]].
+	•	Pass to Function: We pass directColumnsConfig to validateDirectColumns, matching its expected parameter type.
+
+Applying This to Other Validation Functions
+
+If other validation functions require similar specific mappings (e.g., Map[String, Seq[String]]), apply this same approach:
+	1.	Extract the necessary keys.
+	2.	Cast each value to the appropriate type.
+	3.	Create a new map and pass it to the function.
+
+Let me know if this resolves the issue or if you encounter additional type mismatches!
