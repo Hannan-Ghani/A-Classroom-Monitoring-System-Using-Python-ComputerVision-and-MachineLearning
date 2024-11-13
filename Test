@@ -9,7 +9,12 @@ def validateNonNullColumns(df: DataFrame, columns: Seq[String]): Seq[String] = {
         .filter(col(column).isNotNull) // Filter where target column is not null
       
       // Collect transaction IDs and corresponding non-null values
-      val nonNullRecords = nonNullData.collect().map(row => (row.getString(0), row.getString(1)))
+      val nonNullRecords = nonNullData.collect().map { row =>
+        val transactionId = row.getString(0)
+        val columnValue = row.getAsgetAs to be more flexible with types
+        (transactionId, columnValue)
+      }
+      
       val transactionIds = nonNullRecords.map(_._1).mkString(", ")
       
       if (nonNullRecords.nonEmpty) {
