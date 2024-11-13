@@ -1,52 +1,135 @@
-The TypeMismatch error here is because validateTransformedAccountNumbers expects configMap to be of type Map[String, Seq[String]], but validationConfigMap is actually of type Map[String, Any]. This mismatch happens when getOrElse returns Any instead of Seq[String], similar to the issue we addressed before.
+# Sterling Equivalent Validation
+[sterling_equivalent_validation]
+sourceColumn=sterling_equivalent
+targetColumn=amountGbp
 
-Solution: Filter and Cast Configuration for validateTransformedAccountNumbers
+# Aggregated Transaction Document Type Validation
+[aggregated_transaction_document_type_validation]
+sourceColumn=aggregatedTransactionId
+documentTypeColumn=aggregatedTransactionDocumentType
+documentTypeValue=transaction
 
-To fix this, we need to:
-	1.	Extract the specific configuration key from validationConfigMap.
-	2.	Ensure it is cast to Seq[String] before passing it to validateTransformedAccountNumbers.
+# Aggregated Transaction ID Distinct Validation
+[aggregated_transaction_id_validation]
+column=aggregatedTransactionId
 
-Here’s how you can do it:
-	1.	Extract and Cast Configuration: Before calling validateTransformedAccountNumbers, retrieve the specific key from validationConfigMap, cast it to Seq[String], and pass it as the second argument.
-	2.	Handle Each Key Separately: Since you’re calling validateTransformedAccountNumbers with different keys, apply this approach for each key separately.
+# A Sort Code Validation (Derived from A Account ID)
+[a_sort_code_transform]
+txnDirectionCondition=DEBIT
+prefixes=UKUBA,UKGTS
+substringStart=17
+substringLength=6
 
-Revised Code Example
+# B Sort Code Validation (Derived from B Account ID)
+[b_sort_code_transform]
+txnDirectionCondition=CREDIT
+prefixes=UKUBA,UKGTS
+substringStart=17
+substringLength=6
 
-Here’s how you can modify the code:
+# A Account Type Transformation
+[a_account_type_transform]
+bankAccountPrefixes=HK100,HK102,HK103,HK400,HK404,HKG00,KEFIX,KEPRM,MUBRN,MUPRM,OBBRN,SCBRN,SCVSP,SH403,SH404,SHG00,UGFLX,UGVSP,UKUBA,ZACAR,ZACHE,ZACTS,ZALOA,ZAMID,ZAMLO,ZANED,ZASAV,ZATDE,UKGTS
+creditCardPrefixes=UKPRM,UKPSP,UKTPE,UKBNC,UKBNW,UKBPA,UKBPF,UKCAM,UKCML,PTPSP,ITPSP,ESPSP
+mortgagePrefixes=UKTRN
+defaultType=BANK ACCOUNT
 
-// Extract and cast the configuration for each validation call
-val firstAccountConfig = validationConfigMap.getOrElse("account number transform", Seq.empty[String]).asInstanceOf[Seq[String]]
-val secondAccountConfig = validationConfigMap.getOrElse("second account number transform", Seq.empty[String]).asInstanceOf[Seq[String]]
+# B Account Type Transformation
+[b_account_type_transform]
+bankAccountPrefixes=HK100,HK102,HK103,HK400,HK404,HKG00,KEFIX,KEPRM,MUBRN,MUPRM,OBBRN,SCBRN,SCVSP,SH403,SH404,SHG00,UGFLX,UGVSP,UKUBA,ZACAR,ZACHE,ZACTS,ZALOA,ZAMID,ZAMLO,ZANED,ZASAV,ZATDE,UKGTS
+creditCardPrefixes=UKPRM,UKPSP,UKTPE,UKBNC,UKBNW,UKBPA,UKBPF,UKCAM,UKCML,PTPSP,ITPSP,ESPSP
+mortgagePrefixes=UKTRN
+defaultType=BANK ACCOUNT
 
-// Call validateTransformedAccountNumbers with the extracted configurations
-validationResults = validationResults ++ validateTransformedAccountNumbers(caseClass, Map("account number transform" -> firstAccountConfig), "account number transform")
-validationResults = validationResults ++ validateTransformedAccountNumbers(caseClass, Map("second account number transform" -> secondAccountConfig), "second account number transform")
+# A Customer ID Transformation
+[a_customer_id_transform]
+txnDirectionColumn=txn_direction_desc
+debitColumn=CUSTOMER_KEY
+creditColumn=COUNTERPARTY_CUSTOMER_KEY
 
-Explanation
+# B Customer ID Transformation
+[b_customer_id_transform]
+txnDirectionColumn=txn_direction_desc
+debitColumn=COUNTERPARTY_CUSTOMER_KEY
+creditColumn=CUSTOMER_KEY
 
-	•	Extract and Cast: We retrieve account number transform and second account number transform configurations from validationConfigMap. If these keys are missing, we provide an empty Seq[String].
-	•	Convert Each Key to Map[String, Seq[String]]: Since validateTransformedAccountNumbers expects a Map[String, Seq[String]], we wrap each configuration in its own Map.
-	•	Pass Correctly Typed Configuration: Each call to validateTransformedAccountNumbers now receives a correctly typed configuration map with only the specific key it needs.
+# A Account ID Transformation
+[a_account_id_transform]
+txnDirectionColumn=txn_direction_desc
+debitColumn=ACCOUNT_ID
+creditColumn=COUNTERPARTY_ID
 
-Updated validateTransformedAccountNumbers Function Call
+# B Account ID Transformation
+[b_account_id_transform]
+txnDirectionColumn=txn_direction_desc
+debitColumn=COUNTERPARTY_ID
+creditColumn=ACCOUNT_ID
 
-Now, each call to validateTransformedAccountNumbers should look like this:
+# A Branch Unique ID Transformation
+[a_branch_unique_id_transform]
+txnDirectionColumn=txn_direction_desc
+debitColumn=BRANCH_KEY
 
-validationResults = validationResults ++ validateTransformedAccountNumbers(caseClass, Map("account number transform" -> firstAccountConfig), "account number transform")
-validationResults = validationResults ++ validateTransformedAccountNumbers(caseClass, Map("second account number transform" -> secondAccountConfig), "second account number transform")
+# B Branch Unique ID Transformation
+[b_branch_unique_id_transform]
+txnDirectionColumn=txn_direction_desc
+debitColumn=COUNTERPARTY_BRANCH_KEY
 
-This approach ensures that validateTransformedAccountNumbers receives the correct type (Map[String, Seq[String]]), resolving the TypeMismatch error.
+# Transaction Country ISO3 Validation
+[transaction_country_iso3_validation_source]
+TRANSACTION_COUNTRY_ISO_CODE
 
-Additional Note
+[transaction_country_iso3_validation_target]
+transactionCountryIso3
 
-If you have many such keys, consider creating a helper function that does this extraction and casting for you to avoid repetition:
+[mapping]
+AD:AND,
+AE:ARE,
+AF:AFG,
+...
 
-def getConfigAsSeq(configMap: Map[String, Any], key: String): Seq[String] = {
-  configMap.getOrElse(key, Seq.empty[String]).asInstanceOf[Seq[String]]
-}
+# Amount Validation
+[amount_validation]
+ORIGINAL_AMOUNT, amountLocal
 
-// Use the helper function
-validationResults = validationResults ++ validateTransformedAccountNumbers(caseClass, Map("account number transform" -> getConfigAsSeq(validationConfigMap, "account number transform")), "account number transform")
-validationResults = validationResults ++ validateTransformedAccountNumbers(caseClass, Map("second account number transform" -> getConfigAsSeq(validationConfigMap, "second account number transform")), "second account number transform")
+# Non-null Validation Columns
+[non_null_validation]
+aAccountNumberCleansed, anotherColumn
 
-Let me know if this resolves the issue or if you encounter further challenges!
+# Null Validation Columns
+[null_validation]
+bAccountNumber, yetAnotherColumn
+
+# Direct Column Validation Source
+[direct_column_validation_source]
+source_col1, source_col2, source_col3
+
+# Direct Column Validation Target
+[direct_column_validation_target]
+target_col1, target_col2, target_col3
+
+# Narrative Validation Source
+[narrative_validation_source]
+narrative_col_source
+
+# Narrative Validation Target
+[narrative_validation_target]
+narrative_col_target
+
+# Transformed Account Number Validation - First Transformation
+[account number transform]
+sourceColumn=aAccountId
+targetColumn=aAccountNumber
+condition1=UKUBA
+condition2=UKGTS
+position1=9
+position2=8
+
+# Transformed Account Number Validation - Second Transformation
+[second account number transform]
+sourceColumn=bAccountId
+targetColumn=bAccountNumber
+condition1=UKUBA
+condition2=UKGTS
+position1=9
+position2=8
