@@ -1,38 +1,52 @@
-The TypeMismatch error here occurs because validateDirectColumns expects configMap to be of type Map[String, Seq[String]], but validationConfigMap is a Map[String, Any]. This happens because parseValidationConfig stores different types of values (like Seq[String], String, etc.) as Any, making validationConfigMap a Map[String, Any].
+The TypeMismatch error here is because validateTransformedAccountNumbers expects configMap to be of type Map[String, Seq[String]], but validationConfigMap is actually of type Map[String, Any]. This mismatch happens when getOrElse returns Any instead of Seq[String], similar to the issue we addressed before.
 
-To resolve this, we need to:
-	1.	Extract and cast specific entries from validationConfigMap to the expected type (Map[String, Seq[String]]).
-	2.	Create a new Map[String, Seq[String]] to pass to validateDirectColumns.
+Solution: Filter and Cast Configuration for validateTransformedAccountNumbers
 
-Solution: Create a Filtered Map[String, Seq[String]] for validateDirectColumns
+To fix this, we need to:
+	1.	Extract the specific configuration key from validationConfigMap.
+	2.	Ensure it is cast to Seq[String] before passing it to validateTransformedAccountNumbers.
 
-Here’s how to handle it for validateDirectColumns:
-	1.	Extract only the relevant entries for direct_column_validation_source and direct_column_validation_target from validationConfigMap.
-	2.	Cast each to Seq[String] and store it in a new map of type Map[String, Seq[String]].
-	3.	Pass this new map to validateDirectColumns.
+Here’s how you can do it:
+	1.	Extract and Cast Configuration: Before calling validateTransformedAccountNumbers, retrieve the specific key from validationConfigMap, cast it to Seq[String], and pass it as the second argument.
+	2.	Handle Each Key Separately: Since you’re calling validateTransformedAccountNumbers with different keys, apply this approach for each key separately.
 
-Code Implementation
+Revised Code Example
 
-// Create a filtered map for validateDirectColumns with only the entries it needs
-val directColumnsConfig: Map[String, Seq[String]] = Map(
-  "direct_column_validation_source" -> validationConfigMap.getOrElse("direct_column_validation_source", Seq.empty[String]).asInstanceOf[Seq[String]],
-  "direct_column_validation_target" -> validationConfigMap.getOrElse("direct_column_validation_target", Seq.empty[String]).asInstanceOf[Seq[String]]
-)
+Here’s how you can modify the code:
 
-// Now call validateDirectColumns with the filtered map
-validationResults = validationResults ++ validateDirectColumns(transactionSource, caseClass, directColumnsConfig)
+// Extract and cast the configuration for each validation call
+val firstAccountConfig = validationConfigMap.getOrElse("account number transform", Seq.empty[String]).asInstanceOf[Seq[String]]
+val secondAccountConfig = validationConfigMap.getOrElse("second account number transform", Seq.empty[String]).asInstanceOf[Seq[String]]
+
+// Call validateTransformedAccountNumbers with the extracted configurations
+validationResults = validationResults ++ validateTransformedAccountNumbers(caseClass, Map("account number transform" -> firstAccountConfig), "account number transform")
+validationResults = validationResults ++ validateTransformedAccountNumbers(caseClass, Map("second account number transform" -> secondAccountConfig), "second account number transform")
 
 Explanation
 
-	•	Extract Entries: We use getOrElse to fetch direct_column_validation_source and direct_column_validation_target from validationConfigMap. If they don’t exist, we provide an empty Seq[String] as a default.
-	•	Type Casting: We cast each entry to Seq[String] using .asInstanceOf[Seq[String]], ensuring that directColumnsConfig is correctly typed as Map[String, Seq[String]].
-	•	Pass to Function: We pass directColumnsConfig to validateDirectColumns, matching its expected parameter type.
+	•	Extract and Cast: We retrieve account number transform and second account number transform configurations from validationConfigMap. If these keys are missing, we provide an empty Seq[String].
+	•	Convert Each Key to Map[String, Seq[String]]: Since validateTransformedAccountNumbers expects a Map[String, Seq[String]], we wrap each configuration in its own Map.
+	•	Pass Correctly Typed Configuration: Each call to validateTransformedAccountNumbers now receives a correctly typed configuration map with only the specific key it needs.
 
-Applying This to Other Validation Functions
+Updated validateTransformedAccountNumbers Function Call
 
-If other validation functions require similar specific mappings (e.g., Map[String, Seq[String]]), apply this same approach:
-	1.	Extract the necessary keys.
-	2.	Cast each value to the appropriate type.
-	3.	Create a new map and pass it to the function.
+Now, each call to validateTransformedAccountNumbers should look like this:
 
-Let me know if this resolves the issue or if you encounter additional type mismatches!
+validationResults = validationResults ++ validateTransformedAccountNumbers(caseClass, Map("account number transform" -> firstAccountConfig), "account number transform")
+validationResults = validationResults ++ validateTransformedAccountNumbers(caseClass, Map("second account number transform" -> secondAccountConfig), "second account number transform")
+
+This approach ensures that validateTransformedAccountNumbers receives the correct type (Map[String, Seq[String]]), resolving the TypeMismatch error.
+
+Additional Note
+
+If you have many such keys, consider creating a helper function that does this extraction and casting for you to avoid repetition:
+
+def getConfigAsSeq(configMap: Map[String, Any], key: String): Seq[String] = {
+  configMap.getOrElse(key, Seq.empty[String]).asInstanceOf[Seq[String]]
+}
+
+// Use the helper function
+validationResults = validationResults ++ validateTransformedAccountNumbers(caseClass, Map("account number transform" -> getConfigAsSeq(validationConfigMap, "account number transform")), "account number transform")
+validationResults = validationResults ++ validateTransformedAccountNumbers(caseClass, Map("second account number transform" -> getConfigAsSeq(validationConfigMap, "second account number transform")), "second account number transform")
+
+Let me know if this resolves the issue or if you encounter further challenges!
