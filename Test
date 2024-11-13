@@ -1,31 +1,14 @@
-import org.apache.spark.sql.DataFrame
-import org.apache.spark.sql.functions._
+To return a Seq[String] for each validation function, you can format the results similarly to the previous code. Each function will generate a sequence of messages summarizing any differences or findings, which you can then write to an output file. Here’s how each validation can be modified to return a Seq[String].
 
-def validateAAccountType(sourceDF: DataFrame, targetDF: DataFrame): Seq[String] = {
-  import sourceDF.sparkSession.implicits._
+1. Sterling Equivalent Validation
 
-  // Hardcoded prefixes for aAccountType
-  val bankAccountPrefixes = Array("HK100", "HK102", "HK103", "HK400", "HK404", "HKG00", "KEFIX", "KEPRM", 
-                                  "MUBRN", "MUPRM", "OBBRN", "SCBRN", "SCVSP", "SH403", "SH404", "SHG00", 
-                                  "UGFLX", "UGVSP", "UKUBA", "ZACAR", "ZACHE", "ZACTS", "ZALOA", "ZAMID", 
-                                  "ZAMLO", "ZANED", "ZASAV", "ZATDE", "UKGTS")
-  
-  val creditCardPrefixes = Array("UKPRM", "UKPSP", "UKTPE", "UKBNC", "UKBNW", "UKBPA", "UKBPF", "UKCAM", 
-                                 "UKCML", "PTPSP", "ITPSP", "ESPSP")
-  
-  val mortgagePrefixes = Array("UKTRN")
-  
-  val defaultType = "BANK ACCOUNT" // Default type if no prefixes match
+This function will compare sterling_equivalent in transactionSource with amountGbp in caseClass and return any differences as a sequence of strings.
 
-  // Define a conditional transformation for `aAccountType`
-  val source = sourceDF.withColumn("aAccountType",
-    when(substring($"aAccountId", 1, 5).isin(bankAccountPrefixes: _*) && $"aAccountId".isNotNull, "BANK ACCOUNT")
-      .when(substring($"aAccountId", 1, 5).isin(creditCardPrefixes: _*) && $"aAccountId".isNotNull, "CREDIT CARD")
-      .when(substring($"aAccountId", 1, 5).isin(mortgagePrefixes: _*) && $"aAccountId".isNotNull, "MORTGAGE")
-      .otherwise(when($"aAccountId".isNotNull, defaultType).otherwise(null))
-  ).select($"transaction_id".as("transactionId"), $"aAccountType")
+def validateSterlingEquivalent(transactionSource: DataFrame, caseClass: DataFrame): Seq[String] = {
+  import transactionSource.sparkSession.implicits._
 
-  val target = targetDF.select($"transactionId", $"aAccountType")
+  val source = transactionSource.select($"transaction_id".as("transactionId"), $"sterling_equivalent".as("sterlingEquivalent"))
+  val target = caseClass.select($"transactionId", $"amountGbp".as("sterlingEquivalent"))
 
   val sourceToTargetDiff = source.exceptAll(target)
   val targetToSourceDiff = target.exceptAll(source)
@@ -34,37 +17,24 @@ def validateAAccountType(sourceDF: DataFrame, targetDF: DataFrame): Seq[String] 
   val targetToSourceIds = targetToSourceDiff.select($"transactionId").as[String].collect()
 
   Seq(
-    "A Account Type Validation Differences:",
+    "Sterling Equivalent Validation Differences:",
     s"Source to Target Differences: ${sourceToTargetIds.length} found with transaction IDs: ${sourceToTargetIds.mkString(", ")}",
     s"Target to Source Differences: ${targetToSourceIds.length} found with transaction IDs: ${targetToSourceIds.mkString(", ")}"
   )
 }
 
-def validateBAccountType(sourceDF: DataFrame, targetDF: DataFrame): Seq[String] = {
-  import sourceDF.sparkSession.implicits._
+2. Aggregated Transaction Document Type Validation
 
-  // Hardcoded prefixes for bAccountType (same as aAccountType in this example)
-  val bankAccountPrefixes = Array("HK100", "HK102", "HK103", "HK400", "HK404", "HKG00", "KEFIX", "KEPRM", 
-                                  "MUBRN", "MUPRM", "OBBRN", "SCBRN", "SCVSP", "SH403", "SH404", "SHG00", 
-                                  "UGFLX", "UGVSP", "UKUBA", "ZACAR", "ZACHE", "ZACTS", "ZALOA", "ZAMID", 
-                                  "ZAMLO", "ZANED", "ZASAV", "ZATDE", "UKGTS")
-  
-  val creditCardPrefixes = Array("UKPRM", "UKPSP", "UKTPE", "UKBNC", "UKBNW", "UKBPA", "UKBPF", "UKCAM", 
-                                 "UKCML", "PTPSP", "ITPSP", "ESPSP")
-  
-  val mortgagePrefixes = Array("UKTRN")
-  
-  val defaultType = "BANK ACCOUNT" // Default type if no prefixes match
+This function will set aggregatedTransactionDocumentType to "transaction" if aggregatedTransactionId is not null, then compare the transformed data with caseClass. It will return any discrepancies in a sequence.
 
-  // Define a conditional transformation for `bAccountType`
-  val source = sourceDF.withColumn("bAccountType",
-    when(substring($"bAccountId", 1, 5).isin(bankAccountPrefixes: _*) && $"bAccountId".isNotNull, "BANK ACCOUNT")
-      .when(substring($"bAccountId", 1, 5).isin(creditCardPrefixes: _*) && $"bAccountId".isNotNull, "CREDIT CARD")
-      .when(substring($"bAccountId", 1, 5).isin(mortgagePrefixes: _*) && $"bAccountId".isNotNull, "MORTGAGE")
-      .otherwise(when($"bAccountId".isNotNull, defaultType).otherwise(null))
-  ).select($"transaction_id".as("transactionId"), $"bAccountType")
+def validateAggregatedTransactionDocumentType(transactionSource: DataFrame, caseClass: DataFrame): Seq[String] = {
+  import transactionSource.sparkSession.implicits._
 
-  val target = targetDF.select($"transactionId", $"bAccountType")
+  val source = transactionSource.withColumn("aggregatedTransactionDocumentType",
+    when($"aggregatedTransactionId".isNotNull, "transaction").otherwise(null)
+  ).select($"transaction_id".as("transactionId"), $"aggregatedTransactionDocumentType")
+
+  val target = caseClass.select($"transactionId", $"aggregatedTransactionDocumentType")
 
   val sourceToTargetDiff = source.exceptAll(target)
   val targetToSourceDiff = target.exceptAll(source)
@@ -73,8 +43,42 @@ def validateBAccountType(sourceDF: DataFrame, targetDF: DataFrame): Seq[String] 
   val targetToSourceIds = targetToSourceDiff.select($"transactionId").as[String].collect()
 
   Seq(
-    "B Account Type Validation Differences:",
+    "Aggregated Transaction Document Type Validation Differences:",
     s"Source to Target Differences: ${sourceToTargetIds.length} found with transaction IDs: ${sourceToTargetIds.mkString(", ")}",
     s"Target to Source Differences: ${targetToSourceIds.length} found with transaction IDs: ${targetToSourceIds.mkString(", ")}"
   )
 }
+
+3. Aggregated Transaction ID Distinct Validation
+
+This function will check for distinct aggregatedTransactionId values in caseClass and return them in a sequence.
+
+def validateAggregatedTransactionIdDistinct(caseClass: DataFrame): Seq[String] = {
+  val distinctIds = caseClass.select("aggregatedTransactionId").distinct().collect().map(_.getString(0))
+
+  Seq(
+    "Distinct Aggregated Transaction IDs:",
+    distinctIds.mkString(", ")
+  )
+}
+
+Integration into Main Flow
+
+In your main code, you can collect the results from each validation and write them to an output file. Here’s how you might collect and output the results:
+
+val validationResults = Seq(
+  validateSterlingEquivalent(transactionSource, caseClass),
+  validateAggregatedTransactionDocumentType(transactionSource, caseClass),
+  validateAggregatedTransactionIdDistinct(caseClass)
+).flatten // Flatten to get a single Seq[String] with all messages
+
+// Write `validationResults` to an output file or process as needed
+validationResults.foreach(println) // Example output to console
+
+Summary
+
+Each validation function now:
+	•	Returns a Seq[String] summarizing differences or unique values.
+	•	This format allows easy appending of each function’s results to an output file or a single consolidated report.
+
+This structure should align well with your workflow of aggregating validation results. Let me know if further adjustments are needed!
