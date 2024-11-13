@@ -1,135 +1,80 @@
-# Sterling Equivalent Validation
-[sterling_equivalent_validation]
-sourceColumn=sterling_equivalent
-targetColumn=amountGbp
+import org.apache.spark.sql.DataFrame
+import org.apache.spark.sql.functions._
 
-# Aggregated Transaction Document Type Validation
-[aggregated_transaction_document_type_validation]
-sourceColumn=aggregatedTransactionId
-documentTypeColumn=aggregatedTransactionDocumentType
-documentTypeValue=transaction
+def validateAAccountType(sourceDF: DataFrame, targetDF: DataFrame): Seq[String] = {
+  import sourceDF.sparkSession.implicits._
 
-# Aggregated Transaction ID Distinct Validation
-[aggregated_transaction_id_validation]
-column=aggregatedTransactionId
+  // Hardcoded prefixes for aAccountType
+  val bankAccountPrefixes = Array("HK100", "HK102", "HK103", "HK400", "HK404", "HKG00", "KEFIX", "KEPRM", 
+                                  "MUBRN", "MUPRM", "OBBRN", "SCBRN", "SCVSP", "SH403", "SH404", "SHG00", 
+                                  "UGFLX", "UGVSP", "UKUBA", "ZACAR", "ZACHE", "ZACTS", "ZALOA", "ZAMID", 
+                                  "ZAMLO", "ZANED", "ZASAV", "ZATDE", "UKGTS")
+  
+  val creditCardPrefixes = Array("UKPRM", "UKPSP", "UKTPE", "UKBNC", "UKBNW", "UKBPA", "UKBPF", "UKCAM", 
+                                 "UKCML", "PTPSP", "ITPSP", "ESPSP")
+  
+  val mortgagePrefixes = Array("UKTRN")
+  
+  val defaultType = "BANK ACCOUNT" // Default type if no prefixes match
 
-# A Sort Code Validation (Derived from A Account ID)
-[a_sort_code_transform]
-txnDirectionCondition=DEBIT
-prefixes=UKUBA,UKGTS
-substringStart=17
-substringLength=6
+  // Define a conditional transformation for `aAccountType`
+  val source = sourceDF.withColumn("aAccountType",
+    when(substring($"aAccountId", 1, 5).isin(bankAccountPrefixes: _*) && $"aAccountId".isNotNull, "BANK ACCOUNT")
+      .when(substring($"aAccountId", 1, 5).isin(creditCardPrefixes: _*) && $"aAccountId".isNotNull, "CREDIT CARD")
+      .when(substring($"aAccountId", 1, 5).isin(mortgagePrefixes: _*) && $"aAccountId".isNotNull, "MORTGAGE")
+      .otherwise(when($"aAccountId".isNotNull, defaultType).otherwise(null))
+  ).select($"transaction_id".as("transactionId"), $"aAccountType")
 
-# B Sort Code Validation (Derived from B Account ID)
-[b_sort_code_transform]
-txnDirectionCondition=CREDIT
-prefixes=UKUBA,UKGTS
-substringStart=17
-substringLength=6
+  val target = targetDF.select($"transactionId", $"aAccountType")
 
-# A Account Type Transformation
-[a_account_type_transform]
-bankAccountPrefixes=HK100,HK102,HK103,HK400,HK404,HKG00,KEFIX,KEPRM,MUBRN,MUPRM,OBBRN,SCBRN,SCVSP,SH403,SH404,SHG00,UGFLX,UGVSP,UKUBA,ZACAR,ZACHE,ZACTS,ZALOA,ZAMID,ZAMLO,ZANED,ZASAV,ZATDE,UKGTS
-creditCardPrefixes=UKPRM,UKPSP,UKTPE,UKBNC,UKBNW,UKBPA,UKBPF,UKCAM,UKCML,PTPSP,ITPSP,ESPSP
-mortgagePrefixes=UKTRN
-defaultType=BANK ACCOUNT
+  val sourceToTargetDiff = source.exceptAll(target)
+  val targetToSourceDiff = target.exceptAll(source)
 
-# B Account Type Transformation
-[b_account_type_transform]
-bankAccountPrefixes=HK100,HK102,HK103,HK400,HK404,HKG00,KEFIX,KEPRM,MUBRN,MUPRM,OBBRN,SCBRN,SCVSP,SH403,SH404,SHG00,UGFLX,UGVSP,UKUBA,ZACAR,ZACHE,ZACTS,ZALOA,ZAMID,ZAMLO,ZANED,ZASAV,ZATDE,UKGTS
-creditCardPrefixes=UKPRM,UKPSP,UKTPE,UKBNC,UKBNW,UKBPA,UKBPF,UKCAM,UKCML,PTPSP,ITPSP,ESPSP
-mortgagePrefixes=UKTRN
-defaultType=BANK ACCOUNT
+  val sourceToTargetIds = sourceToTargetDiff.select($"transactionId").as[String].collect()
+  val targetToSourceIds = targetToSourceDiff.select($"transactionId").as[String].collect()
 
-# A Customer ID Transformation
-[a_customer_id_transform]
-txnDirectionColumn=txn_direction_desc
-debitColumn=CUSTOMER_KEY
-creditColumn=COUNTERPARTY_CUSTOMER_KEY
+  Seq(
+    "A Account Type Validation Differences:",
+    s"Source to Target Differences: ${sourceToTargetIds.length} found with transaction IDs: ${sourceToTargetIds.mkString(", ")}",
+    s"Target to Source Differences: ${targetToSourceIds.length} found with transaction IDs: ${targetToSourceIds.mkString(", ")}"
+  )
+}
 
-# B Customer ID Transformation
-[b_customer_id_transform]
-txnDirectionColumn=txn_direction_desc
-debitColumn=COUNTERPARTY_CUSTOMER_KEY
-creditColumn=CUSTOMER_KEY
+def validateBAccountType(sourceDF: DataFrame, targetDF: DataFrame): Seq[String] = {
+  import sourceDF.sparkSession.implicits._
 
-# A Account ID Transformation
-[a_account_id_transform]
-txnDirectionColumn=txn_direction_desc
-debitColumn=ACCOUNT_ID
-creditColumn=COUNTERPARTY_ID
+  // Hardcoded prefixes for bAccountType (same as aAccountType in this example)
+  val bankAccountPrefixes = Array("HK100", "HK102", "HK103", "HK400", "HK404", "HKG00", "KEFIX", "KEPRM", 
+                                  "MUBRN", "MUPRM", "OBBRN", "SCBRN", "SCVSP", "SH403", "SH404", "SHG00", 
+                                  "UGFLX", "UGVSP", "UKUBA", "ZACAR", "ZACHE", "ZACTS", "ZALOA", "ZAMID", 
+                                  "ZAMLO", "ZANED", "ZASAV", "ZATDE", "UKGTS")
+  
+  val creditCardPrefixes = Array("UKPRM", "UKPSP", "UKTPE", "UKBNC", "UKBNW", "UKBPA", "UKBPF", "UKCAM", 
+                                 "UKCML", "PTPSP", "ITPSP", "ESPSP")
+  
+  val mortgagePrefixes = Array("UKTRN")
+  
+  val defaultType = "BANK ACCOUNT" // Default type if no prefixes match
 
-# B Account ID Transformation
-[b_account_id_transform]
-txnDirectionColumn=txn_direction_desc
-debitColumn=COUNTERPARTY_ID
-creditColumn=ACCOUNT_ID
+  // Define a conditional transformation for `bAccountType`
+  val source = sourceDF.withColumn("bAccountType",
+    when(substring($"bAccountId", 1, 5).isin(bankAccountPrefixes: _*) && $"bAccountId".isNotNull, "BANK ACCOUNT")
+      .when(substring($"bAccountId", 1, 5).isin(creditCardPrefixes: _*) && $"bAccountId".isNotNull, "CREDIT CARD")
+      .when(substring($"bAccountId", 1, 5).isin(mortgagePrefixes: _*) && $"bAccountId".isNotNull, "MORTGAGE")
+      .otherwise(when($"bAccountId".isNotNull, defaultType).otherwise(null))
+  ).select($"transaction_id".as("transactionId"), $"bAccountType")
 
-# A Branch Unique ID Transformation
-[a_branch_unique_id_transform]
-txnDirectionColumn=txn_direction_desc
-debitColumn=BRANCH_KEY
+  val target = targetDF.select($"transactionId", $"bAccountType")
 
-# B Branch Unique ID Transformation
-[b_branch_unique_id_transform]
-txnDirectionColumn=txn_direction_desc
-debitColumn=COUNTERPARTY_BRANCH_KEY
+  val sourceToTargetDiff = source.exceptAll(target)
+  val targetToSourceDiff = target.exceptAll(source)
 
-# Transaction Country ISO3 Validation
-[transaction_country_iso3_validation_source]
-TRANSACTION_COUNTRY_ISO_CODE
+  val sourceToTargetIds = sourceToTargetDiff.select($"transactionId").as[String].collect()
+  val targetToSourceIds = targetToSourceDiff.select($"transactionId").as[String].collect()
 
-[transaction_country_iso3_validation_target]
-transactionCountryIso3
-
-[mapping]
-AD:AND,
-AE:ARE,
-AF:AFG,
-...
-
-# Amount Validation
-[amount_validation]
-ORIGINAL_AMOUNT, amountLocal
-
-# Non-null Validation Columns
-[non_null_validation]
-aAccountNumberCleansed, anotherColumn
-
-# Null Validation Columns
-[null_validation]
-bAccountNumber, yetAnotherColumn
-
-# Direct Column Validation Source
-[direct_column_validation_source]
-source_col1, source_col2, source_col3
-
-# Direct Column Validation Target
-[direct_column_validation_target]
-target_col1, target_col2, target_col3
-
-# Narrative Validation Source
-[narrative_validation_source]
-narrative_col_source
-
-# Narrative Validation Target
-[narrative_validation_target]
-narrative_col_target
-
-# Transformed Account Number Validation - First Transformation
-[account number transform]
-sourceColumn=aAccountId
-targetColumn=aAccountNumber
-condition1=UKUBA
-condition2=UKGTS
-position1=9
-position2=8
-
-# Transformed Account Number Validation - Second Transformation
-[second account number transform]
-sourceColumn=bAccountId
-targetColumn=bAccountNumber
-condition1=UKUBA
-condition2=UKGTS
-position1=9
-position2=8
+  Seq(
+    "B Account Type Validation Differences:",
+    s"Source to Target Differences: ${sourceToTargetIds.length} found with transaction IDs: ${sourceToTargetIds.mkString(", ")}",
+    s"Target to Source Differences: ${targetToSourceIds.length} found with transaction IDs: ${targetToSourceIds.mkString(", ")}"
+  )
+}
