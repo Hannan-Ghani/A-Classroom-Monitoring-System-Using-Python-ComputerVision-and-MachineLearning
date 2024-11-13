@@ -1,84 +1,27 @@
-To return a Seq[String] for each validation function, you can format the results similarly to the previous code. Each function will generate a sequence of messages summarizing any differences or findings, which you can then write to an output file. Here’s how each validation can be modified to return a Seq[String].
+def validateNonNullColumns(df: DataFrame, columns: Seq[String]): Seq[String] = {
+  import df.sparkSession.implicits._
 
-1. Sterling Equivalent Validation
+  val existingColumns = filterExistingColumns(df, columns)
+  if (existingColumns.nonEmpty) {
+    // Collect results as Seq[String]
+    val nonNullValues = existingColumns.flatMap { column =>
+      val nonNullData = df.select($"transactionId", col(column)) // Select transactionId and the target column
+        .filter(col(column).isNotNull) // Filter where target column is not null
+      
+      // Collect transaction IDs and corresponding non-null values
+      val nonNullRecords = nonNullData.collect().map(row => (row.getString(0), row.getString(1)))
+      val transactionIds = nonNullRecords.map(_._1).mkString(", ")
+      
+      if (nonNullRecords.nonEmpty) {
+        Some(s"Non-Null Validation for $column: ${nonNullRecords.length} found with transaction IDs: " + transactionIds)
+      } else {
+        None
+      }
+    }.toSeq // Ensure nonNullValues is of type Seq[String]
 
-This function will compare sterling_equivalent in transactionSource with amountGbp in caseClass and return any differences as a sequence of strings.
-
-def validateSterlingEquivalent(transactionSource: DataFrame, caseClass: DataFrame): Seq[String] = {
-  import transactionSource.sparkSession.implicits._
-
-  val source = transactionSource.select($"transaction_id".as("transactionId"), $"sterling_equivalent".as("sterlingEquivalent"))
-  val target = caseClass.select($"transactionId", $"amountGbp".as("sterlingEquivalent"))
-
-  val sourceToTargetDiff = source.exceptAll(target)
-  val targetToSourceDiff = target.exceptAll(source)
-
-  val sourceToTargetIds = sourceToTargetDiff.select($"transactionId").as[String].collect()
-  val targetToSourceIds = targetToSourceDiff.select($"transactionId").as[String].collect()
-
-  Seq(
-    "Sterling Equivalent Validation Differences:",
-    s"Source to Target Differences: ${sourceToTargetIds.length} found with transaction IDs: ${sourceToTargetIds.mkString(", ")}",
-    s"Target to Source Differences: ${targetToSourceIds.length} found with transaction IDs: ${targetToSourceIds.mkString(", ")}"
-  )
+    // Combine the non-null validation message with nonNullValues
+    Seq("Non-Null Validation Differences:") ++ nonNullValues
+  } else {
+    Seq("Non-Null Validation: No relevant columns found for non-null validation.")
+  }
 }
-
-2. Aggregated Transaction Document Type Validation
-
-This function will set aggregatedTransactionDocumentType to "transaction" if aggregatedTransactionId is not null, then compare the transformed data with caseClass. It will return any discrepancies in a sequence.
-
-def validateAggregatedTransactionDocumentType(transactionSource: DataFrame, caseClass: DataFrame): Seq[String] = {
-  import transactionSource.sparkSession.implicits._
-
-  val source = transactionSource.withColumn("aggregatedTransactionDocumentType",
-    when($"aggregatedTransactionId".isNotNull, "transaction").otherwise(null)
-  ).select($"transaction_id".as("transactionId"), $"aggregatedTransactionDocumentType")
-
-  val target = caseClass.select($"transactionId", $"aggregatedTransactionDocumentType")
-
-  val sourceToTargetDiff = source.exceptAll(target)
-  val targetToSourceDiff = target.exceptAll(source)
-
-  val sourceToTargetIds = sourceToTargetDiff.select($"transactionId").as[String].collect()
-  val targetToSourceIds = targetToSourceDiff.select($"transactionId").as[String].collect()
-
-  Seq(
-    "Aggregated Transaction Document Type Validation Differences:",
-    s"Source to Target Differences: ${sourceToTargetIds.length} found with transaction IDs: ${sourceToTargetIds.mkString(", ")}",
-    s"Target to Source Differences: ${targetToSourceIds.length} found with transaction IDs: ${targetToSourceIds.mkString(", ")}"
-  )
-}
-
-3. Aggregated Transaction ID Distinct Validation
-
-This function will check for distinct aggregatedTransactionId values in caseClass and return them in a sequence.
-
-def validateAggregatedTransactionIdDistinct(caseClass: DataFrame): Seq[String] = {
-  val distinctIds = caseClass.select("aggregatedTransactionId").distinct().collect().map(_.getString(0))
-
-  Seq(
-    "Distinct Aggregated Transaction IDs:",
-    distinctIds.mkString(", ")
-  )
-}
-
-Integration into Main Flow
-
-In your main code, you can collect the results from each validation and write them to an output file. Here’s how you might collect and output the results:
-
-val validationResults = Seq(
-  validateSterlingEquivalent(transactionSource, caseClass),
-  validateAggregatedTransactionDocumentType(transactionSource, caseClass),
-  validateAggregatedTransactionIdDistinct(caseClass)
-).flatten // Flatten to get a single Seq[String] with all messages
-
-// Write `validationResults` to an output file or process as needed
-validationResults.foreach(println) // Example output to console
-
-Summary
-
-Each validation function now:
-	•	Returns a Seq[String] summarizing differences or unique values.
-	•	This format allows easy appending of each function’s results to an output file or a single consolidated report.
-
-This structure should align well with your workflow of aggregating validation results. Let me know if further adjustments are needed!
