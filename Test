@@ -2,29 +2,26 @@ def validateNonNullColumns(df: DataFrame, columns: Seq[String]): Seq[String] = {
   import df.sparkSession.implicits._
 
   val existingColumns = filterExistingColumns(df, columns)
+
   if (existingColumns.nonEmpty) {
-    // Collect results as Seq[String]
+    // Store results as Seq of formatted strings
     val nonNullValues = existingColumns.flatMap { column =>
-      val nonNullData = df.select($"transactionId", col(column)) // Select transactionId and the target column
+      val nonNullData = df
+        .select($"transactionId", col(column)) // Select transactionId and the target column
         .filter(col(column).isNotNull) // Filter where target column is not null
-      
+
       // Collect transaction IDs and corresponding non-null values
-      val nonNullRecords = nonNullData.collect().map { row =>
-        val transactionId = row.getString(0)
-        val columnValue = row.getAsgetAs to be more flexible with types
-        (transactionId, columnValue)
-      }
-      
-      val transactionIds = nonNullRecords.map(_._1).mkString(", ")
-      
+      val nonNullRecords = nonNullData.collect().map(row => (row.getString(0), row.getString(1)))
+
       if (nonNullRecords.nonEmpty) {
-        Some(s"Non-Null Validation for $column: ${nonNullRecords.length} found with transaction IDs: " + transactionIds)
+        val transactionIds = nonNullRecords.map(_._1).mkString(", ")
+        Some(s"Non-Null Validation for $column: ${nonNullRecords.length} found with transaction IDs: $transactionIds")
       } else {
         None
       }
-    }.toSeq // Ensure nonNullValues is of type Seq[String]
+    }
 
-    // Combine the non-null validation message with nonNullValues
+    // Use flatMap to ensure we get only String results
     Seq("Non-Null Validation Differences:") ++ nonNullValues
   } else {
     Seq("Non-Null Validation: No relevant columns found for non-null validation.")
