@@ -190,4 +190,183 @@ Explanation of Changes
 	•	Convert to DataFrame: The accumulated results are converted to a DataFrame.
 	•	Write to S3: Using DataFrame.write.text to save directly to the S3 path specified.
 
-This approach bypasses the need for PrintWriter and directly saves results to S3. Let me know if this resolves the issue!
+This approach bypasses the need for PrintWriter and di
+
+
+
+rectly saves results to S3. Let me know if this resolves
+
+
+ the issue!
+
+
+
+
+
+Yes, the code provided above is complete and includes the following updates:
+	1.	Accumulation of Validation Results:
+	•	Each validation function (validateNullColumns, validateDirectColumns, and validateNarrativeColumns) now returns a Seq[String] containing the results of that validation.
+	•	The results are accumulated in a single Seq[String] in main.
+	2.	Conversion of Results to DataFrame:
+	•	After collecting all results, the code converts validationResults into a DataFrame with a single column called validation_result.
+	3.	Writing the Results to S3:
+	•	The resultsDF.write.mode("overwrite").text(s"$outputBasePath/validation_differences.txt") command writes the validation results directly to the specified S3 path in text format.
+	4.	Helper Functions:
+	•	parseConfigFile and parseValidationConfig handle configuration parsing.
+	•	filterExistingColumns and filterExistingColumnPairs help manage which columns are available for validation.
+
+Summary of How to Run This Code
+
+	•	Ensure that the S3 path specified in outputBasePath is correct and that your AWS Glue job’s IAM role has the necessary permissions to write to it.
+	•	This code assumes Spark, AWS Glue, and S3 resources are set up correctly and accessible from your AWS Glue job.
+
+This code is complete and should meet your requirements. Let me know if you need further adjustments or encounter any issues while running it!
+
+
+
+
+In Spark, when you write a DataFrame to a text file, it typically generates multiple part files (e.g., part-00000, part-00001, etc.) because of the distributed nature of Spark. To produce a single output file, you can use the .coalesce(1) function on the DataFrame before writing it, which consolidates all partitions into a single partition.
+
+Here’s how to modify the code to ensure it writes a single file:
+
+Updated Code to Write a Single Text File
+
+Replace the following line:
+
+resultsDF.write.mode("overwrite").text(s"$outputBasePath/validation_differences.txt")
+
+with:
+
+resultsDF.coalesce(1).write.mode("overwrite").text(s"$outputBasePath/validation_differences.txt")
+
+Explanation
+
+	•	.coalesce(1) reduces the DataFrame to a single partition, resulting in a single output file.
+	•	Note: Using .coalesce(1) might affect performance, especially with large datasets, since it forces Spark to consolidate data into a single partition before writing.
+
+Important Note on S3 Output
+
+After using .coalesce(1), Spark will still generate a single part file with a generated name like part-00000, rather than the exact name validation_differences.txt. To rename the file within an AWS Glue job, you might need to use an additional script (such as an AWS Lambda function) to rename it, as Glue jobs do not natively support renaming files in S3.
+
+Alternatively, if you’re running this code in a local or managed Spark environment, you can use a temporary directory and move or rename the file after Spark writes it. Let me know if you’d like further guidance on managing file naming in S3!
+
+
+
+To include a count of differences in the output, you can modify each validation function to calculate the count and format the output accordingly. Here’s how you can modify the functions to add the count of differences along with the IDs.
+
+Updated Validation Functions
+
+For each validation type (Null Validation, Direct Column Validation, and Narrative Validation), we’ll:
+	1.	Calculate the count of mismatches.
+	2.	Format the output to include the count and IDs found.
+
+Here’s how to modify each function:
+
+1. validateNullColumns with Count
+
+def validateNullColumns(df: DataFrame, nullColumns: Seq[String]): Seq[String] = {
+  import df.sparkSession.implicits._
+  val existingNullColumns = filterExistingColumns(df, nullColumns)
+  if (existingNullColumns.nonEmpty) {
+    val nonNullData = df.filter(existingNullColumns.map(col(_).isNotNull).reduce(_ || _))
+    val nonNullTransactionIds = nonNullData.select($"transactionId").as[String].collect()
+    val count = nonNullTransactionIds.length
+    Seq(
+      "Null Validation Differences:",
+      s"Non-null values found for columns expected to be null in $count rows: " + nonNullTransactionIds.mkString(", ")
+    )
+  } else {
+    Seq("Null Validation Differences: No relevant columns found for null validation.")
+  }
+}
+
+2. validateDirectColumns with Count
+
+def validateDirectColumns(sourceDF: DataFrame, targetDF: DataFrame, configMap: Map[String, Seq[String]]): Seq[String] = {
+  import sourceDF.sparkSession.implicits._
+  val sourceCols = configMap.getOrElse("direct_column_validation_source", Seq())
+  val targetCols = configMap.getOrElse("direct_column_validation_target", Seq())
+
+  val (alignedSourceCols, alignedTargetCols) = filterExistingColumnPairs(sourceCols, targetCols, sourceDF, targetDF)
+
+  if (alignedSourceCols.nonEmpty && alignedTargetCols.nonEmpty) {
+    val sourceData = sourceDF.select(
+      col("TRANSACTION_ID") +: alignedSourceCols.zipWithIndex.map { case (column, i) => col(column).as(s"col_$i") }: _*
+    )
+    val targetData = targetDF.select(
+      col("transactionId") +: alignedTargetCols.zipWithIndex.map { case (column, i) => col(column).as(s"col_$i") }: _*
+    )
+
+    val sourceToTargetDiff = sourceData.except(targetData)
+    val targetToSourceDiff = targetData.except(sourceData)
+
+    val sourceToTargetIds = sourceToTargetDiff.select($"TRANSACTION_ID").as[String].collect()
+    val targetToSourceIds = targetToSourceDiff.select($"transactionId").as[String].collect()
+
+    val sourceToTargetCount = sourceToTargetIds.length
+    val targetToSourceCount = targetToSourceIds.length
+
+    Seq(
+      "Direct Column Validation Differences:",
+      s"Source to Target Differences: $sourceToTargetCount found " + sourceToTargetIds.mkString(", "),
+      s"Target to Source Differences: $targetToSourceCount found " + targetToSourceIds.mkString(", ")
+    )
+  } else {
+    Seq("Direct Column Validation Differences: No relevant columns found for direct validation.")
+  }
+}
+
+3. validateNarrativeColumns with Count
+
+def validateNarrativeColumns(sourceDF: DataFrame, targetDF: DataFrame, configMap: Map[String, Seq[String]]): Seq[String] = {
+  import sourceDF.sparkSession.implicits._
+  val sourceNarrativeCol = configMap.getOrElse("narrative_validation_source", Seq()).headOption.getOrElse("")
+  val targetNarrativeCol = configMap.getOrElse("narrative_validation_target", Seq()).headOption.getOrElse("")
+
+  val cleanedSourceNarrative = sourceDF.withColumn("cleaned_narrative", when(trim(col(sourceNarrativeCol)) === "" || trim(col(sourceNarrativeCol)) === "*", null)
+    .otherwise(col(sourceNarrativeCol))
+  ).select($"TRANSACTION_ID", $"cleaned_narrative")
+
+  val targetNarrative = targetDF.select($"transactionId", col(targetNarrativeCol).as("cleaned_narrative"))
+
+  val narrativeSourceToTargetDiff = cleanedSourceNarrative.except(targetNarrative)
+  val narrativeTargetToSourceDiff = targetNarrative.except(cleanedSourceNarrative)
+
+  val narrativeSourceToTargetIds = narrativeSourceToTargetDiff.select($"TRANSACTION_ID").as[String].collect()
+  val narrativeTargetToSourceIds = narrativeTargetToSourceDiff.select($"transactionId").as[String].collect()
+
+  val sourceToTargetCount = narrativeSourceToTargetIds.length
+  val targetToSourceCount = narrativeTargetToSourceIds.length
+
+  Seq(
+    "Narrative Validation Differences:",
+    s"Source to Target Differences: $sourceToTargetCount found " + narrativeSourceToTargetIds.mkString(", "),
+    s"Target to Source Differences: $targetToSourceCount found " + narrativeTargetToSourceIds.mkString(", ")
+  )
+}
+
+Explanation of Changes
+
+	•	Count Calculation: The .length method is used to count the number of IDs in each difference.
+	•	Formatted Output: Each validation result now includes the count of differences followed by the specific IDs.
+
+Example Output
+
+With these changes, an example output might look like:
+
+Null Validation Differences:
+Non-null values found for columns expected to be null in 2 rows: transaction_id_111, transaction_id_112
+
+Direct Column Validation Differences:
+Source to Target Differences: 4 found transaction_id_111, transaction_id_112, transaction_id_113, transaction_id_114
+Target to Source Differences: 3 found transaction_id_115, transaction_id_116, transaction_id_117
+
+Narrative Validation Differences:
+Source to Target Differences: 1 found transaction_id_118
+Target to Source Differences: 2 found transaction_id_119, transaction_id_120
+
+This updated code will generate the count along with the IDs for each type of difference found. Let me know if this meets your requirements or if any additional adjustments are needed!
+
+
+
+
