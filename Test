@@ -1,29 +1,140 @@
-def validateNonNullColumns(df: DataFrame, columns: Seq[String]): Seq[String] = {
-  import df.sparkSession.implicits._
+import com.amazonaws.services.glue.GlueContext
+import com.amazonaws.services.glue.util.Job
+import org.apache.spark.SparkContext
+import org.apache.spark.sql.{DataFrame, SparkSession, Row}
+import org.apache.spark.sql.functions._
+import org.apache.log4j.Logger
+import com.amazonaws.services.glue.util.GlueArgParser
 
-  val existingColumns = filterExistingColumns(df, columns)
+object CleanseCaseClass {
 
-  if (existingColumns.nonEmpty) {
-    // Store results as Seq of formatted strings
-    val nonNullValues = existingColumns.flatMap { column =>
-      val nonNullData = df
-        .select($"transactionId", col(column)) // Select transactionId and the target column
-        .filter(col(column).isNotNull) // Filter where target column is not null
+  def main(sysArgs: Array[String]): Unit = {
+    val sparkSession: SparkSession = SparkSession.builder.getOrCreate()
+    val glueContext: GlueContext = new GlueContext(sparkSession.sparkContext)
+    import sparkSession.implicits._
 
-      // Collect transaction IDs and corresponding non-null values
-      val nonNullRecords = nonNullData.collect().map(row => (row.getString(0), row.getString(1)))
+    val logger: Logger = Logger.getLogger("CleanseCaseClassLogger")
 
-      if (nonNullRecords.nonEmpty) {
-        val transactionIds = nonNullRecords.map(_._1).mkString(", ")
-        Some(s"Non-Null Validation for $column: ${nonNullRecords.length} found with transaction IDs: $transactionIds")
+    // Get Glue job parameters
+    val args = GlueArgParser.getResolvedOptions(sysArgs, Seq("s3PathConfig", "s3ValidationConfig").toArray)
+    val s3PathConfig = args("s3PathConfig")
+    val s3ValidationConfig = args("s3ValidationConfig")
+
+    // Read configuration files
+    val pathConfigMap = parseConfigFile(s3PathConfig, sparkSession, logger)
+    val validationConfigMap = parseValidationConfig(s3ValidationConfig, sparkSession, logger)
+
+    // Extract paths
+    val inputSourcePath = pathConfigMap.getOrElse("inputSourcePath", "")
+    val inputTargetPath = pathConfigMap.getOrElse("inputTargetPath", "")
+    val outputBasePath = pathConfigMap.getOrElse("outputBasePath", "")
+
+    // Load data
+    val transactionSource: DataFrame = sparkSession.read.parquet(inputSourcePath)
+    val caseClass: DataFrame = sparkSession.read.parquet(inputTargetPath)
+
+    // Initialize validation results
+    var validationResults = Seq[String]()
+
+    // Null Validation
+    validationResults = validationResults ++ validateNullColumns(caseClass, validationConfigMap.getOrElse("null_validation", Seq()))
+
+    // Direct Column Validation
+    validationResults = validationResults ++ validateDirectColumns(transactionSource, caseClass, validationConfigMap)
+
+    // Narrative Validation
+    validationResults = validationResults ++ validateNarrativeColumns(transactionSource, caseClass, validationConfigMap)
+
+    // Convert results to DataFrame and write to S3
+    val resultsDF = validationResults.toDF("validation_result")
+    resultsDF.write.mode("overwrite").text(s"$outputBasePath/validation_differences.txt")
+
+    Job.commit()
+  }
+
+  def parseConfigFile(configPath: String, sparkSession: SparkSession, logger: Logger): Map[String, String] = {
+    import sparkSession.implicits._
+    sparkSession.read.text(configPath).as[String].collect().flatMap { line =>
+      val parts = line.split("=")
+      if (parts.length == 2) {
+        Some(parts(0).trim -> parts(1).trim)
       } else {
+        logger.warn(s"Invalid config line: $line")
         None
       }
-    }
+    }.toMap
+  }
 
-    // Use flatMap to ensure we get only String results
-    Seq("Non-Null Validation Differences:") ++ nonNullValues
-  } else {
-    Seq("Non-Null Validation: No relevant columns found for non-null validation.")
+  def parseValidationConfig(configPath: String, sparkSession: SparkSession, logger: Logger): Map[String, Seq[String]] = {
+    import sparkSession.implicits._
+    var currentSection = ""
+    var validationConfig = Map[String, Seq[String]]()
+
+    sparkSession.read.text(configPath).as[String].collect().foreach { line =>
+      val trimmedLine = line.trim
+      if (trimmedLine.startsWith("[") && trimmedLine.endsWith("]")) {
+        currentSection = trimmedLine.substring(1, trimmedLine.length - 1)
+        validationConfig += (currentSection -> Seq())
+      } else if (trimmedLine.nonEmpty && currentSection.nonEmpty) {
+        val columns = trimmedLine.split(",").map(_.trim).toSeq
+        validationConfig += (currentSection -> columns)
+      }
+    }
+    validationConfig
+  }
+
+  def validateNullColumns(df: DataFrame, nullColumns: Seq[String]): Seq[String] = {
+    val existingNullColumns = filterExistingColumns(df, nullColumns)
+    if (existingNullColumns.nonEmpty) {
+      val nonNullData = df.filter(existingNullColumns.map(col(_).isNotNull).reduce(_ || _))
+      val count = nonNullData.count()
+      if (count > 0) {
+        Seq(s"Null Validation Differences: Non-null values found for columns expected to be null in $count rows.")
+      } else Seq("Null Validation Differences: No discrepancies found.")
+    } else Seq("Null Validation Differences: No relevant columns found for null validation.")
+  }
+
+  def validateDirectColumns(sourceDF: DataFrame, targetDF: DataFrame, configMap: Map[String, Seq[String]]): Seq[String] = {
+    val sourceCols = configMap.getOrElse("direct_column_validation_source", Seq())
+    val targetCols = configMap.getOrElse("direct_column_validation_target", Seq())
+
+    val (alignedSourceCols, alignedTargetCols) = filterExistingColumnPairs(sourceCols, targetCols, sourceDF, targetDF)
+
+    if (alignedSourceCols.nonEmpty && alignedTargetCols.nonEmpty) {
+      val sourceToTargetDiff = sourceDF.select("TRANSACTION_ID" +: alignedSourceCols: _*).except(targetDF.select("transactionId" +: alignedTargetCols: _*))
+      val targetToSourceDiff = targetDF.select("transactionId" +: alignedTargetCols: _*).except(sourceDF.select("TRANSACTION_ID" +: alignedSourceCols: _*))
+
+      Seq(
+        s"Direct Column Validation Differences: Source to Target count - ${sourceToTargetDiff.count()}",
+        s"Direct Column Validation Differences: Target to Source count - ${targetToSourceDiff.count()}"
+      )
+    } else Seq("Direct Column Validation Differences: No relevant columns found.")
+  }
+
+  def validateNarrativeColumns(sourceDF: DataFrame, targetDF: DataFrame, configMap: Map[String, Seq[String]]): Seq[String] = {
+    val sourceNarrativeCol = configMap.getOrElse("narrative_validation_source", Seq()).headOption.getOrElse("")
+    val targetNarrativeCol = configMap.getOrElse("narrative_validation_target", Seq()).headOption.getOrElse("")
+
+    if (sourceDF.columns.contains(sourceNarrativeCol) && targetDF.columns.contains(targetNarrativeCol)) {
+      val cleanedSourceNarrative = sourceDF.withColumn("cleaned_narrative", when(trim(col(sourceNarrativeCol)) === "" || trim(col(sourceNarrativeCol)) === "*", null)
+        .otherwise(col(sourceNarrativeCol))
+      )
+
+      val narrativeSourceToTargetDiff = cleanedSourceNarrative.except(targetDF.select($"transactionId", col(targetNarrativeCol).as("cleaned_narrative")))
+      val narrativeTargetToSourceDiff = targetDF.select($"transactionId", col(targetNarrativeCol).as("cleaned_narrative")).except(cleanedSourceNarrative)
+
+      Seq(
+        s"Narrative Validation Differences: Source to Target count - ${narrativeSourceToTargetDiff.count()}",
+        s"Narrative Validation Differences: Target to Source count - ${narrativeTargetToSourceDiff.count()}"
+      )
+    } else Seq("Narrative Validation Differences: Narrative columns missing in source or target.")
+  }
+
+  def filterExistingColumns(df: DataFrame, columns: Seq[String]): Seq[String] = {
+    columns.filter(df.columns.contains)
+  }
+
+  def filterExistingColumnPairs(sourceColumns: Seq[String], targetColumns: Seq[String], sourceDF: DataFrame, targetDF: DataFrame): (Seq[String], Seq[String]) = {
+    (sourceColumns.filter(sourceDF.columns.contains), targetColumns.filter(targetDF.columns.contains))
   }
 }
