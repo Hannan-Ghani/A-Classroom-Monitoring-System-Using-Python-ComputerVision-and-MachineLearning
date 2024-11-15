@@ -1,124 +1,134 @@
-To achieve the required dynamic behavior, we can create a function that processes each pair of columns (AccountNumber and AccountId) based on the configuration. The function will gracefully handle scenarios where no matching columns are found. Here’s the implementation:
+Analyzing your provided code and the error message, let’s address the possible issues and determine if the caseClass DataFrame is being modified.
 
-Dynamic Validation Function
+Analysis of the caseClass Modification
+
+The caseClass DataFrame appears to be passed as a parameter to various validation functions. However, Spark’s DataFrame operations (like withColumn, select, and others) are immutable, meaning that every operation creates a new DataFrame and does not modify the original.
+
+Here are the key points in your code:
+	1.	caseClass in validateDynamicAccountNumbers:
+	•	When you use caseClass.withColumn(...), it creates a new DataFrame. The original caseClass remains unchanged.
+	•	If you are referencing the modified version elsewhere in the code without reassigning, this might cause issues if subsequent operations expect the original structure.
+	2.	Other Validation Functions (validateNullColumns, validateDirectColumns, etc.):
+	•	These functions take caseClass as input and perform filtering and selection but do not modify the original caseClass.
+	3.	Potential Issue with Column Existence:
+	•	The error indicates that the column (AccountNumber#554) couldn’t be found. This could happen if:
+	•	You inadvertently used a modified DataFrame in later operations.
+	•	There is a mismatch between the dynamically derived columns and the configuration.
+	•	Columns derived using withColumn were expected but weren’t actually added to the required DataFrame.
+
+Debugging Steps to Resolve the Issue
+
+1. Verify Dynamic Column Handling
+
+Ensure that dynamically derived columns (e.g., AccountNumber) are used only in the specific context where they are added. For instance, in the validateDynamicAccountNumbers function, derived columns like aAccountNumber are added to a new source DataFrame, not the original caseClass.
+
+2. Confirm Column Existence
+
+Before performing operations like select or exceptAll, confirm that the required columns exist in the DataFrame. You can use a helper function:
+
+def validateColumnsExist(df: DataFrame, columns: Seq[String]): Unit = {
+  val missingColumns = columns.filterNot(df.columns.contains)
+  if (missingColumns.nonEmpty) {
+    throw new IllegalStateException(s"Missing columns: ${missingColumns.mkString(", ")}")
+  }
+}
+
+Use this before accessing columns dynamically.
+
+3. Ensure No Reassignment of caseClass
+
+Double-check that caseClass is not reassigned anywhere. For example:
+
+val modifiedCaseClass = caseClass.withColumn(...)
+
+Here, modifiedCaseClass is the modified DataFrame, while caseClass remains intact.
+
+Specific Issue with Your New Validation Function
+
+In the validateDynamicAccountNumbers function:
+	•	The withColumn operation adds columns to a new DataFrame (source), but subsequent code might be expecting those columns in caseClass.
+	•	If other validations depend on those derived columns, they might throw an error.
+
+Fix: Isolate the Derived Columns
+
+Ensure the dynamically derived columns are only used within the scope of their creation. For example:
+
+val source = caseClass
+  .withColumn(
+    accountNumber,
+    when(substring(col(accountId), 1, 5).isin("UKUBA"), substring(col(accountId), 9, 8))
+      .when(substring(col(accountId), 1, 5).isin("UKGTS"), substring(col(accountId), 8, 9))
+      .otherwise(null)
+  )
+  .select($"transactionId", col(accountNumber))
+
+// Use `source` for the specific validation only
+val target = caseClass.select($"transactionId", col(accountNumber))
+
+Do not use this modified source DataFrame elsewhere or reassign it to caseClass.
+
+Suggested Fix for Dynamic Validation Function
+
+Wrap the dynamic validation logic with column existence checks:
 
 def validateDynamicAccountNumbers(caseClass: DataFrame, configMap: Map[String, Seq[String]]): Seq[String] = {
   import caseClass.sparkSession.implicits._
 
-  // Extract AccountNumber and AccountId columns from the config map
   val accountNumbers = configMap.getOrElse("AccountNumber", Seq())
   val accountIds = configMap.getOrElse("AccountId", Seq())
 
-  // Check for mismatched lengths
   if (accountNumbers.length != accountIds.length) {
     return Seq("Validation Error: Mismatch in number of AccountNumber and AccountId columns in the configuration.")
   }
 
-  // Iterate over each pair of AccountNumber and AccountId
   accountNumbers.zip(accountIds).flatMap { case (accountNumber, accountId) =>
-    if (!caseClass.columns.contains(accountId) || !caseClass.columns.contains(accountNumber)) {
-      // Handle missing columns gracefully
-      Seq(
-        s"Validation Skipped for $accountNumber and $accountId: One or both columns are missing in the DataFrame."
-      )
+    if (!caseClass.columns.contains(accountId)) {
+      Seq(s"Validation skipped for $accountNumber and $accountId: $accountId not found.")
     } else {
-      // Process the columns
-      val source = caseClass
-        .withColumn(
-          accountNumber,
-          when(substring(col(accountId), 1, 5).isin("UKUBA"), substring(col(accountId), 9, 8))
-            .when(substring(col(accountId), 1, 5).isin("UKGTS"), substring(col(accountId), 8, 9))
-            .otherwise(null)
+      try {
+        val source = caseClass
+          .withColumn(
+            accountNumber,
+            when(substring(col(accountId), 1, 5).isin("UKUBA"), substring(col(accountId), 9, 8))
+              .when(substring(col(accountId), 1, 5).isin("UKGTS"), substring(col(accountId), 8, 9))
+              .otherwise(null)
+          )
+          .select($"transactionId", col(accountNumber))
+
+        val target = caseClass.select($"transactionId", col(accountNumber))
+
+        val sourceToTargetDiff = source.exceptAll(target)
+        val targetToSourceDiff = target.exceptAll(source)
+
+        val sourceToTargetIds = sourceToTargetDiff.select($"transactionId").as[String].collect()
+        val targetToSourceIds = targetToSourceDiff.select($"transactionId").as[String].collect()
+
+        val sourceToTargetCount = sourceToTargetIds.length
+        val targetToSourceCount = targetToSourceIds.length
+
+        Seq(
+          s"Validation Results for $accountNumber with $accountId:",
+          s"Source to Target Differences: $sourceToTargetCount rows found " + sourceToTargetIds.mkString(", "),
+          s"Target to Source Differences: $targetToSourceCount rows found " + targetToSourceIds.mkString(", ")
         )
-        .select($"transactionId", col(accountNumber))
-
-      val target = caseClass.select($"transactionId", col(accountNumber))
-
-      // Compute differences
-      val sourceToTargetDiff = source.exceptAll(target)
-      val targetToSourceDiff = target.exceptAll(source)
-
-      // Collect differences
-      val sourceToTargetIds = sourceToTargetDiff.select($"transactionId").as[String].collect()
-      val targetToSourceIds = targetToSourceDiff.select($"transactionId").as[String].collect()
-
-      val sourceToTargetCount = sourceToTargetIds.length
-      val targetToSourceCount = targetToSourceIds.length
-
-      // Generate results for this pair
-      Seq(
-        s"Validation Results for $accountNumber with $accountId:",
-        s"Source to Target Differences: $sourceToTargetCount rows found " + sourceToTargetIds.mkString(", "),
-        s"Target to Source Differences: $targetToSourceCount rows found " + targetToSourceIds.mkString(", ")
-      )
+      } catch {
+        case e: Exception =>
+          Seq(s"Validation failed for $accountNumber and $accountId: ${e.getMessage}")
+      }
     }
   }
 }
 
-Explanation
+Key Changes Made
 
-	1.	Dynamic Column Pair Processing:
-	•	Extracts column names from the configuration map.
-	•	Iterates over pairs of AccountNumber and AccountId.
-	2.	Graceful Handling of Missing Columns:
-	•	If either column in the pair is missing from the DataFrame, it skips validation for that pair and logs a message.
-	3.	Validation Logic:
-	•	Derives the source DataFrame by dynamically generating the accountNumber column based on the rules in the when conditions.
-	•	Compares source and target DataFrames using exceptAll.
-	4.	Output Generation:
-	•	Collects and formats validation results for each column pair into a Seq[String].
+	1.	Added column existence checks before processing.
+	2.	Isolated modifications to caseClass within the validateDynamicAccountNumbers function to ensure no external dependencies are affected.
+	3.	Added error handling to catch runtime issues during dynamic column creation.
 
-Update the main Function
+Conclusion
 
-Call the validateDynamicAccountNumbers function in the main method:
+Your issue is likely caused by:
+	1.	Expecting dynamically added columns (aAccountNumber, etc.) to exist in caseClass globally.
+	2.	Modifying caseClass unintentionally.
 
-validationResults = validationResults ++ validateDynamicAccountNumbers(caseClass, validationConfigMap)
-
-Example Config File
-
-[AccountNumber]
-aAccountNumber, bAccountNumber, cAccountNumber
-
-[AccountId]
-aAccountId, bAccountId, cAccountId
-
-Output Examples
-
-Case 1: All Columns Present
-
-If all specified columns are present in the DataFrame, the output might look like:
-
-Validation Results for aAccountNumber with aAccountId:
-Source to Target Differences: 2 rows found 123, 456
-Target to Source Differences: 1 rows found 789
-
-Validation Results for bAccountNumber with bAccountId:
-Source to Target Differences: 0 rows found 
-Target to Source Differences: 0 rows found 
-
-Validation Results for cAccountNumber with cAccountId:
-Source to Target Differences: 3 rows found 101, 202, 303
-Target to Source Differences: 1 rows found 404
-
-Case 2: Missing Columns
-
-If some columns are missing, the output might look like:
-
-Validation Skipped for aAccountNumber and aAccountId: One or both columns are missing in the DataFrame.
-
-Validation Results for bAccountNumber with bAccountId:
-Source to Target Differences: 0 rows found 
-Target to Source Differences: 0 rows found 
-
-Validation Skipped for cAccountNumber and cAccountId: One or both columns are missing in the DataFrame.
-
-Why This Design?
-
-	1.	Dynamic and Scalable:
-	•	Supports dynamic processing of column pairs based on configuration without requiring code changes for new columns.
-	2.	Error-Resilient:
-	•	Handles missing columns gracefully and provides meaningful messages.
-	3.	AWS Glue Compatibility:
-	•	Uses Spark SQL operations (withColumn, select, exceptAll) compatible with AWS Glue ETL jobs.
-
-This implementation aligns with your requirements and ensures dynamic, robust handling of multiple column pairs. Let me know if you need further modifications!
+By isolating modifications and validating column existence, you can resolve the error and ensure robust execution in AWS Glue. Let me know if further clarification is needed!
