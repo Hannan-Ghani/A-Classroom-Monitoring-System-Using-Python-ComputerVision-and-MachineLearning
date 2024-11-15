@@ -1,28 +1,89 @@
-def validateTransactionUniqueIds(sourceDF: DataFrame, targetDF: DataFrame): Seq[String] = {
-  import sourceDF.sparkSession.implicits._
+Here is the solution to dynamically process AccountNumber and AccountId pairs using the given configuration format without modifying the parseValidationConfig function:
 
-  val sourceWithUniqueId = sourceDF
-    .withColumn("transactionUniqueId", concat(col("transaction _id"), lit("//"), col("EFF_START_DATE")))
-    .select($"transaction _id", $"transactionUniqueId")
+Updated Function
 
-  val targetWithUniqueId = targetDF.select($"transactionId", $"transactionUniqueId")
+This function dynamically processes each pair of AccountNumber and AccountId columns using the parsed configuration:
 
-  val sourceToTargetDiff = sourceWithUniqueId.exceptAll(targetWithUniqueId)
-  val targetToSourceDiff = targetWithUniqueId.exceptAll(sourceWithUniqueId)
+def validateAccountNumbersDynamic(caseClass: DataFrame, configMap: Map[String, Seq[String]]): Seq[String] = {
+  import caseClass.sparkSession.implicits._
 
-  val sourceToTargetIds = sourceToTargetDiff.select($"transaction _id").as[String].collect()
-  val targetToSourceIds = targetToSourceDiff.select($"transactionId").as[String].collect()
+  // Retrieve AccountNumber and AccountId columns from configMap
+  val accountNumbers = configMap.getOrElse("AccountNumber", Seq())
+  val accountIds = configMap.getOrElse("AccountId", Seq())
 
-  val sourceToTargetCount = sourceToTargetIds.length
-  val targetToSourceCount = targetToSourceIds.length
+  // Ensure both lists have the same length
+  if (accountNumbers.length != accountIds.length) {
+    return Seq("Validation Error: Mismatch in the number of AccountNumber and AccountId columns in the configuration.")
+  }
 
-  if (sourceToTargetCount == 0 && targetToSourceCount == 0) {
-    Seq("Transaction Unique ID Validation Differences: No differences found.")
-  } else {
-    Seq(
-      "Transaction Unique ID Validation Differences:",
+  // Initialize a sequence to collect validation results
+  var validationResults = Seq[String]()
+
+  // Iterate over each pair of AccountNumber and AccountId
+  accountNumbers.zip(accountIds).foreach { case (accountNumber, accountId) =>
+    // Create source DataFrame with derived account number
+    val source = caseClass
+      .withColumn(
+        accountNumber,
+        when(substring(col(accountId), 1, 5).isin("UKUBA"), substring(col(accountId), 9, 8))
+          .when(substring(col(accountId), 1, 5).isin("UKGTS"), substring(col(accountId), 8, 9))
+          .otherwise(null)
+      )
+      .select($"transactionId", col(accountNumber))
+
+    // Create target DataFrame
+    val target = caseClass.select($"transactionId", col(accountNumber))
+
+    // Compute differences using exceptAll
+    val sourceToTargetDiff = source.exceptAll(target)
+    val targetToSourceDiff = target.exceptAll(source)
+
+    // Collect differences
+    val sourceToTargetIds = sourceToTargetDiff.select($"transactionId").as[String].collect()
+    val targetToSourceIds = targetToSourceDiff.select($"transactionId").as[String].collect()
+
+    val sourceToTargetCount = sourceToTargetIds.length
+    val targetToSourceCount = targetToSourceIds.length
+
+    // Append validation results for this pair
+    validationResults = validationResults ++ Seq(
+      s"Validation for $accountNumber with $accountId:",
       s"Source to Target Differences: $sourceToTargetCount found " + sourceToTargetIds.mkString(", "),
       s"Target to Source Differences: $targetToSourceCount found " + targetToSourceIds.mkString(", ")
     )
   }
+
+  // Return all validation results
+  validationResults
 }
+
+Explanation
+
+	1.	Dynamic Pair Processing:
+	•	The accountNumbers and accountIds are dynamically fetched from the configMap.
+	•	Each AccountNumber is paired with the corresponding AccountId for processing.
+	2.	Validation Logic:
+	•	For each pair:
+	•	A source DataFrame is created with the derived accountNumber column.
+	•	A target DataFrame is created with the original accountNumber column.
+	•	Differences are computed using exceptAll.
+	3.	Error Handling:
+	•	The function ensures that the lengths of accountNumbers and accountIds are equal. If not, a validation error message is returned.
+	4.	Result Collection:
+	•	Results for each pair are appended to the validationResults sequence, which is returned at the end.
+
+Update the Main Function
+
+In the main function, call the new validateAccountNumbersDynamic method:
+
+validationResults = validationResults ++ validateAccountNumbersDynamic(caseClass, validationConfigMap)
+
+Example Config File
+
+[AccountNumber]
+aAccountNumber, bAccountNumber, cAccountNumber
+
+[AccountId]
+aAccountId, bAccountId, cAccountId
+
+This implementation ensures dynamic processing of all AccountNumber and AccountId pairs without modifying the parseValidationConfig function. Let me know if you need further assistance!
