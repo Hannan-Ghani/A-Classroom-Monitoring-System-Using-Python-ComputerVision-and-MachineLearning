@@ -1,62 +1,28 @@
-To add this validation logic into your code, you can encapsulate it in a new method, say validateTransactionUniqueIds. This function will compare the transactionUniqueId between source and target datasets. Here’s how you can do it:
-
-Steps to Implement:
-
-	1.	Define a new validation function:
-	•	Create the validateTransactionUniqueIds function that constructs the transactionUniqueId column for both source and target.
-	•	Use the exceptAll method to identify mismatches.
-	•	Return validation results in a Seq[String].
-	2.	Call the new function in the main method:
-	•	Append the results of validateTransactionUniqueIds to the validationResults sequence.
-	3.	Update Config or Logic (if needed):
-	•	Since the logic is straightforward, it may not require updates to the configuration parsing.
-
-Full Implementation:
-
 def validateTransactionUniqueIds(sourceDF: DataFrame, targetDF: DataFrame): Seq[String] = {
   import sourceDF.sparkSession.implicits._
 
-  // Construct transactionUniqueId in source
   val sourceWithUniqueId = sourceDF
     .withColumn("transactionUniqueId", concat(col("transaction _id"), lit("//"), col("EFF_START_DATE")))
     .select($"transaction _id", $"transactionUniqueId")
 
-  // Select transactionUniqueId in target
   val targetWithUniqueId = targetDF.select($"transactionId", $"transactionUniqueId")
 
-  // Find mismatches
   val sourceToTargetDiff = sourceWithUniqueId.exceptAll(targetWithUniqueId)
   val targetToSourceDiff = targetWithUniqueId.exceptAll(sourceWithUniqueId)
 
-  // Collect mismatch IDs
   val sourceToTargetIds = sourceToTargetDiff.select($"transaction _id").as[String].collect()
   val targetToSourceIds = targetToSourceDiff.select($"transactionId").as[String].collect()
 
   val sourceToTargetCount = sourceToTargetIds.length
   val targetToSourceCount = targetToSourceIds.length
 
-  // Construct validation result
-  Seq(
-    "Transaction Unique ID Validation Differences:",
-    s"Source to Target Differences: $sourceToTargetCount found " + sourceToTargetIds.mkString(", "),
-    s"Target to Source Differences: $targetToSourceCount found " + targetToSourceIds.mkString(", ")
-  )
+  if (sourceToTargetCount == 0 && targetToSourceCount == 0) {
+    Seq("Transaction Unique ID Validation Differences: No differences found.")
+  } else {
+    Seq(
+      "Transaction Unique ID Validation Differences:",
+      s"Source to Target Differences: $sourceToTargetCount found " + sourceToTargetIds.mkString(", "),
+      s"Target to Source Differences: $targetToSourceCount found " + targetToSourceIds.mkString(", ")
+    )
+  }
 }
-
-Update the main Method:
-
-Add the call to validateTransactionUniqueIds in the main method:
-
-validationResults = validationResults ++ validateTransactionUniqueIds(transactionSource, caseClass)
-
-Output Example:
-
-If there are mismatches, the results will be included in the output file with the format:
-
-Transaction Unique ID Validation Differences:
-Source to Target Differences: 3 found transactionId1, transactionId2, transactionId3
-Target to Source Differences: 2 found transactionId4, transactionId5
-
-Next Steps:
-
-You can test this new validation logic with sample datasets to ensure it identifies mismatches correctly. If you need help with testing or configuration adjustments, let me know.
