@@ -156,3 +156,165 @@ Let me know if you need further adjustments!
 
 
 
+
+
+
+To integrate this transformation dynamically, I’ll create a reusable function that handles the validation of the TRANSACTION_ID and TRANSACTION_DATE columns. This function will validate the existence of these columns in both transactionSource and caseClass, perform the exceptAll operation, and provide results in a structured format. I’ll also show how to call it in the main function.
+
+Transformation Function
+
+Here’s the function encapsulating the logic:
+
+def validateTransactionIdAndDate(
+    transactionSource: DataFrame,
+    caseClass: DataFrame
+): Seq[String] = {
+  import transactionSource.sparkSession.implicits._
+
+  // Check if required columns exist in transactionSource
+  val sourceColumns = Seq("TRANSACTION_ID", "TRANSACTION_DATE")
+  val targetColumns = Seq("transactionId", "transactionDate")
+
+  val missingSourceCols = sourceColumns.filterNot(transactionSource.columns.contains)
+  val missingTargetCols = targetColumns.filterNot(caseClass.columns.contains)
+
+  if (missingSourceCols.nonEmpty || missingTargetCols.nonEmpty) {
+    return Seq(
+      s"Validation Skipped: Missing columns in source: ${missingSourceCols.mkString(", ")}; " +
+        s"Missing columns in target: ${missingTargetCols.mkString(", ")}"
+    )
+  }
+
+  // Select the relevant columns
+  val source = transactionSource.select($"TRANSACTION_ID", $"TRANSACTION_DATE")
+  val target = caseClass.select($"transactionId", $"transactionDate")
+
+  // Compute differences
+  val sourceToTargetDiff = source.exceptAll(target)
+  val targetToSourceDiff = target.exceptAll(source)
+
+  val sourceToTargetIds = sourceToTargetDiff.select($"TRANSACTION_ID").as[String].collect()
+  val targetToSourceIds = targetToSourceDiff.select($"transactionId").as[String].collect()
+
+  val sourceToTargetCount = sourceToTargetIds.length
+  val targetToSourceCount = targetToSourceIds.length
+
+  // Generate results
+  Seq(
+    "Transaction ID and Date Validation Results:",
+    s"Source to Target Differences: $sourceToTargetCount rows found " + sourceToTargetIds.mkString(", "),
+    s"Target to Source Differences: $targetToSourceCount rows found " + targetToSourceIds.mkString(", ")
+  )
+}
+
+Explanation of the Function
+
+	1.	Column Existence Validation:
+	•	Ensures that TRANSACTION_ID and TRANSACTION_DATE exist in transactionSource.
+	•	Ensures that transactionId and transactionDate exist in caseClass.
+	•	Skips validation with an appropriate message if any column is missing.
+	2.	Selection of Columns:
+	•	Dynamically selects the required columns from transactionSource and caseClass.
+	3.	Comparison:
+	•	Performs the exceptAll operation to find differences between source and target.
+	4.	Results Formatting:
+	•	Returns a sequence of strings containing validation results.
+
+How to Call in main Function
+
+Add the following call to the main function:
+
+validationResults = validationResults ++ validateTransactionIdAndDate(transactionSource, caseClass)
+
+Complete Flow in main Function
+
+Here’s how the main function will look with the new validation:
+
+def main(sysArgs: Array[String]): Unit = {
+  val sparkSession: SparkSession = SparkSession.builder.getOrCreate()
+  val glueContext: GlueContext = new GlueContext(sparkSession.sparkContext)
+  import sparkSession.implicits._
+
+  val logger: Logger = Logger.getLogger("CleanseCaseClassLogger")
+
+  // Get Glue job parameters
+  val args = GlueArgParser.getResolvedOptions(sysArgs, Seq("s3PathConfig", "s3ValidationConfig").toArray)
+  val s3PathConfig = args("s3PathConfig")
+  val s3ValidationConfig = args("s3ValidationConfig")
+
+  // Read configuration files
+  val pathConfigMap = parseConfigFile(s3PathConfig, sparkSession)
+  val validationConfigMap = parseValidationConfig(s3ValidationConfig, sparkSession)
+
+  // Extract paths
+  val inputSourcePath = pathConfigMap("inputSourcePath")
+  val inputTargetPath = pathConfigMap("inputTargetPath")
+  val outputBasePath = pathConfigMap("outputBasePath")
+
+  // Load data
+  val transactionSource: DataFrame = sparkSession.read.parquet(inputSourcePath)
+  val caseClass: DataFrame = sparkSession.read.parquet(inputTargetPath)
+
+  // Initialize validation results
+  var validationResults = Seq[String]()
+
+  // Null Validation
+  validationResults = validationResults ++ validateNullColumns(caseClass, validationConfigMap.getOrElse("null_validation", Seq()))
+
+  // Direct Column Validation
+  validationResults = validationResults ++ validateDirectColumns(transactionSource, caseClass, validationConfigMap)
+
+  // Narrative Validation
+  validationResults = validationResults ++ validateNarrativeColumns(transactionSource, caseClass, validationConfigMap)
+
+  // Country ISO Mapping Validation
+  validationResults = validationResults ++ validateCountryIsoMapping(transactionSource, caseClass)
+
+  // Transaction ID and Date Validation
+  validationResults = validationResults ++ validateTransactionIdAndDate(transactionSource, caseClass)
+
+  // Convert results to DataFrame and write to S3
+  val resultsDF = validationResults.toDF("validation_result")
+  resultsDF.write.mode("overwrite").text(s"$outputBasePath/validation_differences.txt")
+
+  Job.commit()
+}
+
+Expected Output
+
+Case 1: Columns Exist
+
+If the required columns exist and there are differences:
+
+Transaction ID and Date Validation Results:
+Source to Target Differences: 2 rows found 123, 456
+Target to Source Differences: 1 rows found 789
+
+Case 2: Missing Columns
+
+If required columns are missing in either DataFrame:
+
+Validation Skipped: Missing columns in source: TRANSACTION_ID; Missing columns in target: transactionDate
+
+Benefits of the Design
+
+	1.	Dynamic and Scalable:
+	•	Handles column existence and ensures transformations work dynamically.
+	2.	Error-Resilient:
+	•	Skips validation gracefully if required columns are missing and logs a meaningful message.
+	3.	AWS Glue Compatibility:
+	•	Fully compatible with Spark and AWS Glue ETL.
+
+Let me know if you need further refinements!
+
+
+
+
+
+
+
+
+
+
+
+
