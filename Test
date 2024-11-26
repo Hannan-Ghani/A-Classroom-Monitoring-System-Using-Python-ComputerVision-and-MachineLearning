@@ -510,4 +510,205 @@ Let me know if you need further refinements!
 
 
 
+Below is the implementation to encapsulate the described transformations into a reusable function and integrate it into your main function.
+
+Transformation Function
+
+def validateCustomerIds(
+    transactionSource: DataFrame,
+    caseClass: DataFrame
+): Seq[String] = {
+  import transactionSource.sparkSession.implicits._
+
+  // Check if required columns exist for bCustomerId
+  val bCustomerIdRequiredColumns = Seq("txn_direction_desc", "COUNTERPARTY_CUSTOMER_KEY", "CUSTOMER_KEY", "TRANSACTION_ID")
+  val bCustomerIdMissingColumns = bCustomerIdRequiredColumns.filterNot(transactionSource.columns.contains)
+
+  val bCustomerValidationResults = if (bCustomerIdMissingColumns.nonEmpty) {
+    Seq(s"Validation Skipped for bCustomerId: Missing columns: ${bCustomerIdMissingColumns.mkString(", ")}")
+  } else {
+    val sourceB = transactionSource
+      .withColumn(
+        "bCustomerId",
+        when($"txn_direction_desc".isin("DEBIT"), $"COUNTERPARTY_CUSTOMER_KEY")
+          .when($"txn_direction_desc".isin("CREDIT"), $"CUSTOMER_KEY")
+          .otherwise(null)
+      )
+      .filter($"txn_direction_desc".isin("DEBIT", "CREDIT"))
+      .select($"TRANSACTION_ID".as("transactionId"), $"bCustomerId")
+
+    val targetB = caseClass.select($"transactionId", $"bCustomerId")
+
+    val sourceToTargetDiffB = sourceB.exceptAll(targetB)
+    val targetToSourceDiffB = targetB.exceptAll(sourceB)
+
+    val sourceToTargetIdsB = sourceToTargetDiffB.select($"transactionId").as[String].collect()
+    val targetToSourceIdsB = targetToSourceDiffB.select($"transactionId").as[String].collect()
+
+    val sourceToTargetCountB = sourceToTargetIdsB.length
+    val targetToSourceCountB = targetToSourceIdsB.length
+
+    Seq(
+      "Validation Results for bCustomerId:",
+      s"Source to Target Differences: $sourceToTargetCountB rows found " + sourceToTargetIdsB.mkString(", "),
+      s"Target to Source Differences: $targetToSourceCountB rows found " + targetToSourceIdsB.mkString(", ")
+    )
+  }
+
+  // Check if required columns exist for aCustomerId
+  val aCustomerIdRequiredColumns = Seq("txn_direction_desc", "COUNTERPARTY_CUSTOMER_KEY", "CUSTOMER_KEY", "TRANSACTION_ID")
+  val aCustomerIdMissingColumns = aCustomerIdRequiredColumns.filterNot(transactionSource.columns.contains)
+
+  val aCustomerValidationResults = if (aCustomerIdMissingColumns.nonEmpty) {
+    Seq(s"Validation Skipped for aCustomerId: Missing columns: ${aCustomerIdMissingColumns.mkString(", ")}")
+  } else {
+    val sourceA = transactionSource
+      .withColumn(
+        "aCustomerId",
+        when($"txn_direction_desc".isin("DEBIT"), $"CUSTOMER_KEY")
+          .when($"txn_direction_desc".isin("CREDIT"), $"COUNTERPARTY_CUSTOMER_KEY")
+          .otherwise(null)
+      )
+      .select($"TRANSACTION_ID".as("transactionId"), $"aCustomerId")
+
+    val targetA = caseClass.select($"transactionId", $"aCustomerId")
+
+    val sourceToTargetDiffA = sourceA.exceptAll(targetA)
+    val targetToSourceDiffA = targetA.exceptAll(sourceA)
+
+    val sourceToTargetIdsA = sourceToTargetDiffA.select($"transactionId").as[String].collect()
+    val targetToSourceIdsA = targetToSourceDiffA.select($"transactionId").as[String].collect()
+
+    val sourceToTargetCountA = sourceToTargetIdsA.length
+    val targetToSourceCountA = targetToSourceIdsA.length
+
+    Seq(
+      "Validation Results for aCustomerId:",
+      s"Source to Target Differences: $sourceToTargetCountA rows found " + sourceToTargetIdsA.mkString(", "),
+      s"Target to Source Differences: $targetToSourceCountA rows found " + targetToSourceIdsA.mkString(", ")
+    )
+  }
+
+  // Combine results
+  bCustomerValidationResults ++ aCustomerValidationResults
+}
+
+Explanation of the Function
+
+	1.	bCustomerId Validation:
+	•	Uses txn_direction_desc to dynamically select COUNTERPARTY_CUSTOMER_KEY or CUSTOMER_KEY for DEBIT or CREDIT transactions.
+	•	Filters the data for rows where txn_direction_desc is either DEBIT or CREDIT.
+	•	Compares the transformed sourceB DataFrame with targetB using exceptAll.
+	2.	aCustomerId Validation:
+	•	Uses txn_direction_desc to dynamically select CUSTOMER_KEY or COUNTERPARTY_CUSTOMER_KEY for DEBIT or CREDIT transactions.
+	•	Compares the transformed sourceA DataFrame with targetA using exceptAll.
+	3.	Column Validation:
+	•	Ensures all required columns exist before applying transformations.
+	•	Skips validation if required columns are missing and logs an appropriate message.
+	4.	Result Combination:
+	•	Combines validation results for bCustomerId and aCustomerId.
+
+How to Call in main Function
+
+Add the following call to the main function:
+
+validationResults = validationResults ++ validateCustomerIds(transactionSource, caseClass)
+
+Complete Flow in main Function
+
+Here’s how the main function will look with this added validation:
+
+def main(sysArgs: Array[String]): Unit = {
+  val sparkSession: SparkSession = SparkSession.builder.getOrCreate()
+  val glueContext: GlueContext = new GlueContext(sparkSession.sparkContext)
+  import sparkSession.implicits._
+
+  val logger: Logger = Logger.getLogger("CleanseCaseClassLogger")
+
+  // Get Glue job parameters
+  val args = GlueArgParser.getResolvedOptions(sysArgs, Seq("s3PathConfig", "s3ValidationConfig").toArray)
+  val s3PathConfig = args("s3PathConfig")
+  val s3ValidationConfig = args("s3ValidationConfig")
+
+  // Read configuration files
+  val pathConfigMap = parseConfigFile(s3PathConfig, sparkSession)
+  val validationConfigMap = parseValidationConfig(s3ValidationConfig, sparkSession)
+
+  // Extract paths
+  val inputSourcePath = pathConfigMap("inputSourcePath")
+  val inputTargetPath = pathConfigMap("inputTargetPath")
+  val outputBasePath = pathConfigMap("outputBasePath")
+
+  // Load data
+  val transactionSource: DataFrame = sparkSession.read.parquet(inputSourcePath)
+  val caseClass: DataFrame = sparkSession.read.parquet(inputTargetPath)
+
+  // Initialize validation results
+  var validationResults = Seq[String]()
+
+  // Null Validation
+  validationResults = validationResults ++ validateNullColumns(caseClass, validationConfigMap.getOrElse("null_validation", Seq()))
+
+  // Direct Column Validation
+  validationResults = validationResults ++ validateDirectColumns(transactionSource, caseClass, validationConfigMap)
+
+  // Narrative Validation
+  validationResults = validationResults ++ validateNarrativeColumns(transactionSource, caseClass, validationConfigMap)
+
+  // Country ISO Mapping Validation
+  validationResults = validationResults ++ validateCountryIsoMapping(transactionSource, caseClass)
+
+  // Customer ID Validation
+  validationResults = validationResults ++ validateCustomerIds(transactionSource, caseClass)
+
+  // Convert results to DataFrame and write to S3
+  val resultsDF = validationResults.toDF("validation_result")
+  resultsDF.write.mode("overwrite").text(s"$outputBasePath/validation_differences.txt")
+
+  Job.commit()
+}
+
+Expected Output
+
+Case 1: All Columns Present
+
+If all required columns exist and there are differences:
+
+Validation Results for bCustomerId:
+Source to Target Differences: 3 rows found 101, 202, 303
+Target to Source Differences: 2 rows found 404, 505
+
+Validation Results for aCustomerId:
+Source to Target Differences: 2 rows found 123, 456
+Target to Source Differences: 1 rows found 789
+
+Case 2: Missing Columns
+
+If required columns are missing:
+
+Validation Skipped for bCustomerId: Missing columns: txn_direction_desc, CUSTOMER_KEY
+Validation Skipped for aCustomerId: Missing columns: COUNTERPARTY_CUSTOMER_KEY, TRANSACTION_ID
+
+Advantages of the Design
+
+	1.	Dynamic Column Handling:
+	•	Handles bCustomerId and aCustomerId transformations in one function.
+	2.	Error-Resilient:
+	•	Skips validation gracefully if required columns are missing, with clear logs.
+	3.	AWS Glue Compatibility:
+	•	Fully compatible with Spark and AWS Glue ETL jobs.
+
+Let me know if you need further refinements or additional features!
+
+
+
+
+
+
+
+
+
+
+
+
 
