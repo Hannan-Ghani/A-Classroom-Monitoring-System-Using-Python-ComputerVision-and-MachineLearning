@@ -316,5 +316,198 @@ Let me know if you need further refinements!
 
 
 
+Here’s how to encapsulate this transformation logic into a reusable function for the given task and integrate it into the main function.
+
+Transformation Function
+
+def validateAccountUniqueIds(
+    transactionSource: DataFrame,
+    caseClass: DataFrame
+): Seq[String] = {
+  import transactionSource.sparkSession.implicits._
+
+  // Join transactionSource and caseClass
+  val data = transactionSource.join(
+    caseClass,
+    transactionSource("TRANSACTION_ID") === caseClass("transactionId"),
+    "inner"
+  )
+
+  // Check if required columns exist
+  val requiredColumns = Seq("txn_direction_desc", "ACCOUNT_KEY", "COUNTERPARTY_PRODUCT_KEY", "transactionId")
+  val missingColumns = requiredColumns.filterNot(data.columns.contains)
+  if (missingColumns.nonEmpty) {
+    return Seq(s"Validation Skipped: Missing columns in joined DataFrame: ${missingColumns.mkString(", ")}")
+  }
+
+  // Transformation for aAccountUniqueId
+  val sourceA = data
+    .withColumn(
+      "aAccountUniqueId",
+      when($"txn_direction_desc".isin("DEBIT"), split($"ACCOUNT_KEY", "-").getItem(1))
+        .when($"txn_direction_desc".isin("CREDIT"), split($"COUNTERPARTY_PRODUCT_KEY", "-").getItem(1))
+    )
+    .select($"transactionId", $"aAccountUniqueId")
+
+  val targetA = caseClass.select($"transactionId", $"aAccountUniqueId")
+
+  // Compare source and target for aAccountUniqueId
+  val sourceToTargetDiffA = sourceA.exceptAll(targetA)
+  val targetToSourceDiffA = targetA.exceptAll(sourceA)
+
+  val sourceToTargetIdsA = sourceToTargetDiffA.select($"transactionId").as[String].collect()
+  val targetToSourceIdsA = targetToSourceDiffA.select($"transactionId").as[String].collect()
+
+  val sourceToTargetCountA = sourceToTargetIdsA.length
+  val targetToSourceCountA = targetToSourceIdsA.length
+
+  // Transformation for bAccountUniqueId
+  val sourceB = data
+    .withColumn(
+      "bAccountUniqueId",
+      when($"txn_direction_desc".isin("DEBIT"), split($"COUNTERPARTY_PRODUCT_KEY", "-").getItem(1))
+        .otherwise(split($"ACCOUNT_KEY", "-").getItem(1))
+    )
+    .select($"transactionId", $"bAccountUniqueId")
+
+  val targetB = caseClass.select($"transactionId", $"bAccountUniqueId")
+
+  // Compare source and target for bAccountUniqueId
+  val sourceToTargetDiffB = sourceB.exceptAll(targetB)
+  val targetToSourceDiffB = targetB.exceptAll(sourceB)
+
+  val sourceToTargetIdsB = sourceToTargetDiffB.select($"transactionId").as[String].collect()
+  val targetToSourceIdsB = targetToSourceDiffB.select($"transactionId").as[String].collect()
+
+  val sourceToTargetCountB = sourceToTargetIdsB.length
+  val targetToSourceCountB = targetToSourceIdsB.length
+
+  // Generate results for both transformations
+  Seq(
+    "Validation Results for aAccountUniqueId:",
+    s"Source to Target Differences: $sourceToTargetCountA rows found " + sourceToTargetIdsA.mkString(", "),
+    s"Target to Source Differences: $targetToSourceCountA rows found " + targetToSourceIdsA.mkString(", "),
+    "Validation Results for bAccountUniqueId:",
+    s"Source to Target Differences: $sourceToTargetCountB rows found " + sourceToTargetIdsB.mkString(", "),
+    s"Target to Source Differences: $targetToSourceCountB rows found " + targetToSourceIdsB.mkString(", ")
+  )
+}
+
+Explanation of the Function
+
+	1.	Join DataFrames:
+	•	Joins transactionSource and caseClass on TRANSACTION_ID and transactionId.
+	2.	Column Validation:
+	•	Validates the existence of required columns: txn_direction_desc, ACCOUNT_KEY, COUNTERPARTY_PRODUCT_KEY, and transactionId.
+	3.	Transformation:
+	•	Computes aAccountUniqueId based on txn_direction_desc (DEBIT or CREDIT).
+	•	Computes bAccountUniqueId with the opposite logic for COUNTERPARTY_PRODUCT_KEY.
+	4.	Validation:
+	•	Compares sourceA (for aAccountUniqueId) and sourceB (for bAccountUniqueId) with their respective target DataFrames using exceptAll.
+	5.	Output Results:
+	•	Returns the differences for both aAccountUniqueId and bAccountUniqueId.
+
+How to Call in main Function
+
+Add the following call to the main function:
+
+validationResults = validationResults ++ validateAccountUniqueIds(transactionSource, caseClass)
+
+Complete Flow in main Function
+
+Here’s how the main function will look with this added validation:
+
+def main(sysArgs: Array[String]): Unit = {
+  val sparkSession: SparkSession = SparkSession.builder.getOrCreate()
+  val glueContext: GlueContext = new GlueContext(sparkSession.sparkContext)
+  import sparkSession.implicits._
+
+  val logger: Logger = Logger.getLogger("CleanseCaseClassLogger")
+
+  // Get Glue job parameters
+  val args = GlueArgParser.getResolvedOptions(sysArgs, Seq("s3PathConfig", "s3ValidationConfig").toArray)
+  val s3PathConfig = args("s3PathConfig")
+  val s3ValidationConfig = args("s3ValidationConfig")
+
+  // Read configuration files
+  val pathConfigMap = parseConfigFile(s3PathConfig, sparkSession)
+  val validationConfigMap = parseValidationConfig(s3ValidationConfig, sparkSession)
+
+  // Extract paths
+  val inputSourcePath = pathConfigMap("inputSourcePath")
+  val inputTargetPath = pathConfigMap("inputTargetPath")
+  val outputBasePath = pathConfigMap("outputBasePath")
+
+  // Load data
+  val transactionSource: DataFrame = sparkSession.read.parquet(inputSourcePath)
+  val caseClass: DataFrame = sparkSession.read.parquet(inputTargetPath)
+
+  // Initialize validation results
+  var validationResults = Seq[String]()
+
+  // Null Validation
+  validationResults = validationResults ++ validateNullColumns(caseClass, validationConfigMap.getOrElse("null_validation", Seq()))
+
+  // Direct Column Validation
+  validationResults = validationResults ++ validateDirectColumns(transactionSource, caseClass, validationConfigMap)
+
+  // Narrative Validation
+  validationResults = validationResults ++ validateNarrativeColumns(transactionSource, caseClass, validationConfigMap)
+
+  // Country ISO Mapping Validation
+  validationResults = validationResults ++ validateCountryIsoMapping(transactionSource, caseClass)
+
+  // Account Unique ID Validation
+  validationResults = validationResults ++ validateAccountUniqueIds(transactionSource, caseClass)
+
+  // Convert results to DataFrame and write to S3
+  val resultsDF = validationResults.toDF("validation_result")
+  resultsDF.write.mode("overwrite").text(s"$outputBasePath/validation_differences.txt")
+
+  Job.commit()
+}
+
+Expected Output
+
+Case 1: All Columns Present
+
+If all required columns exist and there are differences:
+
+Validation Results for aAccountUniqueId:
+Source to Target Differences: 2 rows found 123, 456
+Target to Source Differences: 1 rows found 789
+
+Validation Results for bAccountUniqueId:
+Source to Target Differences: 3 rows found 101, 202, 303
+Target to Source Differences: 2 rows found 404, 505
+
+Case 2: Missing Columns
+
+If required columns are missing:
+
+Validation Skipped: Missing columns in joined DataFrame: txn_direction_desc, ACCOUNT_KEY
+
+Benefits of the Design
+
+	1.	Dynamic and Scalable:
+	•	Handles transformations for both aAccountUniqueId and bAccountUniqueId in a single function.
+	2.	Error-Resilient:
+	•	Skips validation gracefully if required columns are missing and logs meaningful messages.
+	3.	AWS Glue Compatibility:
+	•	Fully compatible with Spark and AWS Glue ETL jobs.
+
+Let me know if you need further refinements!
+
+
+
+
+
+
+
+
+
+
+
+
 
 
