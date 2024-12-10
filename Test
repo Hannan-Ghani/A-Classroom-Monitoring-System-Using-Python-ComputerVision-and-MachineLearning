@@ -1,714 +1,151 @@
-To dynamically integrate the provided transformation into your application and call it from the main function, I’ll encapsulate the logic into a function, ensure proper validation for column existence, and dynamically compare the transformed resultDF with the target.
+import sys
+from pyspark.context import SparkContext
+from awsglue.context import GlueContext
+from awsglue.job import Job
+from awsglue.utils import getResolvedOptions
+from pyspark.sql import DataFrame
+from pyspark.sql.functions import col, regexp_replace, when
 
-Transformation Function
+# Function to initialize Spark and Glue contexts
+def initialize_context(args):
+    sc = SparkContext()
+    glue_context = GlueContext(sc)
+    spark = glue_context.spark_session
+    job = Job(glue_context)
+    job.init(args['JOB_NAME'], args)
+    return spark, job
 
-Here’s how the transformation logic is encapsulated into a reusable function:
+# Function to parse paths from a text file
+def read_input_paths(file_path: str) -> dict:
+    with open(file_path, 'r') as file:
+        return {line.split('=')[0].strip(): line.split('=')[1].strip() for line in file if '=' in line}
 
-def validateCountryIsoMapping(
-    transactionSource: DataFrame,
-    caseClass: DataFrame
-): Seq[String] = {
-  import transactionSource.sparkSession.implicits._
+# Function to parse column configurations from a text file
+def read_column_config(file_path: str) -> dict:
+    config = {}
+    with open(file_path, 'r') as file:
+        section = None
+        for line in file:
+            line = line.strip()
+            if line.startswith("[") and line.endswith("]"):  # Section header
+                section = line[1:-1]
+                config[section] = []
+            elif section and line:
+                config[section].append(line)
+    return config
 
-  // Define the mapping UDF
-  val mappingUDF = udf((input: String) =>
-    Map(
-      "AD" -> "AND",
-      "AE" -> "ARE",
-      "TK" -> "TKL",
-      "YG" -> "SRB"
-    ).getOrElse(input, input)
-  )
+# Function to read and process customer data
+def process_customer_data(spark: DataFrame, customer_path: str, column_config: dict) -> DataFrame:
+    customer_key = column_config['customer'][0]
+    return spark.read.parquet(customer_path)\
+        .filter("""
+            NUM_OF_ACCOUNT >= 0 AND 
+            (SOURCE_COUNTRY <> 'ZA' OR SOURCE_COUNTRY IS NULL) AND 
+            customer_key IS NOT NULL AND 
+            customer_key NOT IN ('', '***', 'TTMAMC-**', 'TMEMA-**', 'TMUK1-**', 'MUK2-**', 'Not Available')
+        """)\
+        .withColumn('customerUniqueId', regexp_replace(col(customer_key), '^-', ''))\
+        .cache()
 
-  // Check if the required column exists in the transactionSource DataFrame
-  if (!transactionSource.columns.contains("TRANSACTION_COUNTRY_ISO_CODE")) {
-    return Seq("Validation Skipped: TRANSACTION_COUNTRY_ISO_CODE column not found in transactionSource.")
-  }
+# Function to read product data
+def read_product_data(spark: DataFrame, fortent_path: str, core_path: str) -> DataFrame:
+    prod_fortent = spark.read.parquet(fortent_path)
+    prod_core = spark.read.parquet(core_path)
+    return prod_core.unionByName(prod_fortent).cache()
 
-  if (!caseClass.columns.contains("transactionCountryIso3")) {
-    return Seq("Validation Skipped: transactionCountryIso3 column not found in caseClass.")
-  }
+# Function to join customer and product data
+def join_customer_product(a_cus: DataFrame, a_prod: DataFrame) -> DataFrame:
+    return a_cus.join(a_prod, a_cus.customerUniqueId == a_prod.customerUniqueId, how='inner')\
+        .dropDuplicates().cache()
 
-  // Perform the transformation
-  val resultDF = transactionSource
-    .withColumn("newISO3", mappingUDF(col("TRANSACTION_COUNTRY_ISO_CODE")))
-    .select($"TRANSACTION_ID", $"newISO3")
+# Scenario 1: Compare account numbers
+def validate_account_numbers(spark: DataFrame, column_config: dict) -> DataFrame:
+    customer_col = column_config['customer'][0]
+    account_col = column_config['account'][0]
+    return spark.sql(f"""
+        SELECT 
+            a.transactionId
+        FROM prod_qtx a
+        LEFT JOIN Qxta_targt b
+        ON a.{customer_col} = b.{customer_col}
+        WHERE a.{account_col} != b.{account_col}
+    """)
 
-  val target = caseClass.select($"transactionId", $"transactionCountryIso3")
+# Scenario 2: Compare sort codes
+def validate_sort_codes(spark: DataFrame, column_config: dict) -> DataFrame:
+    customer_col = column_config['customer'][0]
+    sortcode_col = column_config['sortcode'][0]
+    return spark.sql(f"""
+        SELECT 
+            a.transactionId
+        FROM prod_qtx a
+        LEFT JOIN Qxta_targt b
+        ON a.{customer_col} = b.{customer_col}
+        WHERE a.{sortcode_col} != b.{sortcode_col}
+    """)
 
-  // Compute differences
-  val sourceToTargetDiff = resultDF.exceptAll(target)
-  val targetToSourceDiff = target.exceptAll(resultDF)
+# Scenario 3: Differences Validation
+def validate_data_differences(prod_qtx: DataFrame, target_table: str, column_config: dict) -> DataFrame:
+    columns = column_config['validate']
+    src_fields1 = prod_qtx.select("transactionId")
+    targ_fields1 = spark.table(target_table).select("transactionId")
+    
+    source_to_target_diff = src_fields1.exceptAll(targ_fields1)
+    target_to_source_diff = targ_fields1.exceptAll(src_fields1)
+    
+    # Combine results
+    return source_to_target_diff.unionByName(target_to_source_diff)
 
-  val sourceToTargetIds = sourceToTargetDiff.select($"TRANSACTION_ID").as[String].collect()
-  val targetToSourceIds = targetToSourceDiff.select($"transactionId").as[String].collect()
+# Aggregate results and write to a text file
+def aggregate_and_write_results(validation_results: list, output_path: str):
+    with open(output_path, 'w') as file:
+        for idx, (scenario_name, result) in enumerate(validation_results):
+            transaction_ids = result.select("transactionId").distinct()
+            count = transaction_ids.count()
+            
+            file.write(f"Validation Scenario {idx + 1}: {scenario_name}\n")
+            file.write(f"Total Differences: {count}\n")
+            transaction_ids_list = transaction_ids.collect()
+            for row in transaction_ids_list:
+                file.write(f"{row['transactionId']}\n")
+            file.write("\n")
 
-  val sourceToTargetCount = sourceToTargetIds.length
-  val targetToSourceCount = targetToSourceIds.length
-
-  // Generate results
-  Seq(
-    "Country ISO Mapping Validation Results:",
-    s"Source to Target Differences: $sourceToTargetCount rows found " + sourceToTargetIds.mkString(", "),
-    s"Target to Source Differences: $targetToSourceCount rows found " + targetToSourceIds.mkString(", ")
-  )
-}
-
-Explanation of the Code
-
-	1.	Mapping UDF:
-	•	A Spark UDF (mappingUDF) is defined to map ISO country codes (TRANSACTION_COUNTRY_ISO_CODE) to their corresponding values or return the input value if no mapping exists.
-	2.	Column Existence Validation:
-	•	Checks if TRANSACTION_COUNTRY_ISO_CODE exists in transactionSource and if transactionCountryIso3 exists in caseClass.
-	•	If any column is missing, it returns a message and skips the validation.
-	3.	Transformation:
-	•	A new column newISO3 is created using the mapping UDF.
-	•	Only the columns TRANSACTION_ID and newISO3 are selected for comparison.
-	4.	Comparison:
-	•	resultDF and target DataFrames are compared using exceptAll to find differences.
-	•	Differences are collected and returned as a sequence of strings.
-
-How to Call in main Function
-
-You can call this function in the main method as follows:
-
-validationResults = validationResults ++ validateCountryIsoMapping(transactionSource, caseClass)
-
-Complete Flow in main Function
-
-Here’s how the main function would look with this added validation:
-
-def main(sysArgs: Array[String]): Unit = {
-  val sparkSession: SparkSession = SparkSession.builder.getOrCreate()
-  val glueContext: GlueContext = new GlueContext(sparkSession.sparkContext)
-  import sparkSession.implicits._
-
-  val logger: Logger = Logger.getLogger("CleanseCaseClassLogger")
-
-  // Get Glue job parameters
-  val args = GlueArgParser.getResolvedOptions(sysArgs, Seq("s3PathConfig", "s3ValidationConfig").toArray)
-  val s3PathConfig = args("s3PathConfig")
-  val s3ValidationConfig = args("s3ValidationConfig")
-
-  // Read configuration files
-  val pathConfigMap = parseConfigFile(s3PathConfig, sparkSession)
-  val validationConfigMap = parseValidationConfig(s3ValidationConfig, sparkSession)
-
-  // Extract paths
-  val inputSourcePath = pathConfigMap("inputSourcePath")
-  val inputTargetPath = pathConfigMap("inputTargetPath")
-  val outputBasePath = pathConfigMap("outputBasePath")
-
-  // Load data
-  val transactionSource: DataFrame = sparkSession.read.parquet(inputSourcePath)
-  val caseClass: DataFrame = sparkSession.read.parquet(inputTargetPath)
-
-  // Initialize validation results
-  var validationResults = Seq[String]()
-
-  // Null Validation
-  validationResults = validationResults ++ validateNullColumns(caseClass, validationConfigMap.getOrElse("null_validation", Seq()))
-
-  // Direct Column Validation
-  validationResults = validationResults ++ validateDirectColumns(transactionSource, caseClass, validationConfigMap)
-
-  // Narrative Validation
-  validationResults = validationResults ++ validateNarrativeColumns(transactionSource, caseClass, validationConfigMap)
-
-  // Country ISO Mapping Validation
-  validationResults = validationResults ++ validateCountryIsoMapping(transactionSource, caseClass)
-
-  // Convert results to DataFrame and write to S3
-  val resultsDF = validationResults.toDF("validation_result")
-  resultsDF.write.mode("overwrite").text(s"$outputBasePath/validation_differences.txt")
-
-  Job.commit()
-}
-
-Expected Output
-
-Case 1: Columns Exist
-
-If all required columns exist and there are differences:
-
-Country ISO Mapping Validation Results:
-Source to Target Differences: 3 rows found 101, 202, 303
-Target to Source Differences: 2 rows found 404, 505
-
-Case 2: Missing Columns
-
-If required columns are missing:
-
-Validation Skipped: TRANSACTION_COUNTRY_ISO_CODE column not found in transactionSource.
-
-Advantages of this Design
-
-	1.	Dynamic Column Handling:
-	•	The transformation is reusable and can handle dynamic mapping requirements.
-	2.	Error-Resilient:
-	•	Gracefully handles missing columns by skipping validation and logging an appropriate message.
-	3.	AWS Glue Compatibility:
-	•	Fully compatible with Spark and AWS Glue ETL jobs.
-
-Let me know if you need further adjustments!
-
-
-
-
-
-
-
-
-To integrate this transformation dynamically, I’ll create a reusable function that handles the validation of the TRANSACTION_ID and TRANSACTION_DATE columns. This function will validate the existence of these columns in both transactionSource and caseClass, perform the exceptAll operation, and provide results in a structured format. I’ll also show how to call it in the main function.
-
-Transformation Function
-
-Here’s the function encapsulating the logic:
-
-def validateTransactionIdAndDate(
-    transactionSource: DataFrame,
-    caseClass: DataFrame
-): Seq[String] = {
-  import transactionSource.sparkSession.implicits._
-
-  // Check if required columns exist in transactionSource
-  val sourceColumns = Seq("TRANSACTION_ID", "TRANSACTION_DATE")
-  val targetColumns = Seq("transactionId", "transactionDate")
-
-  val missingSourceCols = sourceColumns.filterNot(transactionSource.columns.contains)
-  val missingTargetCols = targetColumns.filterNot(caseClass.columns.contains)
-
-  if (missingSourceCols.nonEmpty || missingTargetCols.nonEmpty) {
-    return Seq(
-      s"Validation Skipped: Missing columns in source: ${missingSourceCols.mkString(", ")}; " +
-        s"Missing columns in target: ${missingTargetCols.mkString(", ")}"
+# Main entry point
+if __name__ == "__main__":
+    args = getResolvedOptions(
+        sys.argv, 
+        ['JOB_NAME', 'INPUT_PATH_FILE', 'COLUMN_CONFIG_FILE', 'OUTPUT_PATH']
     )
-  }
-
-  // Select the relevant columns
-  val source = transactionSource.select($"TRANSACTION_ID", $"TRANSACTION_DATE")
-  val target = caseClass.select($"transactionId", $"transactionDate")
-
-  // Compute differences
-  val sourceToTargetDiff = source.exceptAll(target)
-  val targetToSourceDiff = target.exceptAll(source)
-
-  val sourceToTargetIds = sourceToTargetDiff.select($"TRANSACTION_ID").as[String].collect()
-  val targetToSourceIds = targetToSourceDiff.select($"transactionId").as[String].collect()
-
-  val sourceToTargetCount = sourceToTargetIds.length
-  val targetToSourceCount = targetToSourceIds.length
-
-  // Generate results
-  Seq(
-    "Transaction ID and Date Validation Results:",
-    s"Source to Target Differences: $sourceToTargetCount rows found " + sourceToTargetIds.mkString(", "),
-    s"Target to Source Differences: $targetToSourceCount rows found " + targetToSourceIds.mkString(", ")
-  )
-}
-
-Explanation of the Function
-
-	1.	Column Existence Validation:
-	•	Ensures that TRANSACTION_ID and TRANSACTION_DATE exist in transactionSource.
-	•	Ensures that transactionId and transactionDate exist in caseClass.
-	•	Skips validation with an appropriate message if any column is missing.
-	2.	Selection of Columns:
-	•	Dynamically selects the required columns from transactionSource and caseClass.
-	3.	Comparison:
-	•	Performs the exceptAll operation to find differences between source and target.
-	4.	Results Formatting:
-	•	Returns a sequence of strings containing validation results.
-
-How to Call in main Function
-
-Add the following call to the main function:
-
-validationResults = validationResults ++ validateTransactionIdAndDate(transactionSource, caseClass)
-
-Complete Flow in main Function
-
-Here’s how the main function will look with the new validation:
-
-def main(sysArgs: Array[String]): Unit = {
-  val sparkSession: SparkSession = SparkSession.builder.getOrCreate()
-  val glueContext: GlueContext = new GlueContext(sparkSession.sparkContext)
-  import sparkSession.implicits._
-
-  val logger: Logger = Logger.getLogger("CleanseCaseClassLogger")
-
-  // Get Glue job parameters
-  val args = GlueArgParser.getResolvedOptions(sysArgs, Seq("s3PathConfig", "s3ValidationConfig").toArray)
-  val s3PathConfig = args("s3PathConfig")
-  val s3ValidationConfig = args("s3ValidationConfig")
-
-  // Read configuration files
-  val pathConfigMap = parseConfigFile(s3PathConfig, sparkSession)
-  val validationConfigMap = parseValidationConfig(s3ValidationConfig, sparkSession)
-
-  // Extract paths
-  val inputSourcePath = pathConfigMap("inputSourcePath")
-  val inputTargetPath = pathConfigMap("inputTargetPath")
-  val outputBasePath = pathConfigMap("outputBasePath")
-
-  // Load data
-  val transactionSource: DataFrame = sparkSession.read.parquet(inputSourcePath)
-  val caseClass: DataFrame = sparkSession.read.parquet(inputTargetPath)
-
-  // Initialize validation results
-  var validationResults = Seq[String]()
-
-  // Null Validation
-  validationResults = validationResults ++ validateNullColumns(caseClass, validationConfigMap.getOrElse("null_validation", Seq()))
-
-  // Direct Column Validation
-  validationResults = validationResults ++ validateDirectColumns(transactionSource, caseClass, validationConfigMap)
-
-  // Narrative Validation
-  validationResults = validationResults ++ validateNarrativeColumns(transactionSource, caseClass, validationConfigMap)
-
-  // Country ISO Mapping Validation
-  validationResults = validationResults ++ validateCountryIsoMapping(transactionSource, caseClass)
-
-  // Transaction ID and Date Validation
-  validationResults = validationResults ++ validateTransactionIdAndDate(transactionSource, caseClass)
-
-  // Convert results to DataFrame and write to S3
-  val resultsDF = validationResults.toDF("validation_result")
-  resultsDF.write.mode("overwrite").text(s"$outputBasePath/validation_differences.txt")
-
-  Job.commit()
-}
-
-Expected Output
-
-Case 1: Columns Exist
-
-If the required columns exist and there are differences:
-
-Transaction ID and Date Validation Results:
-Source to Target Differences: 2 rows found 123, 456
-Target to Source Differences: 1 rows found 789
-
-Case 2: Missing Columns
-
-If required columns are missing in either DataFrame:
-
-Validation Skipped: Missing columns in source: TRANSACTION_ID; Missing columns in target: transactionDate
-
-Benefits of the Design
-
-	1.	Dynamic and Scalable:
-	•	Handles column existence and ensures transformations work dynamically.
-	2.	Error-Resilient:
-	•	Skips validation gracefully if required columns are missing and logs a meaningful message.
-	3.	AWS Glue Compatibility:
-	•	Fully compatible with Spark and AWS Glue ETL.
-
-Let me know if you need further refinements!
-
-
-
-
-
-
-
-
-
-
-Here’s how to encapsulate this transformation logic into a reusable function for the given task and integrate it into the main function.
-
-Transformation Function
-
-def validateAccountUniqueIds(
-    transactionSource: DataFrame,
-    caseClass: DataFrame
-): Seq[String] = {
-  import transactionSource.sparkSession.implicits._
-
-  // Join transactionSource and caseClass
-  val data = transactionSource.join(
-    caseClass,
-    transactionSource("TRANSACTION_ID") === caseClass("transactionId"),
-    "inner"
-  )
-
-  // Check if required columns exist
-  val requiredColumns = Seq("txn_direction_desc", "ACCOUNT_KEY", "COUNTERPARTY_PRODUCT_KEY", "transactionId")
-  val missingColumns = requiredColumns.filterNot(data.columns.contains)
-  if (missingColumns.nonEmpty) {
-    return Seq(s"Validation Skipped: Missing columns in joined DataFrame: ${missingColumns.mkString(", ")}")
-  }
-
-  // Transformation for aAccountUniqueId
-  val sourceA = data
-    .withColumn(
-      "aAccountUniqueId",
-      when($"txn_direction_desc".isin("DEBIT"), split($"ACCOUNT_KEY", "-").getItem(1))
-        .when($"txn_direction_desc".isin("CREDIT"), split($"COUNTERPARTY_PRODUCT_KEY", "-").getItem(1))
+    
+    # Initialize contexts and job
+    spark, job = initialize_context(args)
+    
+    # Read input paths and column configurations
+    input_paths = read_input_paths(args['INPUT_PATH_FILE'])
+    column_config = read_column_config(args['COLUMN_CONFIG_FILE'])
+    
+    # Process data
+    a_cus = process_customer_data(spark, input_paths['CUSTOMER_PATH'], column_config)
+    a_prod = read_product_data(spark, input_paths['PRODUCT_FORTENT_PATH'], input_paths['PRODUCT_CORE_PATH'])
+    
+    # Join customer and product data
+    prod_qtx = join_customer_product(a_cus, a_prod)
+    prod_qtx.createOrReplaceTempView('prod_qtx')
+    
+    # Execute validation scenarios
+    scenario_1_result = validate_account_numbers(spark, column_config)
+    scenario_2_result = validate_sort_codes(spark, column_config)
+    scenario_3_result = validate_data_differences(prod_qtx, "Qxta_targt", column_config)
+    
+    # Aggregate and write results
+    aggregate_and_write_results(
+        [
+            ("Account Number Differences", scenario_1_result),
+            ("Sort Code Differences", scenario_2_result),
+            ("Data Differences", scenario_3_result)
+        ],
+        args['OUTPUT_PATH']
     )
-    .select($"transactionId", $"aAccountUniqueId")
-
-  val targetA = caseClass.select($"transactionId", $"aAccountUniqueId")
-
-  // Compare source and target for aAccountUniqueId
-  val sourceToTargetDiffA = sourceA.exceptAll(targetA)
-  val targetToSourceDiffA = targetA.exceptAll(sourceA)
-
-  val sourceToTargetIdsA = sourceToTargetDiffA.select($"transactionId").as[String].collect()
-  val targetToSourceIdsA = targetToSourceDiffA.select($"transactionId").as[String].collect()
-
-  val sourceToTargetCountA = sourceToTargetIdsA.length
-  val targetToSourceCountA = targetToSourceIdsA.length
-
-  // Transformation for bAccountUniqueId
-  val sourceB = data
-    .withColumn(
-      "bAccountUniqueId",
-      when($"txn_direction_desc".isin("DEBIT"), split($"COUNTERPARTY_PRODUCT_KEY", "-").getItem(1))
-        .otherwise(split($"ACCOUNT_KEY", "-").getItem(1))
-    )
-    .select($"transactionId", $"bAccountUniqueId")
-
-  val targetB = caseClass.select($"transactionId", $"bAccountUniqueId")
-
-  // Compare source and target for bAccountUniqueId
-  val sourceToTargetDiffB = sourceB.exceptAll(targetB)
-  val targetToSourceDiffB = targetB.exceptAll(sourceB)
-
-  val sourceToTargetIdsB = sourceToTargetDiffB.select($"transactionId").as[String].collect()
-  val targetToSourceIdsB = targetToSourceDiffB.select($"transactionId").as[String].collect()
-
-  val sourceToTargetCountB = sourceToTargetIdsB.length
-  val targetToSourceCountB = targetToSourceIdsB.length
-
-  // Generate results for both transformations
-  Seq(
-    "Validation Results for aAccountUniqueId:",
-    s"Source to Target Differences: $sourceToTargetCountA rows found " + sourceToTargetIdsA.mkString(", "),
-    s"Target to Source Differences: $targetToSourceCountA rows found " + targetToSourceIdsA.mkString(", "),
-    "Validation Results for bAccountUniqueId:",
-    s"Source to Target Differences: $sourceToTargetCountB rows found " + sourceToTargetIdsB.mkString(", "),
-    s"Target to Source Differences: $targetToSourceCountB rows found " + targetToSourceIdsB.mkString(", ")
-  )
-}
-
-Explanation of the Function
-
-	1.	Join DataFrames:
-	•	Joins transactionSource and caseClass on TRANSACTION_ID and transactionId.
-	2.	Column Validation:
-	•	Validates the existence of required columns: txn_direction_desc, ACCOUNT_KEY, COUNTERPARTY_PRODUCT_KEY, and transactionId.
-	3.	Transformation:
-	•	Computes aAccountUniqueId based on txn_direction_desc (DEBIT or CREDIT).
-	•	Computes bAccountUniqueId with the opposite logic for COUNTERPARTY_PRODUCT_KEY.
-	4.	Validation:
-	•	Compares sourceA (for aAccountUniqueId) and sourceB (for bAccountUniqueId) with their respective target DataFrames using exceptAll.
-	5.	Output Results:
-	•	Returns the differences for both aAccountUniqueId and bAccountUniqueId.
-
-How to Call in main Function
-
-Add the following call to the main function:
-
-validationResults = validationResults ++ validateAccountUniqueIds(transactionSource, caseClass)
-
-Complete Flow in main Function
-
-Here’s how the main function will look with this added validation:
-
-def main(sysArgs: Array[String]): Unit = {
-  val sparkSession: SparkSession = SparkSession.builder.getOrCreate()
-  val glueContext: GlueContext = new GlueContext(sparkSession.sparkContext)
-  import sparkSession.implicits._
-
-  val logger: Logger = Logger.getLogger("CleanseCaseClassLogger")
-
-  // Get Glue job parameters
-  val args = GlueArgParser.getResolvedOptions(sysArgs, Seq("s3PathConfig", "s3ValidationConfig").toArray)
-  val s3PathConfig = args("s3PathConfig")
-  val s3ValidationConfig = args("s3ValidationConfig")
-
-  // Read configuration files
-  val pathConfigMap = parseConfigFile(s3PathConfig, sparkSession)
-  val validationConfigMap = parseValidationConfig(s3ValidationConfig, sparkSession)
-
-  // Extract paths
-  val inputSourcePath = pathConfigMap("inputSourcePath")
-  val inputTargetPath = pathConfigMap("inputTargetPath")
-  val outputBasePath = pathConfigMap("outputBasePath")
-
-  // Load data
-  val transactionSource: DataFrame = sparkSession.read.parquet(inputSourcePath)
-  val caseClass: DataFrame = sparkSession.read.parquet(inputTargetPath)
-
-  // Initialize validation results
-  var validationResults = Seq[String]()
-
-  // Null Validation
-  validationResults = validationResults ++ validateNullColumns(caseClass, validationConfigMap.getOrElse("null_validation", Seq()))
-
-  // Direct Column Validation
-  validationResults = validationResults ++ validateDirectColumns(transactionSource, caseClass, validationConfigMap)
-
-  // Narrative Validation
-  validationResults = validationResults ++ validateNarrativeColumns(transactionSource, caseClass, validationConfigMap)
-
-  // Country ISO Mapping Validation
-  validationResults = validationResults ++ validateCountryIsoMapping(transactionSource, caseClass)
-
-  // Account Unique ID Validation
-  validationResults = validationResults ++ validateAccountUniqueIds(transactionSource, caseClass)
-
-  // Convert results to DataFrame and write to S3
-  val resultsDF = validationResults.toDF("validation_result")
-  resultsDF.write.mode("overwrite").text(s"$outputBasePath/validation_differences.txt")
-
-  Job.commit()
-}
-
-Expected Output
-
-Case 1: All Columns Present
-
-If all required columns exist and there are differences:
-
-Validation Results for aAccountUniqueId:
-Source to Target Differences: 2 rows found 123, 456
-Target to Source Differences: 1 rows found 789
-
-Validation Results for bAccountUniqueId:
-Source to Target Differences: 3 rows found 101, 202, 303
-Target to Source Differences: 2 rows found 404, 505
-
-Case 2: Missing Columns
-
-If required columns are missing:
-
-Validation Skipped: Missing columns in joined DataFrame: txn_direction_desc, ACCOUNT_KEY
-
-Benefits of the Design
-
-	1.	Dynamic and Scalable:
-	•	Handles transformations for both aAccountUniqueId and bAccountUniqueId in a single function.
-	2.	Error-Resilient:
-	•	Skips validation gracefully if required columns are missing and logs meaningful messages.
-	3.	AWS Glue Compatibility:
-	•	Fully compatible with Spark and AWS Glue ETL jobs.
-
-Let me know if you need further refinements!
-
-
-
-
-
-
-
-
-
-
-
-
-
-Below is the implementation to encapsulate the described transformations into a reusable function and integrate it into your main function.
-
-Transformation Function
-
-def validateCustomerIds(
-    transactionSource: DataFrame,
-    caseClass: DataFrame
-): Seq[String] = {
-  import transactionSource.sparkSession.implicits._
-
-  // Check if required columns exist for bCustomerId
-  val bCustomerIdRequiredColumns = Seq("txn_direction_desc", "COUNTERPARTY_CUSTOMER_KEY", "CUSTOMER_KEY", "TRANSACTION_ID")
-  val bCustomerIdMissingColumns = bCustomerIdRequiredColumns.filterNot(transactionSource.columns.contains)
-
-  val bCustomerValidationResults = if (bCustomerIdMissingColumns.nonEmpty) {
-    Seq(s"Validation Skipped for bCustomerId: Missing columns: ${bCustomerIdMissingColumns.mkString(", ")}")
-  } else {
-    val sourceB = transactionSource
-      .withColumn(
-        "bCustomerId",
-        when($"txn_direction_desc".isin("DEBIT"), $"COUNTERPARTY_CUSTOMER_KEY")
-          .when($"txn_direction_desc".isin("CREDIT"), $"CUSTOMER_KEY")
-          .otherwise(null)
-      )
-      .filter($"txn_direction_desc".isin("DEBIT", "CREDIT"))
-      .select($"TRANSACTION_ID".as("transactionId"), $"bCustomerId")
-
-    val targetB = caseClass.select($"transactionId", $"bCustomerId")
-
-    val sourceToTargetDiffB = sourceB.exceptAll(targetB)
-    val targetToSourceDiffB = targetB.exceptAll(sourceB)
-
-    val sourceToTargetIdsB = sourceToTargetDiffB.select($"transactionId").as[String].collect()
-    val targetToSourceIdsB = targetToSourceDiffB.select($"transactionId").as[String].collect()
-
-    val sourceToTargetCountB = sourceToTargetIdsB.length
-    val targetToSourceCountB = targetToSourceIdsB.length
-
-    Seq(
-      "Validation Results for bCustomerId:",
-      s"Source to Target Differences: $sourceToTargetCountB rows found " + sourceToTargetIdsB.mkString(", "),
-      s"Target to Source Differences: $targetToSourceCountB rows found " + targetToSourceIdsB.mkString(", ")
-    )
-  }
-
-  // Check if required columns exist for aCustomerId
-  val aCustomerIdRequiredColumns = Seq("txn_direction_desc", "COUNTERPARTY_CUSTOMER_KEY", "CUSTOMER_KEY", "TRANSACTION_ID")
-  val aCustomerIdMissingColumns = aCustomerIdRequiredColumns.filterNot(transactionSource.columns.contains)
-
-  val aCustomerValidationResults = if (aCustomerIdMissingColumns.nonEmpty) {
-    Seq(s"Validation Skipped for aCustomerId: Missing columns: ${aCustomerIdMissingColumns.mkString(", ")}")
-  } else {
-    val sourceA = transactionSource
-      .withColumn(
-        "aCustomerId",
-        when($"txn_direction_desc".isin("DEBIT"), $"CUSTOMER_KEY")
-          .when($"txn_direction_desc".isin("CREDIT"), $"COUNTERPARTY_CUSTOMER_KEY")
-          .otherwise(null)
-      )
-      .select($"TRANSACTION_ID".as("transactionId"), $"aCustomerId")
-
-    val targetA = caseClass.select($"transactionId", $"aCustomerId")
-
-    val sourceToTargetDiffA = sourceA.exceptAll(targetA)
-    val targetToSourceDiffA = targetA.exceptAll(sourceA)
-
-    val sourceToTargetIdsA = sourceToTargetDiffA.select($"transactionId").as[String].collect()
-    val targetToSourceIdsA = targetToSourceDiffA.select($"transactionId").as[String].collect()
-
-    val sourceToTargetCountA = sourceToTargetIdsA.length
-    val targetToSourceCountA = targetToSourceIdsA.length
-
-    Seq(
-      "Validation Results for aCustomerId:",
-      s"Source to Target Differences: $sourceToTargetCountA rows found " + sourceToTargetIdsA.mkString(", "),
-      s"Target to Source Differences: $targetToSourceCountA rows found " + targetToSourceIdsA.mkString(", ")
-    )
-  }
-
-  // Combine results
-  bCustomerValidationResults ++ aCustomerValidationResults
-}
-
-Explanation of the Function
-
-	1.	bCustomerId Validation:
-	•	Uses txn_direction_desc to dynamically select COUNTERPARTY_CUSTOMER_KEY or CUSTOMER_KEY for DEBIT or CREDIT transactions.
-	•	Filters the data for rows where txn_direction_desc is either DEBIT or CREDIT.
-	•	Compares the transformed sourceB DataFrame with targetB using exceptAll.
-	2.	aCustomerId Validation:
-	•	Uses txn_direction_desc to dynamically select CUSTOMER_KEY or COUNTERPARTY_CUSTOMER_KEY for DEBIT or CREDIT transactions.
-	•	Compares the transformed sourceA DataFrame with targetA using exceptAll.
-	3.	Column Validation:
-	•	Ensures all required columns exist before applying transformations.
-	•	Skips validation if required columns are missing and logs an appropriate message.
-	4.	Result Combination:
-	•	Combines validation results for bCustomerId and aCustomerId.
-
-How to Call in main Function
-
-Add the following call to the main function:
-
-validationResults = validationResults ++ validateCustomerIds(transactionSource, caseClass)
-
-Complete Flow in main Function
-
-Here’s how the main function will look with this added validation:
-
-def main(sysArgs: Array[String]): Unit = {
-  val sparkSession: SparkSession = SparkSession.builder.getOrCreate()
-  val glueContext: GlueContext = new GlueContext(sparkSession.sparkContext)
-  import sparkSession.implicits._
-
-  val logger: Logger = Logger.getLogger("CleanseCaseClassLogger")
-
-  // Get Glue job parameters
-  val args = GlueArgParser.getResolvedOptions(sysArgs, Seq("s3PathConfig", "s3ValidationConfig").toArray)
-  val s3PathConfig = args("s3PathConfig")
-  val s3ValidationConfig = args("s3ValidationConfig")
-
-  // Read configuration files
-  val pathConfigMap = parseConfigFile(s3PathConfig, sparkSession)
-  val validationConfigMap = parseValidationConfig(s3ValidationConfig, sparkSession)
-
-  // Extract paths
-  val inputSourcePath = pathConfigMap("inputSourcePath")
-  val inputTargetPath = pathConfigMap("inputTargetPath")
-  val outputBasePath = pathConfigMap("outputBasePath")
-
-  // Load data
-  val transactionSource: DataFrame = sparkSession.read.parquet(inputSourcePath)
-  val caseClass: DataFrame = sparkSession.read.parquet(inputTargetPath)
-
-  // Initialize validation results
-  var validationResults = Seq[String]()
-
-  // Null Validation
-  validationResults = validationResults ++ validateNullColumns(caseClass, validationConfigMap.getOrElse("null_validation", Seq()))
-
-  // Direct Column Validation
-  validationResults = validationResults ++ validateDirectColumns(transactionSource, caseClass, validationConfigMap)
-
-  // Narrative Validation
-  validationResults = validationResults ++ validateNarrativeColumns(transactionSource, caseClass, validationConfigMap)
-
-  // Country ISO Mapping Validation
-  validationResults = validationResults ++ validateCountryIsoMapping(transactionSource, caseClass)
-
-  // Customer ID Validation
-  validationResults = validationResults ++ validateCustomerIds(transactionSource, caseClass)
-
-  // Convert results to DataFrame and write to S3
-  val resultsDF = validationResults.toDF("validation_result")
-  resultsDF.write.mode("overwrite").text(s"$outputBasePath/validation_differences.txt")
-
-  Job.commit()
-}
-
-Expected Output
-
-Case 1: All Columns Present
-
-If all required columns exist and there are differences:
-
-Validation Results for bCustomerId:
-Source to Target Differences: 3 rows found 101, 202, 303
-Target to Source Differences: 2 rows found 404, 505
-
-Validation Results for aCustomerId:
-Source to Target Differences: 2 rows found 123, 456
-Target to Source Differences: 1 rows found 789
-
-Case 2: Missing Columns
-
-If required columns are missing:
-
-Validation Skipped for bCustomerId: Missing columns: txn_direction_desc, CUSTOMER_KEY
-Validation Skipped for aCustomerId: Missing columns: COUNTERPARTY_CUSTOMER_KEY, TRANSACTION_ID
-
-Advantages of the Design
-
-	1.	Dynamic Column Handling:
-	•	Handles bCustomerId and aCustomerId transformations in one function.
-	2.	Error-Resilient:
-	•	Skips validation gracefully if required columns are missing, with clear logs.
-	3.	AWS Glue Compatibility:
-	•	Fully compatible with Spark and AWS Glue ETL jobs.
-
-Let me know if you need further refinements or additional features!
-
-
-
-
-
-
-
-
-
-
-
-
-
+    
+    # Commit the Glue job
+    job.commit()
