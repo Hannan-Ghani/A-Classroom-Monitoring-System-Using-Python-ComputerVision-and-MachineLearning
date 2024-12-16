@@ -1,14 +1,6 @@
-To make the Glue Job even more dynamic by allowing it to read column names from a separate configuration file, you can introduce an additional .txt file for column configuration. This will provide flexibility to dynamically update the columns used in the transformations without modifying the Glue Job script.
-
-Steps to Add Column Configuration
-	1.	Create a Column Configuration File (columns_config.txt):
-	•	This file will contain the column names and aliases for the transformations.
-	2.	Modify the Glue Job Script:
-	•	Parse the column configuration file to dynamically create SQL queries or select statements.
+To meet your requirements, the Glue Job can be modified to write the output as a .txt file that includes the number of differences and the customerUniqueId values where differences are found. Here’s the updated Glue Job script:
 
 Updated Glue Job Script
-
-Here’s the updated Glue Job script with dynamic column configuration:
 
 import sys
 import boto3
@@ -16,13 +8,14 @@ from pyspark.context import SparkContext
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import col, regexp_replace, lit, when, explode
 from awsglue.context import GlueContext
-from awsglue.dynamicframe import DynamicFrame
 from awsglue.utils import getResolvedOptions
+from io import StringIO
 
 # Parse arguments passed to the Glue Job
-args = getResolvedOptions(sys.argv, ["JOB_NAME", "config_file", "columns_file"])
+args = getResolvedOptions(sys.argv, ["JOB_NAME", "config_file", "columns_file", "output_file"])
 config_file = args["config_file"]  # Path to the main config file in S3
 columns_file = args["columns_file"]  # Path to the columns config file in S3
+output_file = args["output_file"]  # Path for the differences summary file in S3
 
 # Initialize Glue and Spark contexts
 sc = SparkContext()
@@ -35,6 +28,12 @@ def read_s3_file(file_path):
     s3 = boto3.client("s3")
     bucket, key = file_path.replace("s3://", "").split("/", 1)
     return s3.get_object(Bucket=bucket, Key=key)["Body"].read().decode("utf-8")
+
+# Helper function to write a string to S3 as a .txt file
+def write_s3_file(content, file_path):
+    s3 = boto3.client("s3")
+    bucket, key = file_path.replace("s3://", "").split("/", 1)
+    s3.put_object(Body=content, Bucket=bucket, Key=key)
 
 # Read and parse the main config file
 config_data = read_s3_file(config_file)
@@ -128,45 +127,64 @@ targ_fields1 = selected_Qxta_targt.dropDuplicates()
 src_diff = src_fields1.exceptAll(targ_fields1)
 targ_diff = targ_fields1.exceptAll(src_fields1)
 
-# Write differences to output path
-src_diff.write.mode("overwrite").parquet(f"{output_path}/src_diff/")
-targ_diff.write.mode("overwrite").parquet(f"{output_path}/targ_diff/")
+# Extract customerUniqueIds with differences
+src_diff_ids = src_diff.select("customerUniqueId").rdd.flatMap(lambda x: x).collect()
+targ_diff_ids = targ_diff.select("customerUniqueId").rdd.flatMap(lambda x: x).collect()
+
+# Prepare summary content
+summary_content = []
+
+if src_diff_ids:
+    summary_content.append(f"Differences Scenario 1: Differences found {len(src_diff_ids)}")
+    summary_content.extend(src_diff_ids)
+
+if targ_diff_ids:
+    summary_content.append(f"Differences Scenario 1 (Target): Differences found {len(targ_diff_ids)}")
+    summary_content.extend(targ_diff_ids)
+
+# Write summary to S3
+write_s3_file("\n".join(summary_content), output_file)
 
 # Commit Glue job
 job.commit()
 
-Example columns_config.txt
-
-# Columns for src_fields
-columns_src=customerUniqueId,account_risk_code_desc,accountName,accountIdPrefix
-
-# Columns for targ_fields
-columns_trgt=customerUniqueId,accountRiskCodeDescription as account_risk_code_desc,accountName,accountIdPrefix
-
 How It Works
-	1.	Configurable Columns:
-	•	columns_src and columns_trgt specify the columns to be selected for src_fields and selected_Qxta_targt.
-	•	The script dynamically builds .select() statements based on these configurations.
-	2.	Dynamic Column Mapping:
-	•	Aliases (e.g., accountRiskCodeDescription as account_risk_code_desc) can be defined directly in the column configuration file.
-	3.	Simplified Maintenance:
-	•	Updating column names requires only changing the columns_config.txt file.
+	1.	Write Differences to Text File:
+	•	The differences are written as a .txt file to the specified S3 path using the write_s3_file() function.
+	2.	Content Structure:
+	•	For each scenario, the summary starts with:
 
-How to Run
-	1.	Upload both config.txt and columns_config.txt to your S3 bucket:
-	•	Example paths:
-	•	s3://your-config-bucket/config.txt
-	•	s3://your-config-bucket/columns_config.txt
-	2.	Pass their paths as Glue Job parameters:
+Differences Scenario 1: Differences found 2
+
+
+	•	Followed by the customerUniqueId values where differences are found.
+
+	3.	Dynamic Content:
+	•	The Glue Job dynamically creates and writes the content for each scenario based on the differences identified.
+	4.	Arguments:
+	•	--output_file: Path to the .txt file in S3 where the differences summary will be written.
+
+Example Differences Summary (output_file)
+
+Content of the generated .txt file in S3:
+
+Differences Scenario 1: Differences found 2
+CUS12345
+CUS67890
+Differences Scenario 1 (Target): Differences found 1
+CUS54321
+
+Example Parameters for Glue Job
 
 --JOB_NAME MyGlueJob
 --config_file s3://your-config-bucket/config.txt
 --columns_file s3://your-config-bucket/columns_config.txt
-
-
-	3.	Test the Glue Job to ensure it processes the data and selects columns dynamically.
+--output_file s3://your-output-bucket/differences_summary.txt
 
 Next Steps
-	1.	Update your S3 buckets with example configuration files.
-	2.	Run the Glue Job and validate the output files (src_diff and targ_diff).
-	3.	Extend the configuration files as needed for additional use cases.
+	1.	Upload Config Files:
+	•	Ensure config.txt and columns_config.txt are in S3.
+	2.	Run the Glue Job:
+	•	Execute the Glue Job with the necessary parameters.
+	3.	Validate the Output:
+	•	Check the .txt file in the specified output_file location to verify the summary of differences.
