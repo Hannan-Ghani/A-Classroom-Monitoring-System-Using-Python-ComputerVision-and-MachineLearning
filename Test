@@ -1,151 +1,172 @@
+To make the Glue Job even more dynamic by allowing it to read column names from a separate configuration file, you can introduce an additional .txt file for column configuration. This will provide flexibility to dynamically update the columns used in the transformations without modifying the Glue Job script.
+
+Steps to Add Column Configuration
+	1.	Create a Column Configuration File (columns_config.txt):
+	•	This file will contain the column names and aliases for the transformations.
+	2.	Modify the Glue Job Script:
+	•	Parse the column configuration file to dynamically create SQL queries or select statements.
+
+Updated Glue Job Script
+
+Here’s the updated Glue Job script with dynamic column configuration:
+
 import sys
+import boto3
 from pyspark.context import SparkContext
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import col, regexp_replace, lit, when, explode
 from awsglue.context import GlueContext
-from awsglue.job import Job
+from awsglue.dynamicframe import DynamicFrame
 from awsglue.utils import getResolvedOptions
-from pyspark.sql import DataFrame
-from pyspark.sql.functions import col, regexp_replace, when
 
-# Function to initialize Spark and Glue contexts
-def initialize_context(args):
-    sc = SparkContext()
-    glue_context = GlueContext(sc)
-    spark = glue_context.spark_session
-    job = Job(glue_context)
-    job.init(args['JOB_NAME'], args)
-    return spark, job
+# Parse arguments passed to the Glue Job
+args = getResolvedOptions(sys.argv, ["JOB_NAME", "config_file", "columns_file"])
+config_file = args["config_file"]  # Path to the main config file in S3
+columns_file = args["columns_file"]  # Path to the columns config file in S3
 
-# Function to parse paths from a text file
-def read_input_paths(file_path: str) -> dict:
-    with open(file_path, 'r') as file:
-        return {line.split('=')[0].strip(): line.split('=')[1].strip() for line in file if '=' in line}
+# Initialize Glue and Spark contexts
+sc = SparkContext()
+glueContext = GlueContext(sc)
+spark = glueContext.spark_session
+job = glueContext.create_job(args["JOB_NAME"])
 
-# Function to parse column configurations from a text file
-def read_column_config(file_path: str) -> dict:
-    config = {}
-    with open(file_path, 'r') as file:
-        section = None
-        for line in file:
-            line = line.strip()
-            if line.startswith("[") and line.endswith("]"):  # Section header
-                section = line[1:-1]
-                config[section] = []
-            elif section and line:
-                config[section].append(line)
-    return config
+# Helper function to read a file from S3
+def read_s3_file(file_path):
+    s3 = boto3.client("s3")
+    bucket, key = file_path.replace("s3://", "").split("/", 1)
+    return s3.get_object(Bucket=bucket, Key=key)["Body"].read().decode("utf-8")
 
-# Function to read and process customer data
-def process_customer_data(spark: DataFrame, customer_path: str, column_config: dict) -> DataFrame:
-    customer_key = column_config['customer'][0]
-    return spark.read.parquet(customer_path)\
-        .filter("""
-            NUM_OF_ACCOUNT >= 0 AND 
-            (SOURCE_COUNTRY <> 'ZA' OR SOURCE_COUNTRY IS NULL) AND 
-            customer_key IS NOT NULL AND 
-            customer_key NOT IN ('', '***', 'TTMAMC-**', 'TMEMA-**', 'TMUK1-**', 'MUK2-**', 'Not Available')
-        """)\
-        .withColumn('customerUniqueId', regexp_replace(col(customer_key), '^-', ''))\
-        .cache()
+# Read and parse the main config file
+config_data = read_s3_file(config_file)
+config = {line.split("=")[0].strip(): line.split("=")[1].strip() for line in config_data.split("\n") if "=" in line}
 
-# Function to read product data
-def read_product_data(spark: DataFrame, fortent_path: str, core_path: str) -> DataFrame:
-    prod_fortent = spark.read.parquet(fortent_path)
-    prod_core = spark.read.parquet(core_path)
-    return prod_core.unionByName(prod_fortent).cache()
+# Read and parse the columns config file
+columns_data = read_s3_file(columns_file)
+columns_config = {line.split("=")[0].strip(): line.split("=")[1].strip() for line in columns_data.split("\n") if "=" in line}
 
-# Function to join customer and product data
-def join_customer_product(a_cus: DataFrame, a_prod: DataFrame) -> DataFrame:
-    return a_cus.join(a_prod, a_cus.customerUniqueId == a_prod.customerUniqueId, how='inner')\
-        .dropDuplicates().cache()
+# Extract file paths from the main config
+customer_path = config["customer_path"]
+product_path = config["product_path"]
+target_path = config["target_path"]
+output_path = config["output_path"]
 
-# Scenario 1: Compare account numbers
-def validate_account_numbers(spark: DataFrame, column_config: dict) -> DataFrame:
-    customer_col = column_config['customer'][0]
-    account_col = column_config['account'][0]
-    return spark.sql(f"""
-        SELECT 
-            a.transactionId
-        FROM prod_qtx a
-        LEFT JOIN Qxta_targt b
-        ON a.{customer_col} = b.{customer_col}
-        WHERE a.{account_col} != b.{account_col}
-    """)
+# Extract column configurations
+columns_src = columns_config["columns_src"].split(",")  # Columns for src_fields
+columns_trgt = columns_config["columns_trgt"].split(",")  # Columns for targ_fields
 
-# Scenario 2: Compare sort codes
-def validate_sort_codes(spark: DataFrame, column_config: dict) -> DataFrame:
-    customer_col = column_config['customer'][0]
-    sortcode_col = column_config['sortcode'][0]
-    return spark.sql(f"""
-        SELECT 
-            a.transactionId
-        FROM prod_qtx a
-        LEFT JOIN Qxta_targt b
-        ON a.{customer_col} = b.{customer_col}
-        WHERE a.{sortcode_col} != b.{sortcode_col}
-    """)
-
-# Scenario 3: Differences Validation
-def validate_data_differences(prod_qtx: DataFrame, target_table: str, column_config: dict) -> DataFrame:
-    columns = column_config['validate']
-    src_fields1 = prod_qtx.select("transactionId")
-    targ_fields1 = spark.table(target_table).select("transactionId")
-    
-    source_to_target_diff = src_fields1.exceptAll(targ_fields1)
-    target_to_source_diff = targ_fields1.exceptAll(src_fields1)
-    
-    # Combine results
-    return source_to_target_diff.unionByName(target_to_source_diff)
-
-# Aggregate results and write to a text file
-def aggregate_and_write_results(validation_results: list, output_path: str):
-    with open(output_path, 'w') as file:
-        for idx, (scenario_name, result) in enumerate(validation_results):
-            transaction_ids = result.select("transactionId").distinct()
-            count = transaction_ids.count()
-            
-            file.write(f"Validation Scenario {idx + 1}: {scenario_name}\n")
-            file.write(f"Total Differences: {count}\n")
-            transaction_ids_list = transaction_ids.collect()
-            for row in transaction_ids_list:
-                file.write(f"{row['transactionId']}\n")
-            file.write("\n")
-
-# Main entry point
-if __name__ == "__main__":
-    args = getResolvedOptions(
-        sys.argv, 
-        ['JOB_NAME', 'INPUT_PATH_FILE', 'COLUMN_CONFIG_FILE', 'OUTPUT_PATH']
+# Read customer data
+a_cus = (
+    spark.read.parquet(customer_path)
+    .filter(
+        "NUM_OF_ACCOUNT >= 0 AND "
+        "(SOURCE_COUNTRY <> 'ZA' OR SOURCE_COUNTRY IS NULL) AND "
+        "customer_key IS NOT NULL AND "
+        "customer_key NOT IN ('', '***', 'TTMAMC-**', 'TMEMA-**', 'TMUK1-**', 'MUK2-**', 'Not Available')"
     )
-    
-    # Initialize contexts and job
-    spark, job = initialize_context(args)
-    
-    # Read input paths and column configurations
-    input_paths = read_input_paths(args['INPUT_PATH_FILE'])
-    column_config = read_column_config(args['COLUMN_CONFIG_FILE'])
-    
-    # Process data
-    a_cus = process_customer_data(spark, input_paths['CUSTOMER_PATH'], column_config)
-    a_prod = read_product_data(spark, input_paths['PRODUCT_FORTENT_PATH'], input_paths['PRODUCT_CORE_PATH'])
-    
-    # Join customer and product data
-    prod_qtx = join_customer_product(a_cus, a_prod)
-    prod_qtx.createOrReplaceTempView('prod_qtx')
-    
-    # Execute validation scenarios
-    scenario_1_result = validate_account_numbers(spark, column_config)
-    scenario_2_result = validate_sort_codes(spark, column_config)
-    scenario_3_result = validate_data_differences(prod_qtx, "Qxta_targt", column_config)
-    
-    # Aggregate and write results
-    aggregate_and_write_results(
-        [
-            ("Account Number Differences", scenario_1_result),
-            ("Sort Code Differences", scenario_2_result),
-            ("Data Differences", scenario_3_result)
-        ],
-        args['OUTPUT_PATH']
+    .withColumn(
+        "customerUniqueId", 
+        regexp_replace(col("customer_key"), "^.*-", "")  # Clean up 'customer_key'
     )
-    
-    # Commit the Glue job
-    job.commit()
+)
+
+# Read product data
+a_prod = (
+    spark.read.parquet(product_path)
+    .filter(
+        (col("account_key").isNotNull() | col("customer_key").isNotNull()) &
+        ~(
+            (col("screening_system") == "YMUK2") &
+            (
+                (~col("customer_role").isin("CML - COMP PARENT", "PRIMARY")) |
+                col("low_account_type").isin(
+                    "UKCMLPHVI", "UKCMLPV100", "UKCMLPV5K", "UKCMLPV500", 
+                    "UKCMLPV10K", "UKCMLPV1K", "UKCMLPVUNK", "UKCMLPBHI", 
+                    "UKCMLPB100", "UKCMLPB5K", "UKCMLPB500", "UKCMLPB1K", "UKCMLPBUNK"
+                )
+            )
+        )
+    )
+    .withColumn(
+        "customerUniqueId", 
+        regexp_replace(col("customer_key"), "^.*-", "")  # Clean up 'customer_key'
+    )
+)
+
+# Join customer and product data
+prod_qtx = (
+    a_cus.join(a_prod, a_cus.customerUniqueId == a_prod.customerUniqueId, how="inner")
+    .select(a_prod["*"])
+)
+
+# Read and process the target data
+Qxta_targt = (
+    spark.read.parquet(target_path)
+    .select(
+        "customerUniqueId", 
+        explode(col("account")).alias("account")  # Explode the 'account' array
+    )
+    .select(
+        "customerUniqueId", 
+        "account.*"  # Expand all fields from the exploded 'account' struct
+    )
+)
+
+# Select required fields for src_fields and targ_fields dynamically
+src_fields = prod_qtx.select(*[col(field) for field in columns_src])
+src_fields.createOrReplaceTempView("src_fields")
+src_fields.cache()
+
+selected_Qxta_targt = Qxta_targt.select(*[col(field) for field in columns_trgt])
+selected_Qxta_targt.createOrReplaceTempView("selected_Qxta_targt")
+selected_Qxta_targt.cache()
+
+# Compare src_fields1 and targ_fields1
+src_fields1 = src_fields.dropDuplicates()
+targ_fields1 = selected_Qxta_targt.dropDuplicates()
+
+# Find differences
+src_diff = src_fields1.exceptAll(targ_fields1)
+targ_diff = targ_fields1.exceptAll(src_fields1)
+
+# Write differences to output path
+src_diff.write.mode("overwrite").parquet(f"{output_path}/src_diff/")
+targ_diff.write.mode("overwrite").parquet(f"{output_path}/targ_diff/")
+
+# Commit Glue job
+job.commit()
+
+Example columns_config.txt
+
+# Columns for src_fields
+columns_src=customerUniqueId,account_risk_code_desc,accountName,accountIdPrefix
+
+# Columns for targ_fields
+columns_trgt=customerUniqueId,accountRiskCodeDescription as account_risk_code_desc,accountName,accountIdPrefix
+
+How It Works
+	1.	Configurable Columns:
+	•	columns_src and columns_trgt specify the columns to be selected for src_fields and selected_Qxta_targt.
+	•	The script dynamically builds .select() statements based on these configurations.
+	2.	Dynamic Column Mapping:
+	•	Aliases (e.g., accountRiskCodeDescription as account_risk_code_desc) can be defined directly in the column configuration file.
+	3.	Simplified Maintenance:
+	•	Updating column names requires only changing the columns_config.txt file.
+
+How to Run
+	1.	Upload both config.txt and columns_config.txt to your S3 bucket:
+	•	Example paths:
+	•	s3://your-config-bucket/config.txt
+	•	s3://your-config-bucket/columns_config.txt
+	2.	Pass their paths as Glue Job parameters:
+
+--JOB_NAME MyGlueJob
+--config_file s3://your-config-bucket/config.txt
+--columns_file s3://your-config-bucket/columns_config.txt
+
+
+	3.	Test the Glue Job to ensure it processes the data and selects columns dynamically.
+
+Next Steps
+	1.	Update your S3 buckets with example configuration files.
+	2.	Run the Glue Job and validate the output files (src_diff and targ_diff).
+	3.	Extend the configuration files as needed for additional use cases.
