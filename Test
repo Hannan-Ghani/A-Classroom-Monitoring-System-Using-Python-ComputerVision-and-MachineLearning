@@ -1,166 +1,106 @@
-To make the Scenario 1 and Scenario 2 fields dynamically configurable through a config.txt file, we will modify the script further. The column names for both scenarios will now come from the configuration file, allowing you to add or change fields without modifying the Glue Job script.
+Below are the detailed configurations for the main config file (config.txt) and the columns config file (columns_config.txt) to work seamlessly with the updated Glue Job script.
 
-Updated Design
-	1.	columns_config.txt Structure:
-	•	Add sections for fields used in Scenario 1 and Scenario 2.
-	2.	Code Changes:
-	•	Dynamically extract columns for both source and target fields in Scenario 1 and Scenario 2.
+Main Configuration File (config.txt)
 
-Updated columns_config.txt
+The config.txt file contains paths to the input data, target data, and output locations. This file is simple and uses key-value pairs.
 
-Here is an example of how your columns_config.txt would look:
+Example config.txt
 
-# Columns for Scenario 1 Source
+# Path to the customer data
+customer_path=s3://136731789529-fis-raw-data/customer/20240129/raw/parquet/*.parquet
+
+# Path to the product data
+product_path=s3://folder2/parquet/
+
+# Path to the target data
+target_path=s3://folder3/parquet/
+
+# Path to the output summary text file
+output_path=s3://your-output-bucket/output/
+
+# Path for differences summary
+output_file=s3://your-output-bucket/differences_summary.txt
+
+Columns Configuration File (columns_config.txt)
+
+The columns_config.txt file contains fields for Scenario 1 and Scenario 2 for both source (src) and target (trgt) datasets. This file is also a key-value pair format.
+
+Example columns_config.txt
+
+# Scenario 1 Source Fields
 scenario1_src_fields=customerUniqueId,account_risk_code_desc,accountName,accountIdPrefix
 
-# Columns for Scenario 1 Target
+# Scenario 1 Target Fields
 scenario1_trgt_fields=customerUniqueId,accountRiskCodeDescription as account_risk_code_desc,accountName,accountIdPrefix
 
-# Columns for Scenario 2 Source
+# Scenario 2 Source Fields
 scenario2_src_fields=customerUniqueId,null as cleansedAccountNumber,accountNumber,accountKey,companyId
 
-# Columns for Scenario 2 Target
+# Scenario 2 Target Fields
 scenario2_trgt_fields=customerUniqueId,cleansedAccountNumber,accountNumber,accountKey,companyId
 
-Updated Glue Job Script
+Explanation of Configurations
 
-Here’s the updated Glue Job script that dynamically reads fields for scenarios:
+Main Config (config.txt)
+	1.	customer_path: Path to the input customer data stored in S3 as Parquet files.
+	2.	product_path: Path to the input product data stored in S3.
+	3.	target_path: Path to the target data containing exploded account data.
+	4.	output_path: Directory path for storing differences and outputs.
+	5.	output_file: Path for the final differences summary .txt file.
 
-import sys
-import boto3
-from pyspark.context import SparkContext
-from pyspark.sql import SparkSession
-from pyspark.sql.functions import col, regexp_replace, explode
-from awsglue.context import GlueContext
-from awsglue.utils import getResolvedOptions
+Columns Config (columns_config.txt)
+	1.	scenario1_src_fields: Columns to be selected from the src_fields for Scenario 1.
+	•	customerUniqueId: Unique identifier.
+	•	account_risk_code_desc, accountName, accountIdPrefix: Other fields.
+	2.	scenario1_trgt_fields: Columns to be selected from the selected_Qxta_targt for Scenario 1.
+	•	Aliases are handled dynamically, e.g., accountRiskCodeDescription as account_risk_code_desc.
+	3.	scenario2_src_fields: Columns for Scenario 2 source data.
+	•	null as cleansedAccountNumber: This handles null placeholders dynamically.
+	•	Other fields include customerUniqueId, accountNumber, accountKey, and companyId.
+	4.	scenario2_trgt_fields: Columns for Scenario 2 target data.
+	•	Columns directly mapped from selected_Qxta_targt.
 
-# Parse arguments
-args = getResolvedOptions(sys.argv, ["JOB_NAME", "config_file", "columns_file", "output_file"])
-config_file = args["config_file"]
-columns_file = args["columns_file"]
-output_file = args["output_file"]
+Folder Structure in S3
 
-# Initialize Glue and Spark contexts
-sc = SparkContext()
-glueContext = GlueContext(sc)
-spark = glueContext.spark_session
-job = glueContext.create_job(args["JOB_NAME"])
+Ensure the following folder structure in your S3 bucket:
 
-# Helper function to read files from S3
-def read_s3_file(file_path):
-    s3 = boto3.client("s3")
-    bucket, key = file_path.replace("s3://", "").split("/", 1)
-    return s3.get_object(Bucket=bucket, Key=key)["Body"].read().decode("utf-8")
+s3://your-config-bucket/
+    config.txt
+    columns_config.txt
 
-# Helper function to write a string to S3 as a .txt file
-def write_s3_file(content, file_path):
-    s3 = boto3.client("s3")
-    bucket, key = file_path.replace("s3://", "").split("/", 1)
-    s3.put_object(Body=content, Bucket=bucket, Key=key)
+s3://136731789529-fis-raw-data/
+    customer/20240129/raw/parquet/*.parquet
 
-# Parse config files
-config_data = read_s3_file(config_file)
-columns_data = read_s3_file(columns_file)
-columns_config = {line.split("=")[0].strip(): line.split("=")[1].strip() for line in columns_data.split("\n") if "=" in line}
+s3://folder2/
+    parquet/  # Product data
 
-# Read and clean column configurations
-scenario1_src_fields = columns_config["scenario1_src_fields"]
-scenario1_trgt_fields = columns_config["scenario1_trgt_fields"]
-scenario2_src_fields = columns_config["scenario2_src_fields"]
-scenario2_trgt_fields = columns_config["scenario2_trgt_fields"]
+s3://folder3/
+    parquet/  # Target data
 
-# Example source data for customer and product
-customer_path = config_data.split("customer_path=")[1].split("\n")[0].strip()
-product_path = config_data.split("product_path=")[1].split("\n")[0].strip()
-target_path = config_data.split("target_path=")[1].split("\n")[0].strip()
-
-# Read customer and product data
-a_cus = (
-    spark.read.parquet(customer_path)
-    .withColumn("customerUniqueId", regexp_replace(col("customer_key"), "^.*-", ""))
-)
-a_prod = (
-    spark.read.parquet(product_path)
-    .withColumn("customerUniqueId", regexp_replace(col("customer_key"), "^.*-", ""))
-)
-
-# Join data
-prod_qtx = a_cus.join(a_prod, "customerUniqueId", "inner")
-prod_qtx.createOrReplaceTempView("src_fields")
-
-# Read target data
-Qxta_targt = (
-    spark.read.parquet(target_path)
-    .select("customerUniqueId", explode(col("account")).alias("account"))
-    .select("customerUniqueId", "account.*")
-)
-Qxta_targt.createOrReplaceTempView("selected_Qxta_targt")
-
-# Dynamically select fields for Scenario 1
-src_fields1 = spark.sql(f"SELECT {scenario1_src_fields} FROM src_fields").dropDuplicates()
-targ_fields1 = spark.sql(f"SELECT {scenario1_trgt_fields} FROM selected_Qxta_targt").dropDuplicates()
-
-# Dynamically select fields for Scenario 2
-src_fields2 = spark.sql(f"SELECT {scenario2_src_fields} FROM src_fields").dropDuplicates()
-targ_fields2 = spark.sql(f"SELECT {scenario2_trgt_fields} FROM selected_Qxta_targt").dropDuplicates()
-
-# Compare differences
-def find_differences(scenario_name, src_df, trgt_df):
-    src_diff_ids = src_df.exceptAll(trgt_df).select("customerUniqueId").rdd.flatMap(lambda x: x).collect()
-    trgt_diff_ids = trgt_df.exceptAll(src_df).select("customerUniqueId").rdd.flatMap(lambda x: x).collect()
-    summary = [f"Differences {scenario_name}: Differences found {len(src_diff_ids)}"]
-    summary.extend(src_diff_ids)
-    summary.append(f"Differences {scenario_name} (Target): Differences found {len(trgt_diff_ids)}")
-    summary.extend(trgt_diff_ids)
-    return "\n".join(summary)
-
-# Collect summaries for both scenarios
-summary_scenario1 = find_differences("Scenario 1", src_fields1, targ_fields1)
-summary_scenario2 = find_differences("Scenario 2", src_fields2, targ_fields2)
-
-# Write the final summary to S3
-write_s3_file("\n".join([summary_scenario1, summary_scenario2]), output_file)
-
-# Commit job
-job.commit()
+s3://your-output-bucket/
+    output/
+    differences_summary.txt
 
 How It Works
-	1.	Dynamic Columns:
-	•	Columns for src and trgt in both scenarios are fetched from the columns_config.txt file.
-	2.	SQL Queries:
-	•	Dynamically built using the field configurations from columns_config.txt.
-	3.	Differences Output:
-	•	Each scenario produces a comparison summary of customerUniqueId values with counts.
-	4.	Text File Output:
-	•	The final .txt file is written to the output_file path specified in S3.
+	1.	Main Config File (config.txt):
+	•	Provides file paths to customer, product, target, and output locations.
+	2.	Columns Config File (columns_config.txt):
+	•	Defines the exact columns to select for source (src) and target (trgt) datasets for each scenario.
+	3.	Dynamic Queries:
+	•	The Glue Job dynamically reads the columns from columns_config.txt and generates SQL queries for selection.
+	4.	Differences Summary:
+	•	The Glue Job compares the datasets and writes the results (number of differences + customerUniqueIds) to a .txt file in the output_file location.
 
-Example Differences Summary Output
-
-Differences Scenario 1: Differences found 2
-CUS12345
-CUS67890
-Differences Scenario 1 (Target): Differences found 1
-CUS11111
-Differences Scenario 2: Differences found 3
-CUS56789
-CUS34567
-CUS78901
-Differences Scenario 2 (Target): Differences found 1
-CUS24680
-
-Glue Job Parameters
-
-Here’s how you pass the parameters when running the Glue Job:
+Next Steps
+	1.	Upload config.txt and columns_config.txt to an S3 bucket (s3://your-config-bucket/).
+	2.	Update the Glue Job parameters:
 
 --JOB_NAME MyGlueJob
 --config_file s3://your-config-bucket/config.txt
 --columns_file s3://your-config-bucket/columns_config.txt
 --output_file s3://your-output-bucket/differences_summary.txt
 
-Next Steps
-	1.	Save this script as glue_job_dynamic_config.py.
-	2.	Upload config.txt and columns_config.txt to your S3 bucket.
-	3.	Run the Glue Job with the provided parameters.
-	4.	Validate the output .txt file for both scenarios in your S3 bucket.
 
-Let me know if you need further adjustments! 🚀
+	3.	Run the Glue Job and validate the output.
+
+Let me know if further tweaks are needed! 🚀
