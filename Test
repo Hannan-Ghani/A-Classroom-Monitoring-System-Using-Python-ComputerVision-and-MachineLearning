@@ -1,14 +1,125 @@
-# Path to the customer data (input)
-customer_path=s3://my-data-bucket/customer/20240129/raw/parquet/*.parquet
+import sys
+import boto3
+from pyspark.context import SparkContext
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import col, regexp_replace, explode, lit, when
+from awsglue.context import GlueContext
+from awsglue.utils import getResolvedOptions
 
-# Path to the product data (input)
-product_path=s3://my-data-bucket/product/parquet/
+# Parse arguments
+args = getResolvedOptions(sys.argv, ["JOB_NAME", "config_file", "columns_file", "output_file"])
+config_file = args["config_file"]  # Path to the main config file
+columns_file = args["columns_file"]  # Path to the columns config file
+output_file = args["output_file"]  # Path for differences summary output
 
-# Path to the target data (input)
-target_path=s3://my-data-bucket/target/parquet/
+# Initialize Glue and Spark contexts
+sc = SparkContext()
+glueContext = GlueContext(sc)
+spark = glueContext.spark_session
+job = glueContext.create_job(args["JOB_NAME"])
 
-# Path to store intermediate and output data
-output_path=s3://my-output-bucket/output/
+# Helper function to read a file from S3
+def read_s3_file(file_path):
+    s3 = boto3.client("s3")
+    bucket, key = file_path.replace("s3://", "").split("/", 1)
+    return s3.get_object(Bucket=bucket, Key=key)["Body"].read().decode("utf-8")
 
-# Path to store the differences summary text file
-output_file=s3://my-output-bucket/output/differences_summary.txt
+# Helper function to write a string to S3 as a .txt file
+def write_s3_file(content, file_path):
+    s3 = boto3.client("s3")
+    bucket, key = file_path.replace("s3://", "").split("/", 1)
+    s3.put_object(Body=content, Bucket=bucket, Key=key)
+
+# Parse config files
+config_data = read_s3_file(config_file)
+columns_data = read_s3_file(columns_file)
+columns_config = {line.split("=")[0].strip(): line.split("=")[1].strip() for line in columns_data.split("\n") if "=" in line}
+
+# Extract file paths from config
+customer_path = [line for line in config_data.split("\n") if line.startswith("customer_path=")][0].split("=")[1]
+product_path = [line for line in config_data.split("\n") if line.startswith("product_path=")][0].split("=")[1]
+target_path = [line for line in config_data.split("\n") if line.startswith("target_path=")][0].split("=")[1]
+
+# Extract column configurations
+scenario1_src_fields = columns_config["scenario1_src_fields"]
+scenario1_trgt_fields = columns_config["scenario1_trgt_fields"]
+scenario2_src_fields = columns_config["scenario2_src_fields"]
+scenario2_trgt_fields = columns_config["scenario2_trgt_fields"]
+
+# Read customer data with filters
+a_cus = (
+    spark.read.parquet(customer_path)
+    .filter(
+        "NUM_OF_ACCOUNT >= 0 AND "
+        "(SOURCE_COUNTRY <> 'ZA' OR SOURCE_COUNTRY IS NULL) AND "
+        "customer_key IS NOT NULL AND "
+        "customer_key NOT IN ('', '***', 'TTMAMC-**', 'TMEMA-**', 'TMUK1-**', 'MUK2-**', 'Not Available')"
+    )
+    .withColumn("customerUniqueId", regexp_replace(col("customer_key"), "^.*-", ""))
+)
+
+# Read product data with filters
+a_prod = (
+    spark.read.parquet(product_path)
+    .filter(
+        (col("account_key").isNotNull() | col("customer_key").isNotNull()) &
+        ~(
+            (col("screening_system") == "YMUK2") &
+            (
+                (~col("customer_role").isin("CML - COMP PARENT", "PRIMARY")) |
+                col("low_account_type").isin(
+                    "UKCMLPHVI", "UKCMLPV100", "UKCMLPV5K", "UKCMLPV500",
+                    "UKCMLPV10K", "UKCMLPV1K", "UKCMLPVUNK", "UKCMLPBHI",
+                    "UKCMLPB100", "UKCMLPB5K", "UKCMLPB500", "UKCMLPB1K", "UKCMLPBUNK"
+                )
+            )
+        )
+    )
+    .withColumn("customerUniqueId", regexp_replace(col("customer_key"), "^.*-", ""))
+)
+
+# Join customer and product data
+prod_qtx = a_cus.join(a_prod, "customerUniqueId", "inner")
+prod_qtx.createOrReplaceTempView("src_fields")
+
+# Read target data
+Qxta_targt = (
+    spark.read.parquet(target_path)
+    .select("customerUniqueId", explode(col("account")).alias("account"))
+    .select("customerUniqueId", "account.*")
+)
+Qxta_targt.createOrReplaceTempView("selected_Qxta_targt")
+
+# Function to compare fields and summarize differences
+def compare_and_summarize(scenario_name, src_fields_query, trgt_fields_query):
+    src_df = spark.sql(src_fields_query).dropDuplicates()
+    trgt_df = spark.sql(trgt_fields_query).dropDuplicates()
+    src_diff = src_df.exceptAll(trgt_df).select("customerUniqueId").rdd.flatMap(lambda x: x).collect()
+    trgt_diff = trgt_df.exceptAll(src_df).select("customerUniqueId").rdd.flatMap(lambda x: x).collect()
+
+    summary = [f"{scenario_name}: Differences found {len(src_diff)}"]
+    summary.extend(src_diff)
+    summary.append(f"{scenario_name} (Target): Differences found {len(trgt_diff)}")
+    summary.extend(trgt_diff)
+    return "\n".join(summary)
+
+# Compare Scenario 1
+scenario1_summary = compare_and_summarize(
+    "Differences Scenario 1",
+    f"SELECT {scenario1_src_fields} FROM src_fields",
+    f"SELECT {scenario1_trgt_fields} FROM selected_Qxta_targt"
+)
+
+# Compare Scenario 2
+scenario2_summary = compare_and_summarize(
+    "Differences Scenario 2",
+    f"SELECT {scenario2_src_fields} FROM src_fields",
+    f"SELECT {scenario2_trgt_fields} FROM selected_Qxta_targt"
+)
+
+# Write the summaries to S3
+final_summary = f"{scenario1_summary}\n\n{scenario2_summary}"
+write_s3_file(final_summary, output_file)
+
+# Commit Glue job
+job.commit()
