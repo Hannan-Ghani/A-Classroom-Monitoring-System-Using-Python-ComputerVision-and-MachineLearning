@@ -2,7 +2,7 @@ import sys
 import boto3
 from pyspark.context import SparkContext
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import col, regexp_replace, explode
+from pyspark.sql.functions import col, regexp_replace, explode, lit, when, substring
 from awsglue.context import GlueContext
 from awsglue.utils import getResolvedOptions
 
@@ -46,7 +46,7 @@ scenario1_trgt_fields = columns_config["scenario1_trgt_fields"]
 scenario2_src_fields = columns_config["scenario2_src_fields"]
 scenario2_trgt_fields = columns_config["scenario2_trgt_fields"]
 
-# Read customer data with filters
+# Read and filter customer data
 a_cus = (
     spark.read.parquet(customer_path)
     .filter(
@@ -58,7 +58,7 @@ a_cus = (
     .withColumn("customerUniqueId", regexp_replace(col("customer_key"), "^.*-", ""))
 )
 
-# Read product data with filters
+# Read and filter product data
 a_prod = (
     spark.read.parquet(product_path)
     .filter(
@@ -79,22 +79,103 @@ a_prod = (
 )
 
 # Join customer and product data
-prod_qtx = a_cus.join(a_prod, "customerUniqueId", "inner")
-prod_qtx.createOrReplaceTempView("src_fields")
+prod_qtx = a_cus.join(a_prod, "customerUniqueId", "inner").select(a_prod["*"])
+prod_qtx.createOrReplaceTempView("prod_qtx")
+prod_qtx.cache()
 
-# Read target data with filters
+# Process and filter 'src_fields'
+src_fields = spark.sql("""
+    SELECT 
+        customerUniqueId,
+        account_risk_code_desc,
+        name AS accountName,
+        SUBSTRING(account_id, 0, 5) AS accountIdPrefix,
+        account_no AS AccountNumber,
+        account_no AS cleansedAccountNumber,
+        account_key AS accountKey,
+        company_id AS companyId,
+        country_code AS country,
+        currency_code AS currencyCode,
+        CASE WHEN financial_institution = 'N' THEN 'false' ELSE 'true' END AS financialInstitution,
+        CASE WHEN joint_account = 'N' THEN 'false' ELSE 'true' END AS jointAccount,
+        update_tms AS lastUpdateData,
+        line_of_business_desc AS lineOfBusiness,
+        maturity_date AS maturityDate,
+        CASE WHEN non_operating_entity = 'N' THEN 'false' ELSE 'true' END AS nonOperatingEntity,
+        CASE WHEN numbered_account = 'N' THEN 'false' ELSE 'true' END AS numberedAccount,
+        product_id AS productId,
+        region_id AS regionId,
+        risk_code AS riskCode,
+        relman_id AS rmId,
+        relman_name AS rmName,
+        CASE WHEN sensitive_industry = 'N' THEN 'false' ELSE 'true' END AS sensitiveIndustry,
+        sortcode AS sortcode,
+        sortcode AS cleansedSortCode,
+        source_sys_code AS sourceSystem,
+        high_account_type AS highAccountType,
+        high_account_type_desc AS highAccountTypeDescription,
+        low_account_type AS lowAccountType,
+        low_account_type_desc AS lowAccountTypeDescription,
+        externalAccountType,
+        industry_code_desc AS industryCodeDescription
+    FROM prod_qtx
+""")
+src_fields.createOrReplaceTempView("src_fields")
+src_fields.cache()
+
+# Read and filter 'Qxta_targt'
 Qxta_targt = (
     spark.read.parquet(target_path)
     .select("customerUniqueId", explode(col("account")).alias("account"))
     .select("customerUniqueId", "account.*")
-    .filter("accountNumber IS NOT NULL AND cleansedAccountNumber IS NOT NULL")
 )
-Qxta_targt.createOrReplaceTempView("selected_Qxta_targt")
+Qxta_targt.createOrReplaceTempView("Qxta_targt")
+Qxta_targt.cache()
 
-# Function to compare fields and summarize differences
-def compare_and_summarize(scenario_name, src_fields_query, trgt_fields_query):
-    src_df = spark.sql(src_fields_query).dropDuplicates()
-    trgt_df = spark.sql(trgt_fields_query).dropDuplicates()
+selected_Qxta_targt = spark.sql("""
+    SELECT 
+        customerUniqueId, 
+        accountRiskCodeDescription, 
+        accountName, 
+        accountIdPrefix, 
+        accountNumber, 
+        cleansedAccountNumber, 
+        accountKey, 
+        companyId, 
+        country, 
+        currencyCode, 
+        CAST(financialInstitution AS STRING) AS financialInstitution, 
+        CAST(jointAccount AS STRING) AS jointAccount, 
+        lastUpdatedDate, 
+        lineOfBusiness, 
+        lineOfBusinessDescription, 
+        maturityDate, 
+        CAST(nonOperatingEntity AS STRING) AS nonOperatingEntity, 
+        CAST(numberedAccount AS STRING) AS numberedAccount, 
+        productId, 
+        regionId, 
+        riskCode, 
+        rmId, 
+        rmName, 
+        CAST(sensitiveIndustry AS STRING) AS sensitiveIndustry, 
+        sortcode, 
+        cleansedSortCode, 
+        sourceSystem, 
+        highAccountType, 
+        highAccountTypeDescription, 
+        lowAccountType, 
+        lowAccountTypeDescription, 
+        externalAccountType, 
+        industryCodeDescription 
+    FROM Qxta_targt
+""")
+selected_Qxta_targt.createOrReplaceTempView("selected_Qxta_targt")
+selected_Qxta_targt.cache()
+
+# Compare and summarize differences
+def compare_and_summarize(scenario_name, src_query, trgt_query):
+    src_df = spark.sql(src_query).dropDuplicates()
+    trgt_df = spark.sql(trgt_query).dropDuplicates()
     src_diff = src_df.exceptAll(trgt_df).select("customerUniqueId").rdd.flatMap(lambda x: x).collect()
     trgt_diff = trgt_df.exceptAll(src_df).select("customerUniqueId").rdd.flatMap(lambda x: x).collect()
 
@@ -104,21 +185,21 @@ def compare_and_summarize(scenario_name, src_fields_query, trgt_fields_query):
     summary.extend(trgt_diff)
     return "\n".join(summary)
 
-# Compare Scenario 1
+# Scenario 1
 scenario1_summary = compare_and_summarize(
     "Differences Scenario 1",
-    f"SELECT {scenario1_src_fields} FROM src_fields WHERE account_risk_code_desc IS NOT NULL",
-    f"SELECT {scenario1_trgt_fields} FROM selected_Qxta_targt WHERE accountRiskCodeDescription IS NOT NULL"
+    f"SELECT {scenario1_src_fields} FROM src_fields",
+    f"SELECT {scenario1_trgt_fields} FROM selected_Qxta_targt"
 )
 
-# Compare Scenario 2
+# Scenario 2
 scenario2_summary = compare_and_summarize(
     "Differences Scenario 2",
-    f"SELECT {scenario2_src_fields} FROM src_fields WHERE accountKey IS NOT NULL",
-    f"SELECT {scenario2_trgt_fields} FROM selected_Qxta_targt WHERE accountKey IS NOT NULL"
+    f"SELECT {scenario2_src_fields} FROM src_fields",
+    f"SELECT {scenario2_trgt_fields} FROM selected_Qxta_targt"
 )
 
-# Write the summaries to S3
+# Write summary to S3
 final_summary = f"{scenario1_summary}\n\n{scenario2_summary}"
 write_s3_file(final_summary, output_file)
 
