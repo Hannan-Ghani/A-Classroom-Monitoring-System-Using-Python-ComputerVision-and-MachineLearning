@@ -1,106 +1,14 @@
-Below are the detailed configurations for the main config file (config.txt) and the columns config file (columns_config.txt) to work seamlessly with the updated Glue Job script.
+# Path to the customer data (input)
+customer_path=s3://my-data-bucket/customer/20240129/raw/parquet/*.parquet
 
-Main Configuration File (config.txt)
+# Path to the product data (input)
+product_path=s3://my-data-bucket/product/parquet/
 
-The config.txt file contains paths to the input data, target data, and output locations. This file is simple and uses key-value pairs.
+# Path to the target data (input)
+target_path=s3://my-data-bucket/target/parquet/
 
-Example config.txt
+# Path to store intermediate and output data
+output_path=s3://my-output-bucket/output/
 
-# Path to the customer data
-customer_path=s3://136731789529-fis-raw-data/customer/20240129/raw/parquet/*.parquet
-
-# Path to the product data
-product_path=s3://folder2/parquet/
-
-# Path to the target data
-target_path=s3://folder3/parquet/
-
-# Path to the output summary text file
-output_path=s3://your-output-bucket/output/
-
-# Path for differences summary
-output_file=s3://your-output-bucket/differences_summary.txt
-
-Columns Configuration File (columns_config.txt)
-
-The columns_config.txt file contains fields for Scenario 1 and Scenario 2 for both source (src) and target (trgt) datasets. This file is also a key-value pair format.
-
-Example columns_config.txt
-
-# Scenario 1 Source Fields
-scenario1_src_fields=customerUniqueId,account_risk_code_desc,accountName,accountIdPrefix
-
-# Scenario 1 Target Fields
-scenario1_trgt_fields=customerUniqueId,accountRiskCodeDescription as account_risk_code_desc,accountName,accountIdPrefix
-
-# Scenario 2 Source Fields
-scenario2_src_fields=customerUniqueId,null as cleansedAccountNumber,accountNumber,accountKey,companyId
-
-# Scenario 2 Target Fields
-scenario2_trgt_fields=customerUniqueId,cleansedAccountNumber,accountNumber,accountKey,companyId
-
-Explanation of Configurations
-
-Main Config (config.txt)
-	1.	customer_path: Path to the input customer data stored in S3 as Parquet files.
-	2.	product_path: Path to the input product data stored in S3.
-	3.	target_path: Path to the target data containing exploded account data.
-	4.	output_path: Directory path for storing differences and outputs.
-	5.	output_file: Path for the final differences summary .txt file.
-
-Columns Config (columns_config.txt)
-	1.	scenario1_src_fields: Columns to be selected from the src_fields for Scenario 1.
-	•	customerUniqueId: Unique identifier.
-	•	account_risk_code_desc, accountName, accountIdPrefix: Other fields.
-	2.	scenario1_trgt_fields: Columns to be selected from the selected_Qxta_targt for Scenario 1.
-	•	Aliases are handled dynamically, e.g., accountRiskCodeDescription as account_risk_code_desc.
-	3.	scenario2_src_fields: Columns for Scenario 2 source data.
-	•	null as cleansedAccountNumber: This handles null placeholders dynamically.
-	•	Other fields include customerUniqueId, accountNumber, accountKey, and companyId.
-	4.	scenario2_trgt_fields: Columns for Scenario 2 target data.
-	•	Columns directly mapped from selected_Qxta_targt.
-
-Folder Structure in S3
-
-Ensure the following folder structure in your S3 bucket:
-
-s3://your-config-bucket/
-    config.txt
-    columns_config.txt
-
-s3://136731789529-fis-raw-data/
-    customer/20240129/raw/parquet/*.parquet
-
-s3://folder2/
-    parquet/  # Product data
-
-s3://folder3/
-    parquet/  # Target data
-
-s3://your-output-bucket/
-    output/
-    differences_summary.txt
-
-How It Works
-	1.	Main Config File (config.txt):
-	•	Provides file paths to customer, product, target, and output locations.
-	2.	Columns Config File (columns_config.txt):
-	•	Defines the exact columns to select for source (src) and target (trgt) datasets for each scenario.
-	3.	Dynamic Queries:
-	•	The Glue Job dynamically reads the columns from columns_config.txt and generates SQL queries for selection.
-	4.	Differences Summary:
-	•	The Glue Job compares the datasets and writes the results (number of differences + customerUniqueIds) to a .txt file in the output_file location.
-
-Next Steps
-	1.	Upload config.txt and columns_config.txt to an S3 bucket (s3://your-config-bucket/).
-	2.	Update the Glue Job parameters:
-
---JOB_NAME MyGlueJob
---config_file s3://your-config-bucket/config.txt
---columns_file s3://your-config-bucket/columns_config.txt
---output_file s3://your-output-bucket/differences_summary.txt
-
-
-	3.	Run the Glue Job and validate the output.
-
-Let me know if further tweaks are needed! 🚀
+# Path to store the differences summary text file
+output_file=s3://my-output-bucket/output/differences_summary.txt
