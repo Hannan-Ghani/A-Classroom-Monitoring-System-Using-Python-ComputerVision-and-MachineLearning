@@ -1,21 +1,44 @@
-To meet your requirements, the Glue Job can be modified to write the output as a .txt file that includes the number of differences and the customerUniqueId values where differences are found. Here’s the updated Glue Job script:
+To make the Scenario 1 and Scenario 2 fields dynamically configurable through a config.txt file, we will modify the script further. The column names for both scenarios will now come from the configuration file, allowing you to add or change fields without modifying the Glue Job script.
+
+Updated Design
+	1.	columns_config.txt Structure:
+	•	Add sections for fields used in Scenario 1 and Scenario 2.
+	2.	Code Changes:
+	•	Dynamically extract columns for both source and target fields in Scenario 1 and Scenario 2.
+
+Updated columns_config.txt
+
+Here is an example of how your columns_config.txt would look:
+
+# Columns for Scenario 1 Source
+scenario1_src_fields=customerUniqueId,account_risk_code_desc,accountName,accountIdPrefix
+
+# Columns for Scenario 1 Target
+scenario1_trgt_fields=customerUniqueId,accountRiskCodeDescription as account_risk_code_desc,accountName,accountIdPrefix
+
+# Columns for Scenario 2 Source
+scenario2_src_fields=customerUniqueId,null as cleansedAccountNumber,accountNumber,accountKey,companyId
+
+# Columns for Scenario 2 Target
+scenario2_trgt_fields=customerUniqueId,cleansedAccountNumber,accountNumber,accountKey,companyId
 
 Updated Glue Job Script
+
+Here’s the updated Glue Job script that dynamically reads fields for scenarios:
 
 import sys
 import boto3
 from pyspark.context import SparkContext
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import col, regexp_replace, lit, when, explode
+from pyspark.sql.functions import col, regexp_replace, explode
 from awsglue.context import GlueContext
 from awsglue.utils import getResolvedOptions
-from io import StringIO
 
-# Parse arguments passed to the Glue Job
+# Parse arguments
 args = getResolvedOptions(sys.argv, ["JOB_NAME", "config_file", "columns_file", "output_file"])
-config_file = args["config_file"]  # Path to the main config file in S3
-columns_file = args["columns_file"]  # Path to the columns config file in S3
-output_file = args["output_file"]  # Path for the differences summary file in S3
+config_file = args["config_file"]
+columns_file = args["columns_file"]
+output_file = args["output_file"]
 
 # Initialize Glue and Spark contexts
 sc = SparkContext()
@@ -23,7 +46,7 @@ glueContext = GlueContext(sc)
 spark = glueContext.spark_session
 job = glueContext.create_job(args["JOB_NAME"])
 
-# Helper function to read a file from S3
+# Helper function to read files from S3
 def read_s3_file(file_path):
     s3 = boto3.client("s3")
     bucket, key = file_path.replace("s3://", "").split("/", 1)
@@ -35,146 +58,99 @@ def write_s3_file(content, file_path):
     bucket, key = file_path.replace("s3://", "").split("/", 1)
     s3.put_object(Body=content, Bucket=bucket, Key=key)
 
-# Read and parse the main config file
+# Parse config files
 config_data = read_s3_file(config_file)
-config = {line.split("=")[0].strip(): line.split("=")[1].strip() for line in config_data.split("\n") if "=" in line}
-
-# Read and parse the columns config file
 columns_data = read_s3_file(columns_file)
 columns_config = {line.split("=")[0].strip(): line.split("=")[1].strip() for line in columns_data.split("\n") if "=" in line}
 
-# Extract file paths from the main config
-customer_path = config["customer_path"]
-product_path = config["product_path"]
-target_path = config["target_path"]
-output_path = config["output_path"]
+# Read and clean column configurations
+scenario1_src_fields = columns_config["scenario1_src_fields"]
+scenario1_trgt_fields = columns_config["scenario1_trgt_fields"]
+scenario2_src_fields = columns_config["scenario2_src_fields"]
+scenario2_trgt_fields = columns_config["scenario2_trgt_fields"]
 
-# Extract column configurations
-columns_src = columns_config["columns_src"].split(",")  # Columns for src_fields
-columns_trgt = columns_config["columns_trgt"].split(",")  # Columns for targ_fields
+# Example source data for customer and product
+customer_path = config_data.split("customer_path=")[1].split("\n")[0].strip()
+product_path = config_data.split("product_path=")[1].split("\n")[0].strip()
+target_path = config_data.split("target_path=")[1].split("\n")[0].strip()
 
-# Read customer data
+# Read customer and product data
 a_cus = (
     spark.read.parquet(customer_path)
-    .filter(
-        "NUM_OF_ACCOUNT >= 0 AND "
-        "(SOURCE_COUNTRY <> 'ZA' OR SOURCE_COUNTRY IS NULL) AND "
-        "customer_key IS NOT NULL AND "
-        "customer_key NOT IN ('', '***', 'TTMAMC-**', 'TMEMA-**', 'TMUK1-**', 'MUK2-**', 'Not Available')"
-    )
-    .withColumn(
-        "customerUniqueId", 
-        regexp_replace(col("customer_key"), "^.*-", "")  # Clean up 'customer_key'
-    )
+    .withColumn("customerUniqueId", regexp_replace(col("customer_key"), "^.*-", ""))
 )
-
-# Read product data
 a_prod = (
     spark.read.parquet(product_path)
-    .filter(
-        (col("account_key").isNotNull() | col("customer_key").isNotNull()) &
-        ~(
-            (col("screening_system") == "YMUK2") &
-            (
-                (~col("customer_role").isin("CML - COMP PARENT", "PRIMARY")) |
-                col("low_account_type").isin(
-                    "UKCMLPHVI", "UKCMLPV100", "UKCMLPV5K", "UKCMLPV500", 
-                    "UKCMLPV10K", "UKCMLPV1K", "UKCMLPVUNK", "UKCMLPBHI", 
-                    "UKCMLPB100", "UKCMLPB5K", "UKCMLPB500", "UKCMLPB1K", "UKCMLPBUNK"
-                )
-            )
-        )
-    )
-    .withColumn(
-        "customerUniqueId", 
-        regexp_replace(col("customer_key"), "^.*-", "")  # Clean up 'customer_key'
-    )
+    .withColumn("customerUniqueId", regexp_replace(col("customer_key"), "^.*-", ""))
 )
 
-# Join customer and product data
-prod_qtx = (
-    a_cus.join(a_prod, a_cus.customerUniqueId == a_prod.customerUniqueId, how="inner")
-    .select(a_prod["*"])
-)
+# Join data
+prod_qtx = a_cus.join(a_prod, "customerUniqueId", "inner")
+prod_qtx.createOrReplaceTempView("src_fields")
 
-# Read and process the target data
+# Read target data
 Qxta_targt = (
     spark.read.parquet(target_path)
-    .select(
-        "customerUniqueId", 
-        explode(col("account")).alias("account")  # Explode the 'account' array
-    )
-    .select(
-        "customerUniqueId", 
-        "account.*"  # Expand all fields from the exploded 'account' struct
-    )
+    .select("customerUniqueId", explode(col("account")).alias("account"))
+    .select("customerUniqueId", "account.*")
 )
+Qxta_targt.createOrReplaceTempView("selected_Qxta_targt")
 
-# Select required fields for src_fields and targ_fields dynamically
-src_fields = prod_qtx.select(*[col(field) for field in columns_src])
-src_fields.createOrReplaceTempView("src_fields")
-src_fields.cache()
+# Dynamically select fields for Scenario 1
+src_fields1 = spark.sql(f"SELECT {scenario1_src_fields} FROM src_fields").dropDuplicates()
+targ_fields1 = spark.sql(f"SELECT {scenario1_trgt_fields} FROM selected_Qxta_targt").dropDuplicates()
 
-selected_Qxta_targt = Qxta_targt.select(*[col(field) for field in columns_trgt])
-selected_Qxta_targt.createOrReplaceTempView("selected_Qxta_targt")
-selected_Qxta_targt.cache()
+# Dynamically select fields for Scenario 2
+src_fields2 = spark.sql(f"SELECT {scenario2_src_fields} FROM src_fields").dropDuplicates()
+targ_fields2 = spark.sql(f"SELECT {scenario2_trgt_fields} FROM selected_Qxta_targt").dropDuplicates()
 
-# Compare src_fields1 and targ_fields1
-src_fields1 = src_fields.dropDuplicates()
-targ_fields1 = selected_Qxta_targt.dropDuplicates()
+# Compare differences
+def find_differences(scenario_name, src_df, trgt_df):
+    src_diff_ids = src_df.exceptAll(trgt_df).select("customerUniqueId").rdd.flatMap(lambda x: x).collect()
+    trgt_diff_ids = trgt_df.exceptAll(src_df).select("customerUniqueId").rdd.flatMap(lambda x: x).collect()
+    summary = [f"Differences {scenario_name}: Differences found {len(src_diff_ids)}"]
+    summary.extend(src_diff_ids)
+    summary.append(f"Differences {scenario_name} (Target): Differences found {len(trgt_diff_ids)}")
+    summary.extend(trgt_diff_ids)
+    return "\n".join(summary)
 
-# Find differences
-src_diff = src_fields1.exceptAll(targ_fields1)
-targ_diff = targ_fields1.exceptAll(src_fields1)
+# Collect summaries for both scenarios
+summary_scenario1 = find_differences("Scenario 1", src_fields1, targ_fields1)
+summary_scenario2 = find_differences("Scenario 2", src_fields2, targ_fields2)
 
-# Extract customerUniqueIds with differences
-src_diff_ids = src_diff.select("customerUniqueId").rdd.flatMap(lambda x: x).collect()
-targ_diff_ids = targ_diff.select("customerUniqueId").rdd.flatMap(lambda x: x).collect()
+# Write the final summary to S3
+write_s3_file("\n".join([summary_scenario1, summary_scenario2]), output_file)
 
-# Prepare summary content
-summary_content = []
-
-if src_diff_ids:
-    summary_content.append(f"Differences Scenario 1: Differences found {len(src_diff_ids)}")
-    summary_content.extend(src_diff_ids)
-
-if targ_diff_ids:
-    summary_content.append(f"Differences Scenario 1 (Target): Differences found {len(targ_diff_ids)}")
-    summary_content.extend(targ_diff_ids)
-
-# Write summary to S3
-write_s3_file("\n".join(summary_content), output_file)
-
-# Commit Glue job
+# Commit job
 job.commit()
 
 How It Works
-	1.	Write Differences to Text File:
-	•	The differences are written as a .txt file to the specified S3 path using the write_s3_file() function.
-	2.	Content Structure:
-	•	For each scenario, the summary starts with:
+	1.	Dynamic Columns:
+	•	Columns for src and trgt in both scenarios are fetched from the columns_config.txt file.
+	2.	SQL Queries:
+	•	Dynamically built using the field configurations from columns_config.txt.
+	3.	Differences Output:
+	•	Each scenario produces a comparison summary of customerUniqueId values with counts.
+	4.	Text File Output:
+	•	The final .txt file is written to the output_file path specified in S3.
 
-Differences Scenario 1: Differences found 2
-
-
-	•	Followed by the customerUniqueId values where differences are found.
-
-	3.	Dynamic Content:
-	•	The Glue Job dynamically creates and writes the content for each scenario based on the differences identified.
-	4.	Arguments:
-	•	--output_file: Path to the .txt file in S3 where the differences summary will be written.
-
-Example Differences Summary (output_file)
-
-Content of the generated .txt file in S3:
+Example Differences Summary Output
 
 Differences Scenario 1: Differences found 2
 CUS12345
 CUS67890
 Differences Scenario 1 (Target): Differences found 1
-CUS54321
+CUS11111
+Differences Scenario 2: Differences found 3
+CUS56789
+CUS34567
+CUS78901
+Differences Scenario 2 (Target): Differences found 1
+CUS24680
 
-Example Parameters for Glue Job
+Glue Job Parameters
+
+Here’s how you pass the parameters when running the Glue Job:
 
 --JOB_NAME MyGlueJob
 --config_file s3://your-config-bucket/config.txt
@@ -182,9 +158,9 @@ Example Parameters for Glue Job
 --output_file s3://your-output-bucket/differences_summary.txt
 
 Next Steps
-	1.	Upload Config Files:
-	•	Ensure config.txt and columns_config.txt are in S3.
-	2.	Run the Glue Job:
-	•	Execute the Glue Job with the necessary parameters.
-	3.	Validate the Output:
-	•	Check the .txt file in the specified output_file location to verify the summary of differences.
+	1.	Save this script as glue_job_dynamic_config.py.
+	2.	Upload config.txt and columns_config.txt to your S3 bucket.
+	3.	Run the Glue Job with the provided parameters.
+	4.	Validate the output .txt file for both scenarios in your S3 bucket.
+
+Let me know if you need further adjustments! 🚀
