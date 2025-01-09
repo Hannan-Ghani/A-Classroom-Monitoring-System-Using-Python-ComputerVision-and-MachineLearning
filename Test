@@ -1,14 +1,29 @@
-from awsglue.context import GlueContext
-from pyspark.context import SparkContext
+def compare_and_summarize(scenario_name, src_query, trgt_query):
+    # Fetch source and target data
+    src_df = spark.sql(src_query).dropDuplicates()
+    trgt_df = spark.sql(trgt_query).dropDuplicates()
 
-# Initialize SparkContext with configuration
-sc = SparkContext()
-sc._jsc.hadoopConfiguration().set("spark.driver.maxResultSize", "4g")  # Set maxResultSize
-glueContext = GlueContext(sc)
+    # Find differences
+    src_diff_full = src_df.exceptAll(trgt_df).select("customerUniqueId").rdd.flatMap(lambda x: x).collect()
+    trgt_diff_full = trgt_df.exceptAll(src_df).select("customerUniqueId").rdd.flatMap(lambda x: x).collect()
 
-# Initialize Spark session
-spark = glueContext.spark_session
+    # Total counts of differences
+    total_src_diff = len(src_diff_full)
+    total_trgt_diff = len(trgt_diff_full)
 
-# Example: Your processing logic
-df = spark.read.json("s3://your-bucket/your-file.json")
-df.show()
+    # Get top 10 differences
+    src_diff_top_10 = src_diff_full[:10]
+    trgt_diff_top_10 = trgt_diff_full[:10]
+
+    # Summarize differences
+    summary = [
+        f"{scenario_name} (Source): Total differences found: {total_src_diff}. Showing top 10:",
+    ]
+    summary.extend(src_diff_top_10)
+    summary.append(
+        f"{scenario_name} (Target): Total differences found: {total_trgt_diff}. Showing top 10:"
+    )
+    summary.extend(trgt_diff_top_10)
+
+    # Return the summary as a string
+    return "\n".join(summary)
